@@ -1,0 +1,36 @@
+# Xcode
+build/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# Node
+MagicDAW-UI/node_modules/
+MagicDAW-UI/dist/
+MagicDAW-UI/.vite/
+
+# OS
+.DS_Store
+*.swp
+*~
+
+# IDE
+.idea/
+.vscode/
+
+# Generated plugins
+GeneratedPlugins/
+
+# Audio cache
+*.wav.cache
+*.aiff.cache
