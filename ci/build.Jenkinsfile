@@ -12,33 +12,21 @@ pipeline {
             steps {
                 script {
                     env.BUILD_TAG_SHORT = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-                    def dirty = sh(script: 'git status --porcelain | wc -l | tr -d " "', returnStdout: true).trim()
                     echo "Build tag: ${env.BUILD_TAG_SHORT}"
                 }
             }
         }
 
-        stage('Build UI') {
+        stage('Build & Package') {
             steps {
-                sh 'cd MagicDAW-UI && npm install && npm run build'
-            }
-        }
-
-        stage('Build Swift') {
-            steps {
-                sh 'swift build -c release'
-            }
-        }
-
-        stage('Test') {
-            steps {
-                sh 'swift test 2>&1 || echo "No tests yet"'
+                sh 'make dmg'
             }
         }
     }
 
     post {
         success {
+            archiveArtifacts artifacts: 'dist/*.dmg', fingerprint: true
             echo "Magic DAW build ${env.BUILD_TAG_SHORT} succeeded"
         }
         failure {
