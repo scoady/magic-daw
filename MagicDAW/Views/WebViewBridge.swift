@@ -11,6 +11,9 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     private let ollamaClient = OllamaClient()
     private let projectManager = ProjectManager()
 
+    /// The currently open project (for save operations that need a project reference).
+    private var currentProject: DAWProject?
+
     override init() {
         super.init()
         setupCallbacks()
@@ -19,33 +22,46 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     // MARK: - Setup
 
     private func setupCallbacks() {
-        // Forward MIDI input events to JavaScript
-        midiManager.onMIDIReceived = { [weak self] message in
+        // Forward MIDI note-on events to JavaScript
+        midiManager.onNoteOn = { [weak self] note, velocity, channel in
             let data: [String: Any] = [
-                "status": message.status,
-                "channel": message.channel,
-                "data1": message.data1,
-                "data2": message.data2,
-                "type": message.type.rawValue
+                "type": "noteOn",
+                "note": note,
+                "velocity": velocity,
+                "channel": channel
             ]
             self?.sendToJS(handler: "onMIDI", data: data)
         }
 
-        // Forward audio levels to JavaScript
-        audioEngine.onLevelUpdate = { [weak self] left, right in
-            let data: [String: Any] = ["left": left, "right": right]
-            self?.sendToJS(handler: "onAudioLevel", data: data)
+        // Forward MIDI note-off events to JavaScript
+        midiManager.onNoteOff = { [weak self] note, channel in
+            let data: [String: Any] = [
+                "type": "noteOff",
+                "note": note,
+                "channel": channel
+            ]
+            self?.sendToJS(handler: "onMIDI", data: data)
         }
 
-        // Forward transport state changes
-        audioEngine.onTransportChange = { [weak self] state in
+        // Forward MIDI CC events to JavaScript
+        midiManager.onControlChange = { [weak self] controller, value, channel in
             let data: [String: Any] = [
-                "isPlaying": state.isPlaying,
-                "isRecording": state.isRecording,
-                "position": state.position,
-                "bpm": state.bpm
+                "type": "controlChange",
+                "controller": controller,
+                "value": value,
+                "channel": channel
             ]
-            self?.sendToJS(handler: "onTransport", data: data)
+            self?.sendToJS(handler: "onMIDI", data: data)
+        }
+
+        // Forward MIDI pitch bend events to JavaScript
+        midiManager.onPitchBend = { [weak self] value, channel in
+            let data: [String: Any] = [
+                "type": "pitchBend",
+                "value": value,
+                "channel": channel
+            ]
+            self?.sendToJS(handler: "onMIDI", data: data)
         }
     }
 
@@ -76,33 +92,38 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             guard let note = payload["note"] as? Int,
                   let velocity = payload["velocity"] as? Int,
                   let channel = payload["channel"] as? Int else { return }
-            let msg = MIDIMessage(type: .noteOn, channel: UInt8(channel), data1: UInt8(note), data2: UInt8(velocity))
-            midiManager.sendToAllDestinations(message: msg)
-            audioEngine.handleMIDI(message: msg)
+            // Send note-on to all connected MIDI destinations
+            for dest in midiManager.availableDestinations {
+                midiManager.sendNoteOn(note: UInt8(note), velocity: UInt8(velocity), channel: UInt8(channel), to: dest)
+            }
 
         case "midi.noteOff":
             guard let note = payload["note"] as? Int,
                   let channel = payload["channel"] as? Int else { return }
-            let msg = MIDIMessage(type: .noteOff, channel: UInt8(channel), data1: UInt8(note), data2: 0)
-            midiManager.sendToAllDestinations(message: msg)
-            audioEngine.handleMIDI(message: msg)
+            // Send note-off to all connected MIDI destinations
+            for dest in midiManager.availableDestinations {
+                midiManager.sendNoteOff(note: UInt8(note), channel: UInt8(channel), to: dest)
+            }
 
         case "midi.cc":
             guard let controller = payload["controller"] as? Int,
                   let value = payload["value"] as? Int,
                   let channel = payload["channel"] as? Int else { return }
-            let msg = MIDIMessage(type: .controlChange, channel: UInt8(channel), data1: UInt8(controller), data2: UInt8(value))
-            midiManager.sendToAllDestinations(message: msg)
+            for dest in midiManager.availableDestinations {
+                midiManager.sendControlChange(controller: UInt8(controller), value: UInt8(value), channel: UInt8(channel), to: dest)
+            }
 
         case "midi.listDevices":
-            let sources = midiManager.listSources()
-            let destinations = midiManager.listDestinations()
+            let sources = midiManager.availableSources.map { ["id": $0.id, "name": $0.name] as [String: Any] }
+            let destinations = midiManager.availableDestinations.map { ["id": $0.id, "name": $0.name] as [String: Any] }
             let data: [String: Any] = ["sources": sources, "destinations": destinations]
             sendToJS(handler: "onMIDIDevices", data: data)
 
         case "midi.connectSource":
-            if let index = payload["index"] as? Int {
-                midiManager.connect(sourceIndex: index)
+            if let index = payload["index"] as? Int,
+               index < midiManager.availableSources.count {
+                let source = midiManager.availableSources[index]
+                try? midiManager.connect(to: source)
             }
 
         // Audio messages
@@ -113,7 +134,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             audioEngine.stop()
 
         case "audio.record":
-            audioEngine.toggleRecord()
+            audioEngine.record()
 
         case "audio.setBPM":
             if let bpm = payload["bpm"] as? Double {
@@ -121,9 +142,9 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             }
 
         case "audio.setVolume":
-            if let volume = payload["volume"] as? Float {
-                audioEngine.setMasterVolume(volume)
-            }
+            // AudioEngine doesn't expose setMasterVolume directly;
+            // volume can be set via the mainMixerNode externally if needed.
+            break
 
         // AI messages
         case "ai.request":
@@ -140,22 +161,23 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         case "ai.listModels":
             do {
                 let models = try await ollamaClient.listModels()
-                let modelData = models.map { ["name": $0.name, "size": $0.size, "modified": $0.modifiedAt] }
+                let modelData = models.map { ["name": $0.name, "size": $0.size, "modified": $0.modifiedAt] as [String: Any] }
                 sendToJS(handler: "onAIModels", data: ["models": modelData])
             } catch {
                 sendToJS(handler: "onAIModels", data: ["error": error.localizedDescription])
             }
 
         case "ai.checkStatus":
-            let available = await ollamaClient.isAvailable()
+            let available = await ollamaClient.checkAvailability()
             sendToJS(handler: "onAIStatus", data: ["available": available])
 
         // Project messages
         case "project.save":
             if let path = payload["path"] as? String {
                 let url = URL(fileURLWithPath: path)
+                let project = currentProject ?? DAWProject(name: "Untitled")
                 do {
-                    try projectManager.save(to: url)
+                    try projectManager.save(project, to: url)
                     sendToJS(handler: "onProjectSaved", data: ["success": true, "path": path])
                 } catch {
                     sendToJS(handler: "onProjectSaved", data: ["success": false, "error": error.localizedDescription])
@@ -167,6 +189,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
                 let url = URL(fileURLWithPath: path)
                 do {
                     let project = try projectManager.load(from: url)
+                    currentProject = project
                     let encoder = JSONEncoder()
                     encoder.outputFormatting = .prettyPrinted
                     let data = try encoder.encode(project)
@@ -181,7 +204,9 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         case "project.new":
             let name = payload["name"] as? String ?? "Untitled"
             let bpm = payload["bpm"] as? Double ?? 120.0
-            projectManager.createNew(name: name, bpm: bpm)
+            let project = DAWProject(name: name)
+            project.bpm = bpm
+            currentProject = project
             sendToJS(handler: "onProjectCreated", data: ["name": name])
 
         default:

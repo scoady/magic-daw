@@ -106,7 +106,7 @@ enum NoteName: Int, CaseIterable, Codable, Sendable, CustomStringConvertible {
     }
 }
 
-// MARK: - Key Mode
+// MARK: - MusicalKey Mode
 
 /// Major or minor quality of a key.
 enum KeyMode: String, Codable, CaseIterable, Sendable {
@@ -275,10 +275,10 @@ struct Scale: Codable, Sendable, CustomStringConvertible {
     }
 }
 
-// MARK: - Key
+// MARK: - MusicalKey
 
 /// A musical key with detection confidence.
-struct Key: Codable, Sendable, CustomStringConvertible {
+struct MusicalKey: Codable, Sendable, CustomStringConvertible {
     let tonic: NoteName
     let mode: ScaleType
     let confidence: Double  // 0.0 - 1.0
@@ -286,7 +286,7 @@ struct Key: Codable, Sendable, CustomStringConvertible {
     /// Convenience initialiser accepting `KeyMode`.
     init(tonic: NoteName, mode: KeyMode, confidence: Double = 1.0) {
         self.tonic = tonic
-        self.mode = mode == .major ? .major : .naturalMinor
+        self.mode = mode == KeyMode.major ? ScaleType.major : ScaleType.naturalMinor
         self.confidence = confidence
     }
 
@@ -309,33 +309,33 @@ struct Key: Codable, Sendable, CustomStringConvertible {
     }
 
     /// The relative major/minor key (e.g., C major <-> A minor).
-    var relativeKey: Key {
+    var relativeKey: MusicalKey {
         switch mode {
         case .major, .lydian, .mixolydian:
-            return Key(tonic: tonic.transposed(by: -3), mode: .naturalMinor, confidence: confidence)
+            return MusicalKey(tonic: tonic.transposed(by: -3), mode: ScaleType.naturalMinor, confidence: confidence)
         case .naturalMinor, .aeolian, .dorian, .phrygian:
-            return Key(tonic: tonic.transposed(by: 3), mode: .major, confidence: confidence)
+            return MusicalKey(tonic: tonic.transposed(by: 3), mode: ScaleType.major, confidence: confidence)
         default:
-            return Key(tonic: tonic.transposed(by: 3), mode: .major, confidence: confidence)
+            return MusicalKey(tonic: tonic.transposed(by: 3), mode: ScaleType.major, confidence: confidence)
         }
     }
 
     /// The parallel major/minor key (same tonic, different mode).
-    var parallelKey: Key {
+    var parallelKey: MusicalKey {
         switch mode {
-        case .major:
-            return Key(tonic: tonic, mode: .naturalMinor, confidence: confidence)
+        case ScaleType.major:
+            return MusicalKey(tonic: tonic, mode: ScaleType.naturalMinor, confidence: confidence)
         case .naturalMinor:
-            return Key(tonic: tonic, mode: .major, confidence: confidence)
+            return MusicalKey(tonic: tonic, mode: ScaleType.major, confidence: confidence)
         default:
-            return Key(tonic: tonic, mode: mode == .major ? .naturalMinor : .major, confidence: confidence)
+            return MusicalKey(tonic: tonic, mode: mode == ScaleType.major ? ScaleType.naturalMinor : ScaleType.major, confidence: confidence)
         }
     }
 
     /// Whether this key typically uses flat accidentals in notation.
     var prefersFlats: Bool {
         switch mode {
-        case .major:
+        case ScaleType.major:
             return [NoteName.F, .As, .Ds, .Gs, .Cs, .Fs].contains(tonic)
         case .naturalMinor, .aeolian:
             return [NoteName.D, .G, .C, .F, .As, .Ds].contains(tonic)
@@ -355,7 +355,7 @@ struct Key: Codable, Sendable, CustomStringConvertible {
     }
 }
 
-// MARK: - Chord Quality
+// MARK: - MusicChord Quality
 
 /// All supported chord qualities with their interval patterns.
 enum ChordQuality: String, CaseIterable, Codable, Sendable {
@@ -471,10 +471,10 @@ enum ChordQuality: String, CaseIterable, Codable, Sendable {
     }
 }
 
-// MARK: - Chord
+// MARK: - MusicChord
 
 /// A fully specified chord with root, quality, and optional bass note for slash chords.
-struct Chord: Codable, Sendable, Equatable, CustomStringConvertible {
+struct MusicChord: Codable, Sendable, Equatable, CustomStringConvertible {
     let root: NoteName
     let quality: ChordQuality
     let bass: NoteName?  // for slash chords (e.g., G/B)
@@ -522,7 +522,7 @@ struct Chord: Codable, Sendable, Equatable, CustomStringConvertible {
     }
 
     /// Roman numeral analysis relative to a key.
-    func romanNumeral(in key: Key) -> String {
+    func romanNumeral(in key: MusicalKey) -> String {
         let interval = key.tonic.interval(to: root)
         let numerals = ["I", "bII", "II", "bIII", "III", "IV", "#IV", "V", "bVI", "VI", "bVII", "VII"]
         let base = numerals[interval]
@@ -574,10 +574,10 @@ struct Chord: Codable, Sendable, Equatable, CustomStringConvertible {
     }
 }
 
-// MARK: - Note Event
+// MARK: - MIDINoteEvent
 
 /// A timestamped MIDI note event.
-struct NoteEvent: Sendable {
+struct MIDINoteEvent: Sendable {
     let note: MIDINote
     let velocity: Velocity
     let timestamp: TimeInterval
@@ -618,10 +618,10 @@ struct WeightedNote: Sendable {
     }
 }
 
-// MARK: - Voice Ranges
+// MARK: - VocalVoice Ranges
 
 /// SATB voice ranges for part writing and voicing.
-enum Voice: String, CaseIterable, Sendable {
+enum VocalVoice: String, CaseIterable, Sendable {
     case soprano, alto, tenor, bass
 
     /// The comfortable MIDI note range for this voice.
@@ -639,7 +639,7 @@ enum Voice: String, CaseIterable, Sendable {
 
 // MARK: - Voicing Style
 
-/// Chord voicing strategies.
+/// MusicChord voicing strategies.
 enum VoicingStyle: String, CaseIterable, Sendable {
     case close      // All notes within one octave
     case drop2      // Second voice from top dropped an octave

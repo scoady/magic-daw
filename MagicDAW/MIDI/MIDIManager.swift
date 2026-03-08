@@ -180,7 +180,8 @@ class MIDIManager {
             for message in messages {
                 dispatchMessage(message)
             }
-            withUnsafePointer(to: &packet) { ptr in
+            var packetCopy = packet
+            withUnsafePointer(to: &packetCopy) { ptr in
                 packet = MIDIEventPacketNext(ptr).pointee
             }
         }

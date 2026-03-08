@@ -24,7 +24,7 @@ struct ChordAnalyzer: Sendable {
     ///
     /// - Parameter midiNotes: Currently sounding MIDI note numbers.
     /// - Returns: The best matching chord, or nil if fewer than 2 distinct pitch classes.
-    static func analyze(midiNotes: [UInt8]) -> Chord? {
+    static func analyze(midiNotes: [UInt8]) -> MusicChord? {
         return analyze(midiNotes: midiNotes, in: nil)
     }
 
@@ -34,13 +34,13 @@ struct ChordAnalyzer: Sendable {
     ///   - midiNotes: Currently sounding MIDI note numbers.
     ///   - key: If provided, diatonic chords in this key are scored higher.
     /// - Returns: The best matching chord.
-    static func analyze(midiNotes: [UInt8], in key: Key?) -> Chord? {
+    static func analyze(midiNotes: [UInt8], in key: MusicalKey?) -> MusicChord? {
         let ranked = rankedInterpretations(midiNotes: midiNotes, in: key)
         return ranked.first?.chord
     }
 
     /// Analyse chord and provide Roman numeral analysis in context of a key.
-    static func analyzeInKey(midiNotes: [UInt8], key: Key) -> (chord: Chord, romanNumeral: String)? {
+    static func analyzeInKey(midiNotes: [UInt8], key: MusicalKey) -> (chord: MusicChord, romanNumeral: String)? {
         guard let chord = analyze(midiNotes: midiNotes, in: key) else { return nil }
         return (chord, chord.romanNumeral(in: key))
     }
@@ -51,15 +51,15 @@ struct ChordAnalyzer: Sendable {
     ///   - midiNotes: Currently sounding MIDI note numbers.
     ///   - maxResults: Maximum number of results to return.
     /// - Returns: Array of chords ordered from most to least likely.
-    static func allInterpretations(midiNotes: [UInt8], maxResults: Int = 5) -> [Chord] {
+    static func allInterpretations(midiNotes: [UInt8], maxResults: Int = 5) -> [MusicChord] {
         return allInterpretations(midiNotes: midiNotes, in: nil, maxResults: maxResults)
     }
 
     /// All interpretations with optional key context.
-    static func allInterpretations(midiNotes: [UInt8], in key: Key?, maxResults: Int = 5) -> [Chord] {
+    static func allInterpretations(midiNotes: [UInt8], in key: MusicalKey?, maxResults: Int = 5) -> [MusicChord] {
         let ranked = rankedInterpretations(midiNotes: midiNotes, in: key)
         var seen = Set<String>()
-        var results: [Chord] = []
+        var results: [MusicChord] = []
         for match in ranked {
             let name = match.chord.displayName
             if seen.insert(name).inserted {
@@ -74,12 +74,12 @@ struct ChordAnalyzer: Sendable {
 
     /// A scored chord interpretation.
     struct ScoredChord {
-        let chord: Chord
+        let chord: MusicChord
         let score: Double
     }
 
     /// Return all interpretations with full scoring, sorted descending.
-    static func rankedInterpretations(midiNotes: [UInt8], in key: Key? = nil) -> [ScoredChord] {
+    static func rankedInterpretations(midiNotes: [UInt8], in key: MusicalKey? = nil) -> [ScoredChord] {
         let sorted = midiNotes.sorted()
         guard let lowestNote = sorted.first else { return [] }
 
@@ -115,7 +115,7 @@ struct ChordAnalyzer: Sendable {
                     } else {
                         bass = nil
                     }
-                    let chord = Chord(root: root, quality: template.quality, bass: bass)
+                    let chord = MusicChord(root: root, quality: template.quality, bass: bass)
                     matches.append(ScoredChord(chord: chord, score: score))
                 }
             }
@@ -137,7 +137,7 @@ struct ChordAnalyzer: Sendable {
         let commonality: Double
     }
 
-    /// Chord templates ordered for matching, covering all ChordQuality cases.
+    /// MusicChord templates ordered for matching, covering all ChordQuality cases.
     private static let chordTemplates: [ChordTemplate] = {
         var templates: [ChordTemplate] = []
 
@@ -267,7 +267,7 @@ struct ChordAnalyzer: Sendable {
         rootPC: Int,
         lowestPC: Int,
         rootPresent: Bool,
-        key: Key?
+        key: MusicalKey?
     ) -> Double {
 
         // All required intervals must be present
@@ -334,13 +334,13 @@ struct ChordAnalyzer: Sendable {
 
 extension ChordAnalyzer {
     /// Analyse note events (extracts MIDI note numbers and delegates).
-    static func analyze(noteEvents: [NoteEvent]) -> Chord? {
+    static func analyze(noteEvents: [MIDINoteEvent]) -> MusicChord? {
         let midiNotes = noteEvents.map { $0.note }
         return analyze(midiNotes: midiNotes)
     }
 
-    /// Analyse a `Chord` to verify/re-identify it (useful after transposition).
-    static func identify(noteNames: [NoteName]) -> Chord? {
+    /// Analyse a `MusicChord` to verify/re-identify it (useful after transposition).
+    static func identify(noteNames: [NoteName]) -> MusicChord? {
         let midiNotes = noteNames.map { $0.toMIDI(octave: 4) }
         return analyze(midiNotes: midiNotes)
     }

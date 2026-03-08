@@ -1,8 +1,8 @@
 import Foundation
 
-// MARK: - Key
+// MARK: - ProjectKey
 
-enum Key: String, Codable, CaseIterable {
+enum ProjectKey: String, Codable, CaseIterable {
     case c = "C"
     case cSharp = "C#"
     case d = "D"
@@ -64,8 +64,8 @@ class DAWProject: Codable {
     var name: String
     var bpm: Double
     var timeSignature: TimeSignature
-    var key: Key?
-    var keyScale: Key.Scale?
+    var key: ProjectKey?
+    var keyScale: ProjectKey.Scale?
     var tracks: [Track]
     var markers: [Marker]
     var createdAt: Date
@@ -125,8 +125,8 @@ class DAWProject: Codable {
         name = try container.decode(String.self, forKey: .name)
         bpm = try container.decode(Double.self, forKey: .bpm)
         timeSignature = try container.decode(TimeSignature.self, forKey: .timeSignature)
-        key = try container.decodeIfPresent(Key.self, forKey: .key)
-        keyScale = try container.decodeIfPresent(Key.Scale.self, forKey: .keyScale)
+        key = try container.decodeIfPresent(ProjectKey.self, forKey: .key)
+        keyScale = try container.decodeIfPresent(ProjectKey.Scale.self, forKey: .keyScale)
         tracks = try container.decode([Track].self, forKey: .tracks)
         markers = try container.decode([Marker].self, forKey: .markers)
         createdAt = try container.decode(Date.self, forKey: .createdAt)

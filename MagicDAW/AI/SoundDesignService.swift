@@ -41,11 +41,11 @@ struct SampleInfo: Codable, Sendable {
 }
 
 struct SampleMapResult: Codable, Sendable {
-    let zones: [SampleZone]
+    let zones: [AISampleZone]
     let explanation: String
 }
 
-struct SampleZone: Codable, Sendable {
+struct AISampleZone: Codable, Sendable {
     let sampleFile: String
     let rootNote: UInt8
     let lowNote: UInt8
@@ -204,7 +204,7 @@ actor SoundDesignService {
     /// Ensure sample zones cover valid MIDI ranges without overlaps.
     private func validateSampleMap(_ map: SampleMapResult, sampleCount: Int) -> SampleMapResult {
         let validatedZones = map.zones.map { zone in
-            SampleZone(
+            AISampleZone(
                 sampleFile: zone.sampleFile,
                 rootNote: clampMIDI(zone.rootNote),
                 lowNote: clampMIDI(zone.lowNote),
@@ -426,13 +426,13 @@ actor SoundDesignService {
         let startNote: UInt8 = 24    // C1
         let rangePerSample = max(1, Int(totalRange) / sorted.count)
 
-        var zones: [SampleZone] = []
+        var zones: [AISampleZone] = []
         for (i, sample) in sorted.enumerated() {
             let low = UInt8(clamping: Int(startNote) + i * rangePerSample)
             let high = UInt8(clamping: Int(low) + rangePerSample - 1)
             let root = UInt8(clamping: (Int(low) + Int(high)) / 2)
 
-            zones.append(SampleZone(
+            zones.append(AISampleZone(
                 sampleFile: sample.filename,
                 rootNote: root,
                 lowNote: low,

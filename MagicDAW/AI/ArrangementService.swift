@@ -42,8 +42,8 @@ actor ArrangementService {
     /// Suggest a full arrangement from a chord progression.
     /// Uses the reasoning model for structural analysis.
     func suggestArrangement(
-        progression: [Chord],
-        key: Key,
+        progression: [MusicChord],
+        key: MusicalKey,
         bpm: Double,
         genre: String,
         bars: Int
@@ -63,8 +63,8 @@ actor ArrangementService {
 
     /// Suggest an arrangement with algorithmic fallback.
     func suggestArrangementWithFallback(
-        progression: [Chord],
-        key: Key,
+        progression: [MusicChord],
+        key: MusicalKey,
         bpm: Double,
         genre: String,
         bars: Int
@@ -91,10 +91,10 @@ actor ArrangementService {
 
     /// Reharmonize a chord progression in a given style.
     func reharmonize(
-        original: [Chord],
-        key: Key,
+        original: [MusicChord],
+        key: MusicalKey,
         style: String
-    ) async throws -> [Chord] {
+    ) async throws -> [MusicChord] {
         let result = try await router.route(.reharmonization(
             progression: original,
             key: key,
@@ -112,10 +112,10 @@ actor ArrangementService {
 
     /// Reharmonize with fallback that returns the original progression.
     func reharmonizeWithFallback(
-        original: [Chord],
-        key: Key,
+        original: [MusicChord],
+        key: MusicalKey,
         style: String
-    ) async -> [Chord] {
+    ) async -> [MusicChord] {
         do {
             let result = try await reharmonize(original: original, key: key, style: style)
             return result.isEmpty ? original : result
@@ -163,7 +163,7 @@ actor ArrangementService {
         guard !validSections.isEmpty else {
             return algorithmicArrangement(
                 progression: [],
-                key: Key(tonic: .C, mode: .major, confidence: 1.0),
+                key: MusicalKey(tonic: .C, mode: ScaleType.major, confidence: 1.0),
                 genre: "pop",
                 bars: maxBars
             )
@@ -180,8 +180,8 @@ actor ArrangementService {
     // MARK: - Algorithmic Fallbacks
 
     private func algorithmicArrangement(
-        progression: [Chord],
-        key: Key,
+        progression: [MusicChord],
+        key: MusicalKey,
         genre: String,
         bars: Int
     ) -> ArrangementResult {
@@ -280,10 +280,10 @@ actor ArrangementService {
 
     /// Simple algorithmic reharmonization.
     private func algorithmicReharmonize(
-        original: [Chord],
-        key: Key,
+        original: [MusicChord],
+        key: MusicalKey,
         style: String
-    ) -> [Chord] {
+    ) -> [MusicChord] {
         let s = style.lowercased()
 
         if s.contains("jazz") {
@@ -296,7 +296,7 @@ actor ArrangementService {
                 case .diminished: newQuality = .halfDiminished7
                 default:          newQuality = chord.quality
                 }
-                return Chord(root: chord.root, quality: newQuality, bass: nil)
+                return MusicChord(root: chord.root, quality: newQuality, bass: nil)
             }
         } else if s.contains("simple") || s.contains("pop") {
             // Simplify to triads
@@ -308,13 +308,13 @@ actor ArrangementService {
                 case .halfDiminished7, .diminished7:            newQuality = .diminished
                 default:                                        newQuality = chord.quality
                 }
-                return Chord(root: chord.root, quality: newQuality, bass: nil)
+                return MusicChord(root: chord.root, quality: newQuality, bass: nil)
             }
         } else if s.contains("modal") {
             // Borrow from parallel minor/major
             return original.map { chord in
                 if chord.quality == .major && Bool.random() {
-                    return Chord(root: chord.root, quality: .minor, bass: nil)
+                    return MusicChord(root: chord.root, quality: .minor, bass: nil)
                 }
                 return chord
             }
@@ -323,9 +323,9 @@ actor ArrangementService {
         return original
     }
 
-    // MARK: - Chord Parsing
+    // MARK: - MusicChord Parsing
 
-    private func parseChordName(_ name: String) -> Chord? {
+    private func parseChordName(_ name: String) -> MusicChord? {
         let rootCandidates: [(String, NoteName)] = [
             ("C#", .Cs), ("D#", .Ds), ("F#", .Fs), ("G#", .Gs), ("A#", .As),
             ("Db", .Cs), ("Eb", .Ds), ("Gb", .Fs), ("Ab", .Gs), ("Bb", .As),
@@ -351,7 +351,7 @@ actor ArrangementService {
                 }
 
                 let quality = parseQuality(qualitySuffix)
-                return Chord(root: note, quality: quality, bass: bass)
+                return MusicChord(root: note, quality: quality, bass: bass)
             }
         }
         return nil

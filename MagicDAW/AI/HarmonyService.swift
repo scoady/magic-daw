@@ -1,15 +1,15 @@
 import Foundation
 
-// MARK: - Harmony Engine (Algorithmic Fallback)
+// MARK: - AI Harmony Fallback (Algorithmic)
 
 /// Pure algorithmic harmony engine. Used when Ollama is unavailable or too slow.
 /// Implements common-practice and jazz harmony rules without AI.
-struct HarmonyEngine: Sendable {
+struct AIHarmonyFallback: Sendable {
 
     /// Suggest harmonies based on current notes and key using music theory rules.
     func suggestHarmony(
         currentNotes: [UInt8],
-        key: Key,
+        key: MusicalKey,
         style: HarmonyStyle
     ) -> [HarmonySuggestion] {
         let scale = key.scale
@@ -31,7 +31,7 @@ struct HarmonyEngine: Sendable {
             let fifthInterval = root.interval(to: fifth)
             let quality = chordQuality(thirdInterval: thirdInterval, fifthInterval: fifthInterval)
 
-            let chord = Chord(root: root, quality: quality, bass: nil)
+            let chord = MusicChord(root: root, quality: quality, bass: nil)
 
             // Score based on how well it fits with current notes
             let chordPitches = Set(quality.intervals.map { root.transposed(by: $0) })
@@ -58,8 +58,8 @@ struct HarmonyEngine: Sendable {
 
     /// Suggest the next chord in a progression based on common voice leading.
     func suggestNextChord(
-        currentChord: Chord,
-        key: Key
+        currentChord: MusicChord,
+        key: MusicalKey
     ) -> [ChordSuggestion] {
         let scaleNotes = key.scale.pitchClasses
         let currentDegree = key.tonic.interval(to: currentChord.root)
@@ -82,7 +82,7 @@ struct HarmonyEngine: Sendable {
             let rootNote = key.tonic.transposed(by: interval)
             guard let scaleIndex = scaleNotes.firstIndex(of: rootNote) else {
                 // Out of scale, use major triad
-                let chord = Chord(root: rootNote, quality: .major, bass: nil)
+                let chord = MusicChord(root: rootNote, quality: .major, bass: nil)
                 return ChordSuggestion(
                     chord: chord,
                     confidence: confidence * 0.8,
@@ -98,7 +98,7 @@ struct HarmonyEngine: Sendable {
             let fifthInterval = rootNote.interval(to: scaleNotes[fifthIndex])
             let quality = chordQuality(thirdInterval: thirdInterval, fifthInterval: fifthInterval)
 
-            let chord = Chord(root: rootNote, quality: quality, bass: nil)
+            let chord = MusicChord(root: rootNote, quality: quality, bass: nil)
             return ChordSuggestion(
                 chord: chord,
                 confidence: confidence,
@@ -110,19 +110,19 @@ struct HarmonyEngine: Sendable {
 
     /// Simple countermelody using contrary motion.
     func generateCountermelody(
-        melody: [NoteEvent],
-        key: Key,
+        melody: [AINote],
+        key: MusicalKey,
         bars: Int,
-        voice: Voice
-    ) -> [NoteEvent] {
+        voice: AIVoice
+    ) -> [AINote] {
         guard !melody.isEmpty else { return [] }
 
         let scaleIntervals = key.mode.intervals
         let range = voice.midiRange
-        var counter: [NoteEvent] = []
+        var counter: [AINote] = []
 
         // Pivot around the midpoint of the melody range
-        let pitches = melody.map(\.pitch)
+        let pitches: [UInt8] = melody.map(\.pitch)
         let midpoint = Int(pitches.reduce(0) { $0 + Int($1) }) / pitches.count
 
         for note in melody {
@@ -136,7 +136,7 @@ struct HarmonyEngine: Sendable {
             let offsetBeat = note.startBeat + 0.5
             let duration = max(0.25, note.duration - 0.25)
 
-            counter.append(NoteEvent(
+            counter.append(AINote(
                 pitch: clamped,
                 velocity: UInt8(clamping: max(60, Int(note.velocity) - 15)),
                 startBeat: offsetBeat,
@@ -161,7 +161,7 @@ struct HarmonyEngine: Sendable {
         }
     }
 
-    private func snapToScale(midi: Int, key: Key, scaleIntervals: [Int]) -> Int {
+    private func snapToScale(midi: Int, key: MusicalKey, scaleIntervals: [Int]) -> Int {
         let pc = ((midi % 12) - key.tonic.rawValue + 12) % 12
         let octave = midi / 12
 
@@ -184,14 +184,14 @@ struct HarmonyEngine: Sendable {
 
 struct HarmonySuggestion: Sendable {
     let notes: [UInt8]
-    let chord: Chord
+    let chord: MusicChord
     let confidence: Double
     let explanation: String
     let source: SuggestionSource
 }
 
 struct ChordSuggestion: Sendable {
-    let chord: Chord
+    let chord: MusicChord
     let confidence: Double
     let explanation: String
     let source: SuggestionSource
@@ -209,12 +209,12 @@ enum SuggestionSource: Sendable {
 /// if the server is unavailable or response is too slow.
 actor HarmonyService {
     let router: AIRouter
-    let harmonyEngine: HarmonyEngine
+    let harmonyEngine: AIHarmonyFallback
 
     /// Maximum time to wait for AI before falling back to algorithmic, in seconds.
     private let aiTimeout: TimeInterval = 3.0
 
-    init(router: AIRouter, harmonyEngine: HarmonyEngine = HarmonyEngine()) {
+    init(router: AIRouter, harmonyEngine: AIHarmonyFallback = AIHarmonyFallback()) {
         self.router = router
         self.harmonyEngine = harmonyEngine
     }
@@ -225,8 +225,8 @@ actor HarmonyService {
     /// Tries AI first with a timeout, falls back to algorithmic engine.
     func suggestHarmony(
         currentNotes: [UInt8],
-        key: Key,
-        recentChords: [Chord],
+        key: MusicalKey,
+        recentChords: [MusicChord],
         style: HarmonyStyle = .auto
     ) async -> [HarmonySuggestion] {
         // Try AI with timeout
@@ -262,12 +262,12 @@ actor HarmonyService {
         )
     }
 
-    // MARK: - Next Chord Suggestions
+    // MARK: - Next MusicChord Suggestions
 
     /// Suggest the next chord in a progression.
     func suggestNextChord(
-        currentChord: Chord,
-        key: Key,
+        currentChord: MusicChord,
+        key: MusicalKey,
         style: String?
     ) async -> [ChordSuggestion] {
         // Try AI
@@ -302,11 +302,11 @@ actor HarmonyService {
 
     /// Generate a countermelody for the given melody.
     func generateCountermelody(
-        melody: [NoteEvent],
-        key: Key,
+        melody: [AINote],
+        key: MusicalKey,
         bars: Int,
-        voice: Voice
-    ) async -> [NoteEvent] {
+        voice: AIVoice
+    ) async -> [AINote] {
         // Try AI (uses reasoning model, so allow longer timeout)
         do {
             let result = try await withTimeout(seconds: 10.0) {
@@ -319,7 +319,7 @@ actor HarmonyService {
                     let clamped = UInt8(clamping: max(Int(voice.midiRange.lowerBound),
                                                        min(Int(voice.midiRange.upperBound),
                                                            Int(event.pitch))))
-                    return NoteEvent(
+                    return AINote(
                         pitch: clamped,
                         velocity: event.velocity,
                         startBeat: event.startBeat,
@@ -341,8 +341,8 @@ actor HarmonyService {
 
     // MARK: - Helpers
 
-    /// Parse a chord name string into a Chord struct.
-    private func parseChordName(_ name: String, fallbackNotes: [UInt8]) -> Chord {
+    /// Parse a chord name string into a MusicChord struct.
+    private func parseChordName(_ name: String, fallbackNotes: [UInt8]) -> MusicChord {
         let rootCandidates: [(String, NoteName)] = [
             ("C#", .Cs), ("D#", .Ds), ("F#", .Fs), ("G#", .Gs), ("A#", .As),
             ("Db", .Cs), ("Eb", .Ds), ("Gb", .Fs), ("Ab", .Gs), ("Bb", .As),
@@ -353,16 +353,16 @@ actor HarmonyService {
             if name.hasPrefix(prefix) {
                 let suffix = String(name.dropFirst(prefix.count))
                 let quality = parseQuality(suffix)
-                return Chord(root: note, quality: quality, bass: nil)
+                return MusicChord(root: note, quality: quality, bass: nil)
             }
         }
 
         // If parsing fails, infer from MIDI notes
         if let firstNote = fallbackNotes.first {
-            return Chord(root: NoteName.from(midiNote: firstNote), quality: .major, bass: nil)
+            return MusicChord(root: NoteName.from(midiNote: firstNote), quality: .major, bass: nil)
         }
 
-        return Chord(root: .C, quality: .major, bass: nil)
+        return MusicChord(root: .C, quality: .major, bass: nil)
     }
 
     private func parseQuality(_ suffix: String) -> ChordQuality {

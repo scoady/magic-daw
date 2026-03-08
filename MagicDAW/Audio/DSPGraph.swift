@@ -25,8 +25,9 @@ class DSPGraph {
 
             // Gather inputs from connections feeding into this node
             for conn in connections where conn.toNode == nodeID {
-                if let sourceNode = nodes[conn.fromNode] {
+                if var sourceNode = nodes[conn.fromNode] {
                     let sourceOutput = sourceNode.process(frameCount: frameCount, sampleRate: sampleRate)
+                    nodes[conn.fromNode] = sourceNode
                     node.inputs[conn.toPort] = sourceOutput
                 }
             }

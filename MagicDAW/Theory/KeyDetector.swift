@@ -15,7 +15,7 @@ import Foundation
 /// For real-time streaming, use `RealtimeKeyDetector`.
 struct KeyDetector: Sendable {
 
-    // MARK: - Krumhansl-Kessler Key Profiles
+    // MARK: - Krumhansl-Kessler MusicalKey Profiles
 
     /// Empirical pitch-class ratings for major keys (Krumhansl & Kessler, 1990).
     /// Index 0 = tonic, index 1 = minor second, ... index 11 = major seventh.
@@ -56,9 +56,9 @@ struct KeyDetector: Sendable {
     ///
     /// - Parameter notes: Pitch classes with associated weights (duration * velocity).
     /// - Returns: The most likely key with a confidence score.
-    static func detectKey(from notes: [WeightedNote]) -> Key {
+    static func detectKey(from notes: [WeightedNote]) -> MusicalKey {
         guard !notes.isEmpty else {
-            return Key(tonic: .C, mode: .major, confidence: 0.0)
+            return MusicalKey(tonic: .C, mode: ScaleType.major, confidence: 0.0)
         }
 
         // Build pitch-class distribution (12 bins)
@@ -71,35 +71,35 @@ struct KeyDetector: Sendable {
     }
 
     /// Detect key from a raw 12-bin pitch-class distribution.
-    static func detectKey(fromDistribution distribution: [Double]) -> Key {
+    static func detectKey(fromDistribution distribution: [Double]) -> MusicalKey {
         precondition(distribution.count == 12, "Distribution must have exactly 12 bins.")
 
         let total = distribution.reduce(0.0, +)
         guard total > 0 else {
-            return Key(tonic: .C, mode: .major, confidence: 0.0)
+            return MusicalKey(tonic: .C, mode: ScaleType.major, confidence: 0.0)
         }
 
         // Normalise distribution
         let normalised = distribution.map { $0 / total }
 
         // Correlate with all 24 possible keys (12 major + 12 minor)
-        var results: [(key: Key, correlation: Double)] = []
+        var results: [(key: MusicalKey, correlation: Double)] = []
         results.reserveCapacity(24)
 
         for root in NoteName.allCases {
             let rotated = rotateDistribution(normalised, by: root.rawValue)
 
             let majorCorr = pearsonCorrelation(rotated, majorProfile)
-            results.append((Key(tonic: root, mode: .major, confidence: majorCorr), majorCorr))
+            results.append((MusicalKey(tonic: root, mode: ScaleType.major, confidence: majorCorr), majorCorr))
 
             let minorCorr = pearsonCorrelation(rotated, minorProfile)
-            results.append((Key(tonic: root, mode: .naturalMinor, confidence: minorCorr), minorCorr))
+            results.append((MusicalKey(tonic: root, mode: .naturalMinor, confidence: minorCorr), minorCorr))
         }
 
         results.sort { $0.correlation > $1.correlation }
 
         guard let best = results.first else {
-            return Key(tonic: .C, mode: .major, confidence: 0.0)
+            return MusicalKey(tonic: .C, mode: ScaleType.major, confidence: 0.0)
         }
 
         // Confidence: normalised gap between 1st and 2nd place.
@@ -112,17 +112,17 @@ struct KeyDetector: Sendable {
             confidence = min(1.0, max(0.0, best.correlation))
         }
 
-        return Key(tonic: best.key.tonic, mode: best.key.mode, confidence: confidence)
+        return MusicalKey(tonic: best.key.tonic, mode: best.key.mode, confidence: confidence)
     }
 
     /// Detect key from raw MIDI note numbers (all weighted equally).
-    static func detectKey(fromMIDINotes notes: [UInt8]) -> Key {
+    static func detectKey(fromMIDINotes notes: [UInt8]) -> MusicalKey {
         let weighted = notes.map { WeightedNote(midiNote: $0) }
         return detectKey(from: weighted)
     }
 
     /// Detect key from MIDI notes weighted by duration and velocity.
-    static func detectKey(fromNoteEvents events: [NoteEvent]) -> Key {
+    static func detectKey(fromNoteEvents events: [MIDINoteEvent]) -> MusicalKey {
         let weighted = events.map { event -> WeightedNote in
             let duration = event.duration ?? 0.25
             let weight = duration * (Double(event.velocity) / 127.0)
@@ -132,7 +132,7 @@ struct KeyDetector: Sendable {
     }
 
     /// Return all 24 key correlations, sorted descending by correlation.
-    static func allCorrelations(from notes: [WeightedNote]) -> [(key: Key, correlation: Double)] {
+    static func allCorrelations(from notes: [WeightedNote]) -> [(key: MusicalKey, correlation: Double)] {
         guard !notes.isEmpty else { return [] }
 
         var distribution = [Double](repeating: 0.0, count: 12)
@@ -143,15 +143,15 @@ struct KeyDetector: Sendable {
         guard total > 0 else { return [] }
         let normalised = distribution.map { $0 / total }
 
-        var results: [(key: Key, correlation: Double)] = []
+        var results: [(key: MusicalKey, correlation: Double)] = []
         results.reserveCapacity(24)
 
         for root in NoteName.allCases {
             let rotated = rotateDistribution(normalised, by: root.rawValue)
             let majorCorr = pearsonCorrelation(rotated, majorProfile)
-            results.append((Key(tonic: root, mode: .major, confidence: majorCorr), majorCorr))
+            results.append((MusicalKey(tonic: root, mode: ScaleType.major, confidence: majorCorr), majorCorr))
             let minorCorr = pearsonCorrelation(rotated, minorProfile)
-            results.append((Key(tonic: root, mode: .naturalMinor, confidence: minorCorr), minorCorr))
+            results.append((MusicalKey(tonic: root, mode: .naturalMinor, confidence: minorCorr), minorCorr))
         }
 
         return results.sorted { $0.correlation > $1.correlation }
@@ -220,10 +220,10 @@ final class RealtimeKeyDetector: @unchecked Sendable {
     private let lock = NSLock()
 
     /// The most recently detected key, or nil if insufficient data.
-    private(set) var currentKey: Key?
+    private(set) var currentKey: MusicalKey?
 
     /// All 24 correlations from the most recent analysis, sorted descending.
-    private(set) var allCorrelations: [(key: Key, correlation: Double)] = []
+    private(set) var allCorrelations: [(key: MusicalKey, correlation: Double)] = []
 
     // MARK: - Init
 
@@ -256,15 +256,15 @@ final class RealtimeKeyDetector: @unchecked Sendable {
         pruneAndRecalculate()
     }
 
-    /// Process a `NoteEvent` struct.
-    func update(noteEvent: NoteEvent) {
+    /// Process a `MIDINoteEvent` struct.
+    func update(noteEvent: MIDINoteEvent) {
         update(note: noteEvent.note, velocity: noteEvent.velocity,
                timestamp: noteEvent.timestamp, duration: noteEvent.duration ?? 0.25)
     }
 
     /// Add a note by MIDI number with a default weight (for simple use cases).
     @discardableResult
-    func addNote(midiNote: UInt8, weight: Double = 1.0) -> Key {
+    func addNote(midiNote: UInt8, weight: Double = 1.0) -> MusicalKey {
         lock.lock()
         defer { lock.unlock() }
 
@@ -275,7 +275,7 @@ final class RealtimeKeyDetector: @unchecked Sendable {
         latestTimestamp = ts
 
         pruneAndRecalculate()
-        return currentKey ?? Key(tonic: .C, mode: .major, confidence: 0.0)
+        return currentKey ?? MusicalKey(tonic: .C, mode: ScaleType.major, confidence: 0.0)
     }
 
     /// Analyse a batch of weighted notes (useful for analysing an existing clip).
@@ -338,7 +338,7 @@ final class RealtimeKeyDetector: @unchecked Sendable {
         // Normalise
         let normalised = distribution.map { $0 / totalWeight }
 
-        var results: [(key: Key, correlation: Double)] = []
+        var results: [(key: MusicalKey, correlation: Double)] = []
         results.reserveCapacity(24)
 
         for tonic in 0..<12 {
@@ -346,8 +346,8 @@ final class RealtimeKeyDetector: @unchecked Sendable {
             let majorCorr = KeyDetector.pearsonCorrelation(rotated, KeyDetector.majorProfile)
             let minorCorr = KeyDetector.pearsonCorrelation(rotated, KeyDetector.minorProfile)
             let noteName = NoteName(rawValue: tonic)!
-            results.append((Key(tonic: noteName, mode: .major), majorCorr))
-            results.append((Key(tonic: noteName, mode: .naturalMinor), minorCorr))
+            results.append((MusicalKey(tonic: noteName, mode: ScaleType.major), majorCorr))
+            results.append((MusicalKey(tonic: noteName, mode: .naturalMinor), minorCorr))
         }
 
         results.sort { $0.correlation > $1.correlation }
@@ -364,6 +364,6 @@ final class RealtimeKeyDetector: @unchecked Sendable {
             confidence = 0
         }
 
-        currentKey = Key(tonic: best.key.tonic, mode: best.key.mode, confidence: confidence)
+        currentKey = MusicalKey(tonic: best.key.tonic, mode: best.key.mode, confidence: confidence)
     }
 }

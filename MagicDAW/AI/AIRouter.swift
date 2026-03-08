@@ -4,11 +4,11 @@ import Foundation
 
 /// All AI tasks that can be routed to an appropriate model.
 enum AITask: Sendable {
-    case harmonySuggestion(notes: [UInt8], key: Key?, style: String?)
-    case chordVoicing(chord: Chord, style: VoicingStyle)
-    case countermelody(melody: [NoteEvent], key: Key, bars: Int)
-    case arrangementSuggestion(progression: [Chord], key: Key, genre: String)
-    case reharmonization(progression: [Chord], key: Key, style: String)
+    case harmonySuggestion(notes: [UInt8], key: MusicalKey?, style: String?)
+    case chordVoicing(chord: MusicChord, style: AIVoicingStyle)
+    case countermelody(melody: [AINote], key: MusicalKey, bars: Int)
+    case arrangementSuggestion(progression: [MusicChord], key: MusicalKey, genre: String)
+    case reharmonization(progression: [MusicChord], key: MusicalKey, style: String)
     case soundDesign(description: String)
     case synthPatch(description: String)
     case sampleMapping(sampleInfo: [SampleInfo])
@@ -18,7 +18,7 @@ enum AITask: Sendable {
 
 // MARK: - Supporting Types
 
-enum VoicingStyle: String, Codable, Sendable {
+enum AIVoicingStyle: String, Codable, Sendable {
     case close       // notes within one octave
     case open        // notes spread across octaves
     case drop2       // second-highest note dropped an octave
@@ -29,7 +29,7 @@ enum VoicingStyle: String, Codable, Sendable {
     case spread      // wide intervals
 }
 
-struct NoteEvent: Codable, Sendable {
+struct AINote: Codable, Sendable {
     let pitch: UInt8        // MIDI note number
     let velocity: UInt8     // 0-127
     let startBeat: Double   // position in beats
@@ -44,7 +44,7 @@ struct NoteEvent: Codable, Sendable {
     }
 }
 
-enum Voice: String, Codable, Sendable {
+enum AIVoice: String, Codable, Sendable {
     case soprano, alto, tenor, bass
     case lead, pad, arpeggio
 
@@ -93,7 +93,7 @@ struct AIResult: Sendable {
 enum AIResultPayload: Sendable {
     case harmony(HarmonyResult)
     case voicing([UInt8])
-    case countermelody([NoteEvent])
+    case countermelody([AINote])
     case arrangement(ArrangementResult)
     case soundDesign(SoundDesignResult)
     case synthPatch(SynthPatchResult)
@@ -218,7 +218,7 @@ actor AIRouter {
     // MARK: - Task Handlers
 
     private func handleHarmonySuggestion(
-        notes: [UInt8], key: Key?, style: String?, model: String
+        notes: [UInt8], key: MusicalKey?, style: String?, model: String
     ) async throws -> AIResultPayload {
         let noteNames = notes.map { "\(NoteName.from(midiNote: $0).displayName)\(NoteName.octave(fromMIDI: $0))" }
         let keyStr = key.map { $0.displayName } ?? "unknown"
@@ -226,7 +226,7 @@ actor AIRouter {
 
         let prompt = """
         Current notes: \(noteNames.joined(separator: ", ")) (MIDI: \(notes.map(String.init).joined(separator: ", ")))
-        Key: \(keyStr)
+        MusicalKey: \(keyStr)
         Style: \(styleStr)
 
         Suggest 3-4 harmonies that work with these notes.
@@ -242,10 +242,10 @@ actor AIRouter {
     }
 
     private func handleChordVoicing(
-        chord: Chord, style: VoicingStyle, model: String
+        chord: MusicChord, style: AIVoicingStyle, model: String
     ) async throws -> AIResultPayload {
         let prompt = """
-        Chord: \(chord.displayName)
+        MusicChord: \(chord.displayName)
         Voicing style: \(style.rawValue)
 
         Return MIDI note numbers for a voicing of this chord in the given style.
@@ -262,14 +262,14 @@ actor AIRouter {
     }
 
     private func handleCountermelody(
-        melody: [NoteEvent], key: Key, bars: Int, model: String
+        melody: [AINote], key: MusicalKey, bars: Int, model: String
     ) async throws -> AIResultPayload {
         let melodyDesc = melody.prefix(32).map {
             "\(NoteName.from(midiNote: $0.pitch).displayName)\(NoteName.octave(fromMIDI: $0.pitch)) @ beat \($0.startBeat) dur \($0.duration)"
         }
 
         let prompt = """
-        Key: \(key.displayName)
+        MusicalKey: \(key.displayName)
         Bars: \(bars)
         Melody notes:
         \(melodyDesc.joined(separator: "\n"))
@@ -285,20 +285,20 @@ actor AIRouter {
         )
 
         let events = result.notes.map { n in
-            NoteEvent(pitch: n.pitch, velocity: n.velocity, startBeat: n.startBeat, duration: n.duration)
+            AINote(pitch: n.pitch, velocity: n.velocity, startBeat: n.startBeat, duration: n.duration)
         }
         return .countermelody(events)
     }
 
     private func handleArrangement(
-        progression: [Chord], key: Key, genre: String, model: String
+        progression: [MusicChord], key: MusicalKey, genre: String, model: String
     ) async throws -> AIResultPayload {
         let chordNames = progression.map(\.displayName)
 
         let prompt = """
-        Key: \(key.displayName)
+        MusicalKey: \(key.displayName)
         Genre: \(genre)
-        Chord progression: \(chordNames.joined(separator: " | "))
+        MusicChord progression: \(chordNames.joined(separator: " | "))
 
         Suggest a full arrangement with sections, instrumentation, and dynamics.
         """
@@ -313,12 +313,12 @@ actor AIRouter {
     }
 
     private func handleReharmonization(
-        progression: [Chord], key: Key, style: String, model: String
+        progression: [MusicChord], key: MusicalKey, style: String, model: String
     ) async throws -> AIResultPayload {
         let chordNames = progression.map(\.displayName)
 
         let prompt = """
-        Key: \(key.displayName)
+        MusicalKey: \(key.displayName)
         Original progression: \(chordNames.joined(separator: " | "))
         Reharmonization style: \(style)
 
@@ -332,7 +332,7 @@ actor AIRouter {
             type: ReharmonizationResult.self
         )
 
-        // Parse chord names back into Chord structs
+        // Parse chord names back into MusicChord structs
         let chords = result.chords.compactMap { parseChord($0) }
         return .harmony(HarmonyResult(suggestions: result.chords.enumerated().map { i, name in
             HarmonySuggestionJSON(
@@ -442,9 +442,9 @@ actor AIRouter {
         return .mixing(result)
     }
 
-    // MARK: - Chord Parsing Helper
+    // MARK: - MusicChord Parsing Helper
 
-    private func parseChord(_ name: String) -> Chord? {
+    private func parseChord(_ name: String) -> MusicChord? {
         guard !name.isEmpty else { return nil }
 
         let rootCandidates: [(String, NoteName)] = [
@@ -457,7 +457,7 @@ actor AIRouter {
             if name.hasPrefix(prefix) {
                 let suffix = String(name.dropFirst(prefix.count))
                 let quality = qualityFromSuffix(suffix)
-                return Chord(root: note, quality: quality, bass: nil)
+                return MusicChord(root: note, quality: quality, bass: nil)
             }
         }
         return nil
@@ -624,7 +624,7 @@ enum AIPrompts {
     - Maintain the same phrase length as the original
     - Preserve the overall harmonic direction
     - Use style-appropriate substitutions (tritone subs, modal interchange, etc.)
-    - Chord names should use standard notation (Cmaj7, Dm7b5, G7#9, etc.)
+    - MusicChord names should use standard notation (Cmaj7, Dm7b5, G7#9, etc.)
     """
 
     static let soundDesign = """

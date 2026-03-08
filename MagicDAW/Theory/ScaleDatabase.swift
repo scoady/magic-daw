@@ -37,7 +37,7 @@ struct ScaleDatabase: Sendable {
         return findScalesContaining(notes: pitchClasses)
     }
 
-    // MARK: - Suggest Scales for a Chord
+    // MARK: - Suggest Scales for a MusicChord
 
     /// Suggest scales that contain all chord tones, scored by fit.
     ///
@@ -49,7 +49,7 @@ struct ScaleDatabase: Sendable {
     ///
     /// - Parameter chord: The chord to find compatible scales for.
     /// - Returns: Scales sorted by descending fit score.
-    static func suggestScales(for chord: Chord) -> [(scale: Scale, score: Double)] {
+    static func suggestScales(for chord: MusicChord) -> [(scale: Scale, score: Double)] {
         let chordTones = chord.noteNames
 
         var results: [(scale: Scale, score: Double)] = []
@@ -104,7 +104,7 @@ struct ScaleDatabase: Sendable {
     /// Suggest related scales/modes for a given key.
     ///
     /// Returns the parallel modes, relative key scales, and closely related scales.
-    static func suggestScales(for key: Key) -> [Scale] {
+    static func suggestScales(for key: MusicalKey) -> [Scale] {
         var suggestions: [Scale] = []
 
         // The key's own scale
@@ -138,7 +138,7 @@ struct ScaleDatabase: Sendable {
     /// Build diatonic triads on each degree of a scale.
     ///
     /// Only works for 7-note scales. Returns an empty array for pentatonic/blues etc.
-    static func diatonicTriads(for scale: Scale) -> [Chord] {
+    static func diatonicTriads(for scale: Scale) -> [MusicChord] {
         let pitchClasses = scale.pitchClasses
         guard pitchClasses.count >= 7 else { return [] }
 
@@ -159,12 +159,12 @@ struct ScaleDatabase: Sendable {
             default:     quality = .major
             }
 
-            return Chord(root: root, quality: quality, bass: nil)
+            return MusicChord(root: root, quality: quality, bass: nil)
         }
     }
 
     /// Build diatonic seventh chords on each degree of a scale.
-    static func diatonicSevenths(for scale: Scale) -> [Chord] {
+    static func diatonicSevenths(for scale: Scale) -> [MusicChord] {
         let pitchClasses = scale.pitchClasses
         guard pitchClasses.count >= 7 else { return [] }
 
@@ -190,21 +190,21 @@ struct ScaleDatabase: Sendable {
             default:         quality = .dominant7
             }
 
-            return Chord(root: root, quality: quality, bass: nil)
+            return MusicChord(root: root, quality: quality, bass: nil)
         }
     }
 
     /// Alias for `diatonicTriads(for:)`.
-    static func diatonicChords(for scale: Scale) -> [Chord] {
+    static func diatonicChords(for scale: Scale) -> [MusicChord] {
         diatonicTriads(for: scale)
     }
 
     /// All common chords in a scale (triads + sevenths, deduplicated).
-    static func commonChords(in scale: Scale) -> [Chord] {
+    static func commonChords(in scale: Scale) -> [MusicChord] {
         let triads = diatonicTriads(for: scale)
         let sevenths = diatonicSevenths(for: scale)
         var seen = Set<String>()
-        var result: [Chord] = []
+        var result: [MusicChord] = []
         for chord in triads + sevenths {
             if seen.insert(chord.displayName).inserted {
                 result.append(chord)
@@ -218,12 +218,12 @@ struct ScaleDatabase: Sendable {
     /// Determine the function of a chord in a key.
     ///
     /// Returns roman numeral strings like "I", "ii", "V7", "bVI", etc.
-    static func chordFunction(chord: Chord, in key: Key) -> String {
+    static func chordFunction(chord: MusicChord, in key: MusicalKey) -> String {
         return chord.romanNumeral(in: key)
     }
 
     /// Get the scale degree (1-7) of a chord's root in a key, or nil if chromatic.
-    static func scaleDegree(of chord: Chord, in key: Key) -> Int? {
+    static func scaleDegree(of chord: MusicChord, in key: MusicalKey) -> Int? {
         return key.scale.degree(of: chord.root)
     }
 
@@ -251,7 +251,7 @@ struct ScaleDatabase: Sendable {
     /// Suggest chords that fit well after a given chord in a key.
     ///
     /// Uses common progression tendencies to rank suggestions.
-    static func suggestNextChords(after chord: Chord, in key: Key, count: Int = 4) -> [Chord] {
+    static func suggestNextChords(after chord: MusicChord, in key: MusicalKey, count: Int = 4) -> [MusicChord] {
         let diatonic = diatonicChords(for: key.scale)
         guard !diatonic.isEmpty else { return [] }
 
@@ -275,7 +275,7 @@ struct ScaleDatabase: Sendable {
 
         let nextDegrees = tendencies[currentDegree] ?? [0, 5, 7]
 
-        var suggestions: [Chord] = []
+        var suggestions: [MusicChord] = []
         for degree in nextDegrees {
             if let chord = diatonic.first(where: { key.tonic.interval(to: $0.root) == degree }) {
                 suggestions.append(chord)
@@ -297,7 +297,7 @@ struct ScaleDatabase: Sendable {
     // MARK: - Private Helpers
 
     /// Idiom bonus: common chord-quality-to-scale-type pairings get a score boost.
-    private static func idiomBonus(chord: Chord, scale: Scale) -> Double {
+    private static func idiomBonus(chord: MusicChord, scale: Scale) -> Double {
         guard scale.root == chord.root else { return 0 }
 
         switch (chord.quality, scale.mode) {

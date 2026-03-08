@@ -44,7 +44,7 @@ class ProjectManager {
         return appSupport.appendingPathComponent("MagicDAW/AutoSave", isDirectory: true)
     }
 
-    private init() {}
+    init() {}
 
     // MARK: - Save
 
