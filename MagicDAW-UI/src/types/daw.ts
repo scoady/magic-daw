@@ -212,7 +212,8 @@ export interface DAWState {
   inputLevelR: number;
 }
 
-export type ViewId = 'arrange' | 'edit' | 'mix' | 'instruments' | 'plugins' | 'visualizer' | 'circle' | 'trainer';
+export type ViewId = 'arrange' | 'edit' | 'mix' | 'instruments' | 'plugins' | 'chord-builder' | 'learn';
+export type LearnSubView = 'circle' | 'intervals' | 'tonnetz';
 
 // ── Project data from Swift (matches DAWProject Codable output) ──────────
 

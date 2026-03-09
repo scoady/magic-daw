@@ -113,51 +113,29 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
   // ── Connecting lines from root to each interval ────────────────────────
   const rootPos = intervalPositions[0];
 
-  // ── Piano keyboard at bottom ───────────────────────────────────────────
-  const pianoKeys = useMemo(() => {
-    const keys: Array<{
-      chroma: number; x: number; w: number; h: number;
-      isBlack: boolean; name: string; interval: number;
-      inScale: boolean;
-    }> = [];
-    const pianoW = Math.min(W * 0.7, 700);
-    const whiteW = pianoW / 8; // 8 white keys for one octave + root
-    const whiteH = whiteW * 3.2;
-    const blackW = whiteW * 0.58;
-    const blackH = whiteH * 0.6;
-    const pianoX = (W - pianoW) / 2;
-    const pianoY = H - whiteH - 30;
+  // ── Scale-only keyboard at bottom ─────────────────────────────────────
+  const scaleKeys = useMemo(() => {
+    const scaleNotes = scaleIntervals.filter(si => si >= 0);
+    const count = scaleNotes.length;
+    const totalW = Math.min(W * 0.7, 700);
+    const keyW = totalW / count;
+    const keyH = keyW * 2.8;
+    const startX = (W - totalW) / 2;
 
-    let wIdx = 0;
-    for (let si = 0; si <= 12; si++) {
+    return scaleNotes.map((si, idx) => {
       const chroma = (rootIdx + si) % 12;
-      const name = names[chroma];
-      const inScale = scaleIntervals.includes(si);
+      return {
+        chroma, name: names[chroma], interval: si,
+        x: startX + idx * keyW, w: keyW, h: keyH,
+        isBlack: IS_BLACK[chroma],
+      };
+    });
+  }, [W, scaleIntervals, rootIdx, names]);
 
-      if (!IS_BLACK[chroma]) {
-        keys.push({
-          chroma, name, interval: si, inScale,
-          x: pianoX + wIdx * whiteW,
-          w: whiteW, h: whiteH, isBlack: false,
-        });
-        wIdx++;
-      } else {
-        keys.push({
-          chroma, name, interval: si, inScale,
-          x: pianoX + wIdx * whiteW - blackW / 2,
-          w: blackW, h: blackH, isBlack: true,
-        });
-      }
-    }
-    return keys;
-  }, [W, H, rootIdx, names, scaleIntervals]);
-
-  const whites = pianoKeys.filter(k => !k.isBlack);
-  const blacks = pianoKeys.filter(k => k.isBlack);
-  const pianoW = whites.length > 0 ? whites[whites.length - 1].x + whites[whites.length - 1].w - whites[0].x : 0;
-  const pianoX = whites.length > 0 ? whites[0].x : 0;
-  const pianoY = whites.length > 0 ? H - whites[0].h - 30 : H - 200;
-  const whiteH = whites.length > 0 ? whites[0].h : 150;
+  const pianoW = scaleKeys.length > 0 ? scaleKeys[scaleKeys.length - 1].x + scaleKeys[scaleKeys.length - 1].w - scaleKeys[0].x : 0;
+  const pianoX = scaleKeys.length > 0 ? scaleKeys[0].x : 0;
+  const pianoY = scaleKeys.length > 0 ? H - scaleKeys[0].h - 30 : H - 200;
+  const keyH = scaleKeys.length > 0 ? scaleKeys[0].h : 150;
 
   // Breathing / pulse
   const pulse = Math.sin(frame * 0.06);
@@ -328,84 +306,58 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
           </text>
         ))}
 
-        {/* ── Piano Keyboard ─────────────────────────────────────── */}
+        {/* ── Scale-Only Keyboard ───────────────────────────────── */}
         <g>
           {/* Glass backdrop */}
           <rect
             x={pianoX - 10} y={pianoY - 20}
-            width={pianoW + 20} height={whiteH + 30}
+            width={pianoW + 20} height={keyH + 30}
             rx={6}
             fill="rgba(6,10,18,0.75)"
             stroke={palette.glassBorder} strokeWidth={0.5}
           />
 
-          {/* White keys */}
-          {whites.map((k) => {
+          {/* Scale degree keys */}
+          {scaleKeys.map((k) => {
             const isPlaying = activeNoteSet.has(k.chroma);
             const isActive = activeInterval === k.interval;
             const isCorrect = correctIntervals.includes(k.interval);
             const col = INTERVAL_NAMES[k.interval]?.color ?? palette.cyan;
+            const isRoot = k.interval === 0 || k.interval === 12;
             return (
-              <g key={`w-${k.interval}`}>
+              <g key={`sk-${k.interval}`}>
                 {(isPlaying || isActive) && (
                   <rect x={k.x + 1} y={pianoY} width={k.w - 2} height={k.h}
-                    rx={3} fill={isActive ? palette.gold : col}
-                    opacity={0.2} filter="url(#it-glow-sm)"
+                    rx={4} fill={isActive ? palette.gold : col}
+                    opacity={0.25} filter="url(#it-glow-sm)"
                   />
                 )}
                 <rect
-                  x={k.x + 0.8} y={pianoY} width={k.w - 1.6} height={k.h} rx={3}
-                  fill={isPlaying ? 'rgba(130,200,235,0.9)'
-                    : isCorrect ? 'rgba(45,212,191,0.3)'
-                    : k.inScale ? 'rgba(170,210,240,0.85)' : 'rgba(200,205,215,0.12)'}
-                  stroke={k.inScale ? `${col}66` : 'rgba(80,90,110,0.15)'}
-                  strokeWidth={k.inScale ? 0.8 : 0.3}
+                  x={k.x + 1} y={pianoY} width={k.w - 2} height={k.h} rx={4}
+                  fill={isPlaying ? 'rgba(103,232,249,0.35)'
+                    : isCorrect ? 'rgba(45,212,191,0.2)'
+                    : isRoot ? 'rgba(103,232,249,0.12)'
+                    : k.isBlack ? 'rgba(30,40,60,0.7)' : 'rgba(170,210,240,0.85)'}
+                  stroke={`${col}55`}
+                  strokeWidth={isRoot ? 1.2 : 0.6}
                 />
-                <text x={k.x + k.w / 2} y={pianoY + k.h - 6}
+                {/* Note name */}
+                <text x={k.x + k.w / 2} y={pianoY + k.h - 8}
                   textAnchor="middle"
-                  fill={k.inScale ? 'rgba(10,18,30,0.95)' : 'rgba(100,116,139,0.2)'}
+                  fill={k.isBlack ? 'rgba(220,230,245,0.9)' : 'rgba(10,18,30,0.9)'}
                   fontSize={14} fontFamily="monospace" fontWeight={800}
                 >
                   {k.name}
                 </text>
-                {k.inScale && (
-                  <text x={k.x + k.w / 2} y={pianoY + k.h - 24}
-                    textAnchor="middle"
-                    fill={col} fontSize={9}
-                    fontFamily="monospace" fontWeight={700}
-                    opacity={0.6}
-                  >
-                    {INTERVAL_NAMES[k.interval]?.short}
-                  </text>
-                )}
-              </g>
-            );
-          })}
-
-          {/* Black keys */}
-          {blacks.map((k) => {
-            const isPlaying = activeNoteSet.has(k.chroma);
-            const isCorrect = correctIntervals.includes(k.interval);
-            const col = INTERVAL_NAMES[k.interval]?.color ?? palette.purple;
-            return (
-              <g key={`b-${k.interval}`}>
-                <rect
-                  x={k.x} y={pianoY} width={k.w} height={k.h} rx={2}
-                  fill={isPlaying ? '#3a85b8'
-                    : isCorrect ? 'rgba(45,212,191,0.4)'
-                    : k.inScale ? '#2a6090' : 'rgba(15,18,25,0.85)'}
-                  stroke={k.inScale ? `${col}44` : 'rgba(40,50,65,0.3)'}
-                  strokeWidth={0.5}
-                />
-                {k.inScale && (
-                  <text x={k.x + k.w / 2} y={pianoY + k.h - 5}
-                    textAnchor="middle"
-                    fill="rgba(230,240,255,0.95)" fontSize={10}
-                    fontFamily="monospace" fontWeight={800}
-                  >
-                    {k.name}
-                  </text>
-                )}
+                {/* Interval label */}
+                <text x={k.x + k.w / 2} y={pianoY + k.h - 26}
+                  textAnchor="middle"
+                  fill={col} fontSize={9}
+                  fontFamily="monospace" fontWeight={700}
+                  opacity={0.6}
+                >
+                  {INTERVAL_NAMES[k.interval]?.short}
+                </text>
               </g>
             );
           })}
@@ -418,7 +370,7 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
           const panelW = 200;
           const panelH = 50;
           const panelX = 20;
-          const panelY = H - whiteH - 90;
+          const panelY = H - keyH - 90;
 
           return (
             <g>

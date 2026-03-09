@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import type { DAWState, ViewId, Track, ProjectData, SwiftTrack } from './types/daw';
+import type { DAWState, ViewId, LearnSubView, Track, ProjectData, SwiftTrack } from './types/daw';
 import { mockDAWState, aurora, trackColorToHex } from './mockData';
 import { sendToSwift, onSwiftMessage, onMidiStateChange, BridgeMessages } from './bridge';
 import type { ActiveMidiNote, MidiDeviceList } from './bridge';
@@ -14,6 +14,7 @@ import { PluginView } from './views/PluginView';
 import { ChordVisualizerPanel } from './components/ChordVisualizerPanel';
 import { CircleOfFifthsPanel } from './components/CircleOfFifthsPanel';
 import { IntervalTrainerPanel } from './components/IntervalTrainerPanel';
+import { LearnPanel } from './components/LearnPanel';
 import { ToastProvider, useToast } from './components/Toast';
 import { ContextMenuProvider } from './components/ContextMenu';
 
@@ -23,9 +24,8 @@ const VIEW_TABS: { id: ViewId; label: string; key: string }[] = [
   { id: 'mix', label: 'Mix', key: '3' },
   { id: 'instruments', label: 'Instruments', key: '4' },
   { id: 'plugins', label: 'Plugins', key: '5' },
-  { id: 'visualizer', label: 'Visualizer', key: '6' },
-  { id: 'circle', label: 'Circle', key: '7' },
-  { id: 'trainer', label: 'Trainer', key: '8' },
+  { id: 'chord-builder', label: 'Chord Builder', key: '6' },
+  { id: 'learn', label: 'Learn', key: '7' },
 ];
 
 const VIEW_IDS: ViewId[] = VIEW_TABS.map((t) => t.id);
@@ -704,12 +704,10 @@ const AppInner: React.FC = () => {
         return <InstrumentView />;
       case 'plugins':
         return <PluginView />;
-      case 'visualizer':
-        return <ChordVisualizerPanel />;
-      case 'circle':
+      case 'chord-builder':
         return <CircleOfFifthsPanel />;
-      case 'trainer':
-        return <IntervalTrainerPanel />;
+      case 'learn':
+        return <LearnPanel />;
     }
   };
 
@@ -775,7 +773,7 @@ const AppInner: React.FC = () => {
         {/* Main area: TrackList sidebar + View content */}
         <div className="flex flex-1 min-h-0">
           {/* Track list sidebar (visible in arrange/edit/mix views) */}
-          {activeView !== 'instruments' && activeView !== 'plugins' && activeView !== 'visualizer' && activeView !== 'circle' && activeView !== 'trainer' && (
+          {activeView !== 'instruments' && activeView !== 'plugins' && activeView !== 'chord-builder' && activeView !== 'learn' && (
             <TrackList
               tracks={dawState.tracks}
               selectedTrackId={dawState.selectedTrackId}

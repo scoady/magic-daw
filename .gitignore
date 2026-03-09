@@ -35,3 +35,4 @@ GeneratedPlugins/
 *.wav.cache
 *.aiff.cache
 dist/
+node_modules/
