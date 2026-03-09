@@ -864,12 +864,10 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
         {timestamp}
 
         {/* ── Chord keyboards: crossfade between adjacent and diatonic ── */}
-        {zoom.primaryPlayedIdx >= 0 && zoom.zoomProgress > 0.01 && (() => {
-          const pos = posOnRing(zoom.primaryPlayedIdx, OUTER_R);
-          return (
+        {zoom.primaryPlayedIdx >= 0 && zoom.zoomProgress > 0.01 && (
             <AdjacentChordsPanel
-              anchorX={pos.x}
-              anchorY={pos.y}
+              anchorX={1640}
+              anchorY={240}
               playedIndex={zoom.primaryPlayedIdx}
               accentColor="#60a5fa"
               secondaryColor="#93c5fd"
@@ -877,8 +875,7 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
               textDimColor="#4b5563"
               opacity={zoom.zoomProgress}
             />
-          );
-        })()}
+        )}
         {zoom.zoomProgress < 0.99 && (
           <DiatonicChordsPanel
             x={1660}

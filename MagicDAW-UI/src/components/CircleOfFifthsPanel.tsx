@@ -1,10 +1,7 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect } from 'react';
 import { Player } from '@remotion/player';
 import { CircleOfFifths1 } from '../compositions/CircleOfFifths1';
 import { CircleOfFifths2 } from '../compositions/CircleOfFifths2';
-import { CircleOfFifths3 } from '../compositions/CircleOfFifths3';
-import { CircleOfFifths4 } from '../compositions/CircleOfFifths4';
-import { CircleOfFifths5 } from '../compositions/CircleOfFifths5';
 import type { CircleOfFifthsProps } from '../compositions/CircleOfFifths1';
 import { onSwiftMessage, onMidiStateChange, BridgeMessages } from '../bridge';
 
@@ -13,9 +10,6 @@ import { onSwiftMessage, onMidiStateChange, BridgeMessages } from '../bridge';
 const COMPOSITIONS = [
   { id: 1, name: 'Harmonic Gravity', component: CircleOfFifths1 },
   { id: 2, name: 'Sacred Aurora', component: CircleOfFifths2 },
-  { id: 3, name: 'Orbital Mechanics', component: CircleOfFifths3 },
-  { id: 4, name: 'Crystalline Mandala', component: CircleOfFifths4 },
-  { id: 5, name: 'Gravity Well', component: CircleOfFifths5 },
 ] as const;
 
 // ── Bridge payload types ──────────────────────────────────────────────────
@@ -79,6 +73,27 @@ function useThrottledState<T>(initial: T, intervalMs: number): [T, (v: T) => voi
 // ── Component ──────────────────────────────────────────────────────────────
 
 export const CircleOfFifthsPanel: React.FC = () => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [compSize, setCompSize] = useState<{ w: number; h: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    // Immediate measure on mount
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      setCompSize({ w: Math.round(rect.width / 2) * 2, h: Math.round(rect.height / 2) * 2 });
+    }
+    const observer = new ResizeObserver((entries) => {
+      const { width, height } = entries[0].contentRect;
+      if (width > 0 && height > 0) {
+        setCompSize({ w: Math.round(width / 2) * 2, h: Math.round(height / 2) * 2 });
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   const [activeComposition, setActiveComposition] = useState(0);
   const [activeKey, setActiveKey] = useState('C');
   const [activeMode, setActiveMode] = useState<'major' | 'minor'>('major');
@@ -150,6 +165,7 @@ export const CircleOfFifthsPanel: React.FC = () => {
 
   return (
     <div
+      ref={containerRef}
       style={{
         width: '100%',
         height: '100%',
@@ -158,21 +174,24 @@ export const CircleOfFifthsPanel: React.FC = () => {
         position: 'relative',
       }}
     >
-      <Player
-        component={CompositionComponent}
-        inputProps={inputProps}
-        compositionWidth={1920}
-        compositionHeight={1080}
-        fps={30}
-        durationInFrames={9000}
-        loop
-        autoPlay
-        controls={false}
-        style={{
-          width: '100%',
-          height: '100%',
-        }}
-      />
+      {compSize && (
+        <Player
+          key={`${compSize.w}x${compSize.h}`}
+          component={CompositionComponent}
+          inputProps={inputProps}
+          compositionWidth={compSize.w}
+          compositionHeight={compSize.h}
+          fps={30}
+          durationInFrames={9000}
+          loop
+          autoPlay
+          controls={false}
+          style={{
+            width: '100%',
+            height: '100%',
+          }}
+        />
+      )}
 
       {/* Composition selector */}
       <div

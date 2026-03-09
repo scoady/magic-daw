@@ -1,5 +1,5 @@
-import { useMemo, useRef } from 'react';
-import { spring, interpolate } from 'remotion';
+import { useRef } from 'react';
+import { spring } from 'remotion';
 
 // ── Shared circle-of-fifths key arrays ──────────────────────────────────────
 
@@ -24,7 +24,9 @@ export interface DetectedRing {
 /** Parse a detected chord name and return which ring + index it maps to. */
 export function chordToRingIndex(chord: string | null): DetectedRing {
   if (!chord) return { ring: null, index: -1 };
-  const base = chord.replace(/(maj7|m7|7|9|11|13|sus[24]|aug|\?)$/i, '');
+  // Strip slash bass note (e.g. "Am/C" → "Am", "G/B" → "G")
+  const chordName = chord.includes('/') ? chord.split('/')[0] : chord;
+  const base = chordName.replace(/(maj7|m7|7|9|11|13|sus[24]|aug|\?)$/i, '');
 
   if (base.endsWith('dim') || chord.includes('dim')) {
     const root = base.replace(/dim$/, '');
@@ -110,6 +112,26 @@ function computeZoomWindow(
 const ZOOM_IN_SPRING = { damping: 22, stiffness: 35, mass: 1.2 };
 const ZOOM_OUT_SPRING = { damping: 20, stiffness: 20, mass: 1.5 }; // slower zoom out
 
+/** Safe spring — clamps to [0,1] and catches errors from Remotion */
+function safeSpring(f: number, fps: number, config: typeof ZOOM_IN_SPRING, dur: number): number {
+  try {
+    const v = spring({ frame: Math.max(0, f), fps, config, durationInFrames: dur });
+    return Math.max(0, Math.min(1, v));
+  } catch {
+    return f >= dur ? 1 : 0;
+  }
+}
+
+/** Lerp a ZoomTarget */
+function lerpTarget(from: ZoomTarget, to: ZoomTarget, t: number): ZoomTarget {
+  return {
+    x: from.x + (to.x - from.x) * t,
+    y: from.y + (to.y - from.y) * t,
+    w: from.w + (to.w - from.w) * t,
+    h: from.h + (to.h - from.h) * t,
+  };
+}
+
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -182,6 +204,14 @@ export function useCircleZoom(opts: {
   const s = stateRef.current;
   const notesActive = playedIndices.size > 0;
 
+  // Guard: reset transitionFrame on Remotion loop boundary (frame < stored frame)
+  if (frame < s.transitionFrame) {
+    s.transitionFrame = frame;
+  }
+  if (s.releaseFrame > 0 && frame < s.releaseFrame) {
+    s.releaseFrame = frame;
+  }
+
   // ── State machine ─────────────────────────────────────────────────────
 
   if (notesActive) {
@@ -207,32 +237,29 @@ export function useCircleZoom(opts: {
       primaryIdx = playedIndices.values().next().value!;
     }
 
-    // Update persisted played info (adjacent indices for keyboard panel)
+    // Update persisted played info — all harmonically reachable targets
     const adjSet = new Set<number>();
     const focusIdx = primaryIdx;
-    adjSet.add(focusIdx);
-    adjSet.add((focusIdx + 1) % 12);
-    adjSet.add((focusIdx + 11) % 12);
-    adjSet.add((focusIdx + 2) % 12);
-    adjSet.add((focusIdx + 10) % 12);
+    adjSet.add(focusIdx);           // self (played)
+    adjSet.add((focusIdx + 1) % 12);  // V (dominant)
+    adjSet.add((focusIdx + 11) % 12); // IV (subdominant)
+    adjSet.add((focusIdx + 2) % 12);  // ii (supertonic)
+    adjSet.add((focusIdx + 10) % 12); // bVII (subtonic)
+    adjSet.add((focusIdx + 3) % 12);  // vi / iii (mediant area)
+    adjSet.add((focusIdx + 9) % 12);  // bVI (submediant)
+    adjSet.add((focusIdx + 4) % 12);  // iii (mediant)
+    adjSet.add((focusIdx + 8) % 12);  // bV / tritone sub
+    adjSet.add((focusIdx + 5) % 12);  // vii° area
+    adjSet.add((focusIdx + 7) % 12);  // bIII (chromatic mediant)
     s.lastIndices = Array.from(adjSet).sort((a, b) => a - b);
     s.lastPrimaryIdx = primaryIdx;
 
     if (s.phase === 'idle' || s.phase === 'zooming-out') {
       // Start zooming in — snapshot current position as "from"
-      const elapsed = frame - s.transitionFrame;
-      const oldSpring = s.phase === 'zooming-out' ? ZOOM_OUT_SPRING : ZOOM_IN_SPRING;
-      const oldProgress = spring({
-        frame: elapsed, fps,
-        config: oldSpring,
-        durationInFrames: Math.round(fps * 2.5),
-      });
-      s.from = {
-        x: s.from.x + (s.to.x - s.from.x) * oldProgress,
-        y: s.from.y + (s.to.y - s.from.y) * oldProgress,
-        w: s.from.w + (s.to.w - s.from.w) * oldProgress,
-        h: s.from.h + (s.to.h - s.from.h) * oldProgress,
-      };
+      const el = Math.max(0, frame - s.transitionFrame);
+      const oldCfg = s.phase === 'zooming-out' ? ZOOM_OUT_SPRING : ZOOM_IN_SPRING;
+      const oldP = safeSpring(el, fps, oldCfg, Math.round(fps * 2.5));
+      s.from = lerpTarget(s.from, s.to, oldP);
       s.to = zoomTarget;
       s.transitionFrame = frame;
       s.phase = 'zoomed';
@@ -243,19 +270,9 @@ export function useCircleZoom(opts: {
         Math.abs(s.to.y - zoomTarget.y) > 1;
 
       if (targetMoved) {
-        // Pan to new node — snapshot current interpolated position
-        const elapsed = frame - s.transitionFrame;
-        const prog = spring({
-          frame: elapsed, fps,
-          config: ZOOM_IN_SPRING,
-          durationInFrames: Math.round(fps * 2.5),
-        });
-        s.from = {
-          x: s.from.x + (s.to.x - s.from.x) * prog,
-          y: s.from.y + (s.to.y - s.from.y) * prog,
-          w: s.from.w + (s.to.w - s.from.w) * prog,
-          h: s.from.h + (s.to.h - s.from.h) * prog,
-        };
+        const el = Math.max(0, frame - s.transitionFrame);
+        const prog = safeSpring(el, fps, ZOOM_IN_SPRING, Math.round(fps * 2.5));
+        s.from = lerpTarget(s.from, s.to, prog);
         s.to = zoomTarget;
         s.transitionFrame = frame;
       }
@@ -273,30 +290,17 @@ export function useCircleZoom(opts: {
       // Check if linger expired
       if (frame - s.releaseFrame >= lingerFrames) {
         // Start slow zoom out
-        const elapsed = frame - s.transitionFrame;
-        const prog = spring({
-          frame: elapsed, fps,
-          config: ZOOM_IN_SPRING,
-          durationInFrames: Math.round(fps * 2.5),
-        });
-        s.from = {
-          x: s.from.x + (s.to.x - s.from.x) * prog,
-          y: s.from.y + (s.to.y - s.from.y) * prog,
-          w: s.from.w + (s.to.w - s.from.w) * prog,
-          h: s.from.h + (s.to.h - s.from.h) * prog,
-        };
+        const el = Math.max(0, frame - s.transitionFrame);
+        const prog = safeSpring(el, fps, ZOOM_IN_SPRING, Math.round(fps * 2.5));
+        s.from = lerpTarget(s.from, s.to, prog);
         s.to = fullView;
         s.transitionFrame = frame;
         s.phase = 'zooming-out';
       }
     } else if (s.phase === 'zooming-out') {
       // Check if zoom-out spring is done
-      const elapsed = frame - s.transitionFrame;
-      const prog = spring({
-        frame: elapsed, fps,
-        config: ZOOM_OUT_SPRING,
-        durationInFrames: Math.round(fps * 3),
-      });
+      const el = Math.max(0, frame - s.transitionFrame);
+      const prog = safeSpring(el, fps, ZOOM_OUT_SPRING, Math.round(fps * 3));
       if (prog >= 0.999) {
         s.phase = 'idle';
         s.from = fullView;
@@ -307,31 +311,26 @@ export function useCircleZoom(opts: {
 
   // ── Compute current viewBox from spring ────────────────────────────────
 
-  const elapsed = frame - s.transitionFrame;
+  // Guard against negative elapsed (Remotion loop: frame resets to 0 while transitionFrame is high)
+  const rawElapsed = frame - s.transitionFrame;
+  const elapsed = rawElapsed >= 0 ? rawElapsed : 0;
   const springConfig = s.phase === 'zooming-out' ? ZOOM_OUT_SPRING : ZOOM_IN_SPRING;
   const dur = s.phase === 'zooming-out' ? Math.round(fps * 3) : Math.round(fps * 2.5);
-  const progress = spring({
-    frame: elapsed,
-    fps,
-    config: springConfig,
-    durationInFrames: dur,
-  });
-
-  const vx = interpolate(progress, [0, 1], [s.from.x, s.to.x]);
-  const vy = interpolate(progress, [0, 1], [s.from.y, s.to.y]);
-  const vw = interpolate(progress, [0, 1], [s.from.w, s.to.w]);
-  const vh = interpolate(progress, [0, 1], [s.from.h, s.to.h]);
+  const p = safeSpring(elapsed, fps, springConfig, dur);
+  const view = lerpTarget(s.from, s.to, p);
 
   // Zoom progress: 0 = full view, 1 = fully zoomed
-  // Derived from how far the current viewBox width is from full vs zoomed
   const zoomedW = fullW * zoomFraction;
-  const zoomProgress = 1 - Math.max(0, Math.min(1, (vw - zoomedW) / (fullW - zoomedW)));
+  const denom = fullW - zoomedW;
+  const zoomProgress = denom > 0
+    ? 1 - Math.max(0, Math.min(1, (view.w - zoomedW) / denom))
+    : 0;
 
   const isZoomed = s.phase === 'zoomed' || s.phase === 'lingering' ||
     (s.phase === 'zooming-out' && zoomProgress > 0.05);
 
   return {
-    viewBox: `${vx} ${vy} ${vw} ${vh}`,
+    viewBox: `${view.x} ${view.y} ${Math.max(1, view.w)} ${Math.max(1, view.h)}`,
     isZoomed,
     adjacentIndices: s.lastIndices,
     primaryPlayedIdx: s.lastPrimaryIdx,

@@ -6,7 +6,6 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
-import { DiatonicChordsPanel, AdjacentChordsPanel } from './MiniKeyboard';
 import { useCircleZoom, chordToRingIndex } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -25,14 +24,11 @@ export interface CircleOfFifthsProps {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const W = 1920;
-const H = 1080;
-const CX = W / 2;
-const CY = H / 2;
-
-const OUTER_R = 320;
-const MIDDLE_R = 240;
-const INNER_R = 160;
+// Base design dimensions — actual W/H come from useVideoConfig()
+const BASE_H = 1080;
+const OUTER_R_BASE = 480;
+const MIDDLE_R_BASE = 370;
+const INNER_R_BASE = 260;
 
 const palette = {
   bg: '#080e18',
@@ -110,14 +106,14 @@ interface BgStar {
   color: string;
 }
 
-function generateStars(count: number): BgStar[] {
+function generateStars(count: number, w: number, h: number): BgStar[] {
   const rand = seededRandom(7749);
   const starColors = ['#ffffff', '#cfe8ff', '#ffe4c4', '#d4e4ff', '#fff5e6'];
   const stars: BgStar[] = [];
   for (let i = 0; i < count; i++) {
     stars.push({
-      x: rand() * W,
-      y: rand() * H,
+      x: rand() * w,
+      y: rand() * h,
       r: 0.3 + rand() * 1.8,
       baseOpacity: 0.1 + rand() * 0.5,
       twinkleSpeed: 0.02 + rand() * 0.06,
@@ -158,8 +154,8 @@ function generateAccretionDisk(count: number): AccretionParticle[] {
 
 // ── Sacred Geometry Lines ─────────────────────────────────────────────────
 
-function generateDodecagonPoints(): [number, number][] {
-  return Array.from({ length: 12 }, (_, i) => polarToXY(CX, CY, 380, nodeAngle(i)));
+function generateDodecagonPoints(cx: number, cy: number, outerR: number): [number, number][] {
+  return Array.from({ length: 12 }, (_, i) => polarToXY(cx, cy, outerR + 60, nodeAngle(i)));
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
@@ -176,7 +172,15 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
   highlightedDegrees,
 }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, width: W, height: H } = useVideoConfig();
+  const CX = W / 2;
+  const CY = H / 2;
+
+  // Scale radii proportionally to height (circle should fill vertical space)
+  const scale = H / BASE_H;
+  const OUTER_R = OUTER_R_BASE * scale;
+  const MIDDLE_R = MIDDLE_R_BASE * scale;
+  const INNER_R = INNER_R_BASE * scale;
 
   const activeIdx = useMemo(() => keyIndexOnCircle(activeKey), [activeKey]);
 
@@ -196,12 +200,12 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
     middleR: MIDDLE_R, innerR: INNER_R,
     fullW: W, fullH: H,
     frame, fps,
-    zoomFraction: 0.5,
+    zoomFraction: 0.28,
   });
 
-  const bgStars = useMemo(() => generateStars(220), []);
+  const bgStars = useMemo(() => generateStars(220, W, H), [W, H]);
   const accretionDisk = useMemo(() => generateAccretionDisk(28), []);
-  const dodecagon = useMemo(() => generateDodecagonPoints(), []);
+  const dodecagon = useMemo(() => generateDodecagonPoints(CX, CY, OUTER_R), [CX, CY, OUTER_R]);
 
   // ── Gravitational pull computation ────────────────────────────────────
 
@@ -224,7 +228,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
       }
     }
     return offsets;
-  }, [activeIdx]);
+  }, [activeIdx, CX, CY, OUTER_R]);
 
   // ── Connection lines data ─────────────────────────────────────────────
 
@@ -251,7 +255,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
       lines.push({ x1, y1, x2, y2, thickness: 0.4, opacity: 0.04 });
     }
     return lines;
-  }, []);
+  }, [CX, CY, OUTER_R, MIDDLE_R]);
 
   // ── Pathfinder arc computations ───────────────────────────────────────
 
@@ -265,7 +269,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
       });
       return { points, color: PATHFINDER_COLORS[pi % PATHFINDER_COLORS.length] };
     });
-  }, [pathfinderPaths]);
+  }, [pathfinderPaths, CX, CY, OUTER_R]);
 
   // ── Spring for active key transition ──────────────────────────────────
 
@@ -276,7 +280,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
   const renderActiveKeyPos = useMemo((): [number, number] => {
     if (activeIdx < 0) return [CX, CY];
     return polarToXY(CX, CY, OUTER_R, nodeAngle(activeIdx));
-  }, [activeIdx]);
+  }, [activeIdx, CX, CY, OUTER_R]);
 
   // Aurora drift based on mode
   const auroraDrift = frame * 0.003;
@@ -290,7 +294,13 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
 
   return (
     <AbsoluteFill style={{ backgroundColor: palette.bg }}>
-      <svg width={W} height={H} viewBox={zoom.viewBox}>
+      <svg width={W} height={H} viewBox={(() => {
+        // Parse zoom viewBox and add gentle breathing on top
+        const breathX = Math.sin(frame * 0.003) * 8 * (1 + zoom.zoomProgress * 0.5);
+        const breathY = Math.cos(frame * 0.0025) * 5 * (1 + zoom.zoomProgress * 0.5);
+        const parts = zoom.viewBox.split(' ').map(Number);
+        return `${parts[0] + breathX} ${parts[1] + breathY} ${parts[2]} ${parts[3]}`;
+      })()}>
         <defs>
           {/* Reusable blur filters — max 3 */}
           <filter id="cof-glow-sm" x="-50%" y="-50%" width="200%" height="200%">
@@ -351,7 +361,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           opacity={0.05}
         />
         {/* Inner dodecagons */}
-        {[300, 220, 140].map((r, ri) => {
+        {[OUTER_R - 20, MIDDLE_R - 20, INNER_R - 20].map((r, ri) => {
           const pts = Array.from({ length: 12 }, (_, i) => polarToXY(CX, CY, r, nodeAngle(i)));
           return (
             <polygon
@@ -380,7 +390,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           <circle
             cx={renderActiveKeyPos[0]}
             cy={renderActiveKeyPos[1]}
-            r={280}
+            r={OUTER_R - 40}
             fill="url(#cof-heatmap)"
           />
         )}
@@ -483,15 +493,20 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           const [x, y] = polarToXY(CX, CY, INNER_R, angle);
           const isHighlighted = highlightedDegrees.includes(7) && i === activeIdx;
           const isDetectedDim = detectedRing.ring === 'dim' && detectedRing.index === i;
-          const r = isDetectedDim ? 10 : isHighlighted ? 8 : 6;
-          const opacity = isDetectedDim ? 0.85 : isHighlighted ? 0.7 : 0.2;
+          const zp = zoom.zoomProgress;
+          // When zoomed: ALL dim nodes become ghost dots (branch tree replaces navigation)
+          const idleR = isDetectedDim ? 10 : isHighlighted ? 8 : 6;
+          const ghostR = 3;
+          const r = idleR + (ghostR - idleR) * zp;
+          const baseOpacity = isDetectedDim ? 0.85 : isHighlighted ? 0.7 : 0.2;
+          const opacity = Math.max(0.02, baseOpacity * (1 - zp * 0.95));
 
           return (
             <g key={`dim-${i}`}>
-              {isDetectedDim && (
+              {isDetectedDim && zp < 0.5 && (
                 <>
-                  <circle cx={x} cy={y} r={r + 12} fill={palette.gold} opacity={0.06} />
-                  <circle cx={x} cy={y} r={r + 7} fill={palette.gold} opacity={0.12} />
+                  <circle cx={x} cy={y} r={r + 12} fill={palette.gold} opacity={0.06 * (1 - zp)} />
+                  <circle cx={x} cy={y} r={r + 7} fill={palette.gold} opacity={0.12 * (1 - zp)} />
                 </>
               )}
               <circle
@@ -505,7 +520,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
                 fill={isDetectedDim ? palette.gold : palette.textDim}
                 fontSize={isDetectedDim ? 10 : 8}
                 fontWeight={isDetectedDim ? 700 : 400}
-                opacity={isDetectedDim ? 0.9 : opacity * 0.8}
+                opacity={Math.max(0, (isDetectedDim ? 0.9 : opacity * 0.8) * (1 - zp))}
                 fontFamily="monospace"
               >
                 {key}
@@ -544,10 +559,15 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           const isRelativeMinor = i === activeIdx;
           const isDetectedMinor = detectedRing.ring === 'minor' && detectedRing.index === i;
           const isHighlightedMinor = isRelativeMinor || isDetectedMinor;
-          const nodeR = isHighlightedMinor ? 18 : 14;
-          const glowOpacity = isHighlightedMinor
+          const zp = zoom.zoomProgress;
+          // When zoomed: ALL minor nodes become ghost dots (branch tree replaces navigation)
+          const ghostR = 3;
+          const idleNodeR = isHighlightedMinor ? 18 : 14;
+          const nodeR = idleNodeR + (ghostR - idleNodeR) * zp;
+          const idleGlow = isHighlightedMinor
             ? 0.4 + 0.15 * Math.sin(frame * 0.06)
             : interpolate(dist, [0, 6], [0.25, 0.08], { extrapolateRight: 'clamp' });
+          const glowOpacity = Math.max(0.02, idleGlow * (1 - zp * 0.95));
 
           return (
             <g key={`min-${i}`}>
@@ -557,37 +577,39 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
                 fill="none"
                 stroke={palette.purple}
                 strokeWidth={isDetectedMinor ? 1.5 : 0.5}
-                opacity={isDetectedMinor ? 0.7 : glowOpacity * 0.4}
+                opacity={(isDetectedMinor ? 0.7 : glowOpacity * 0.4) * (1 - zp)}
               />
               {/* Glow — layered opacity circles instead of blur filter */}
-              {isHighlightedMinor && (
+              {isHighlightedMinor && zp < 0.5 && (
                 <>
                   <circle
                     cx={x} cy={y} r={nodeR + 22}
                     fill={palette.purple}
-                    opacity={0.05 + 0.02 * Math.sin(frame * 0.05)}
+                    opacity={(0.05 + 0.02 * Math.sin(frame * 0.05)) * (1 - zp)}
                   />
                   <circle
                     cx={x} cy={y} r={nodeR + 14}
                     fill={palette.purple}
-                    opacity={0.1 + 0.04 * Math.sin(frame * 0.05)}
+                    opacity={(0.1 + 0.04 * Math.sin(frame * 0.05)) * (1 - zp)}
                   />
                 </>
               )}
               {/* Node body */}
               <circle
                 cx={x} cy={y} r={nodeR}
-                fill={palette.bg}
+                fill={zp > 0.5 ? (palette.purple) : palette.bg}
                 stroke={isDetectedMinor ? palette.pink : palette.purple}
-                strokeWidth={isHighlightedMinor ? 2 : 1}
-                opacity={isDetectedMinor ? 0.9 : glowOpacity + 0.3}
+                strokeWidth={isHighlightedMinor ? 2 * (1 - zp) : 1 * (1 - zp)}
+                opacity={Math.max(0.04, (isDetectedMinor ? 0.9 : glowOpacity + 0.3) * (1 - zp * 0.9))}
               />
               {/* Inner fill */}
+              {zp < 0.5 && (
               <circle
-                cx={x} cy={y} r={nodeR - 3}
+                cx={x} cy={y} r={Math.max(0, nodeR - 3)}
                 fill={isDetectedMinor ? palette.pink : palette.purple}
-                opacity={isDetectedMinor ? 0.35 : glowOpacity * 0.3}
+                opacity={(isDetectedMinor ? 0.35 : glowOpacity * 0.3) * (1 - zp)}
               />
+              )}
               {/* Label */}
               <text
                 x={x} y={y + 4}
@@ -596,7 +618,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
                 fontSize={isDetectedMinor ? 13 : 11}
                 fontFamily="monospace"
                 fontWeight={isHighlightedMinor ? 700 : 400}
-                opacity={isDetectedMinor ? 1 : interpolate(dist, [0, 6], [1, 0.4], { extrapolateRight: 'clamp' })}
+                opacity={Math.max(0, (isDetectedMinor ? 1 : interpolate(dist, [0, 6], [1, 0.4], { extrapolateRight: 'clamp' })) * (1 - zp))}
               >
                 {key}
               </text>
@@ -604,136 +626,152 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           );
         })}
 
-        {/* ── Outer ring: Major keys ──────────────────────────────────── */}
+        {/* ── Outer ring: Major keys — predictive navigation ─────────── */}
         {MAJOR_KEYS.map((key, i) => {
           const angle = nodeAngle(i);
           const [bx, by] = polarToXY(CX, CY, OUTER_R, angle);
           const isActive = i === activeIdx;
           const isPlayed = playedIndices.has(i);
           const dist = activeIdx >= 0 ? fifthsDistance(i, activeIdx) : 6;
+          const zp = zoom.zoomProgress; // 0=idle, 1=note held
 
-          // Gravity offset
+          // Gravity offset (idle state only)
           const grav = gravityOffsets.get(i);
           const springVal = interpolate(Math.sin(frame * 0.025), [-1, 1], [0.5, 1]);
-          const x = bx + (grav ? grav.dx * springVal : 0);
-          const y = by + (grav ? grav.dy * springVal : 0);
+          const idleGx = grav ? grav.dx * springVal * (1 - zp) : 0;
+          const idleGy = grav ? grav.dy * springVal * (1 - zp) : 0;
+          const x = bx + idleGx;
+          const y = by + idleGy;
 
-          const nodeR = isActive
-            ? interpolate(pulseSpring, [0, 1], [24, 28])
-            : isPlayed
-              ? 27
-              : interpolate(dist, [0, 6], [24, 20], { extrapolateRight: 'clamp' });
+          // ── Predictive keyboard: classify each node ──
+          const isAdjacent = zoom.adjacentIndices.includes(i);
+          const pi = zoom.primaryPlayedIdx;
+
+          // Relationship label for adjacent nodes — expanded harmonic map
+          let relLabel = '';
+          let relColor = palette.cyan;
+          // Harmonic "tier" — how close/strong the relationship is (1=strongest)
+          let harmonicTier = 3;
+          if (pi >= 0 && isAdjacent && !isPlayed) {
+            const diff = ((i - pi) % 12 + 12) % 12;
+            if (diff === 1)  { relLabel = 'V';    relColor = palette.cyan;  harmonicTier = 1; }
+            else if (diff === 11) { relLabel = 'IV';   relColor = palette.teal;  harmonicTier = 1; }
+            else if (diff === 2)  { relLabel = 'ii';   relColor = '#60a5fa';     harmonicTier = 1; }
+            else if (diff === 10) { relLabel = 'bVII'; relColor = '#fb923c';     harmonicTier = 2; }
+            else if (diff === 3)  { relLabel = 'vi';   relColor = palette.purple; harmonicTier = 2; }
+            else if (diff === 9)  { relLabel = 'bVI';  relColor = '#e879f9';     harmonicTier = 2; }
+            else if (diff === 4)  { relLabel = 'iii';  relColor = '#818cf8';     harmonicTier = 3; }
+            else if (diff === 8)  { relLabel = 'bV';   relColor = '#f87171';     harmonicTier = 3; }
+            else if (diff === 5)  { relLabel = 'vii°'; relColor = '#fbbf24';     harmonicTier = 3; }
+            else if (diff === 7)  { relLabel = 'bIII'; relColor = '#34d399';     harmonicTier = 3; }
+          }
+
+          // ── Node sizing: when zoomed, ONLY the played node stays large ──
+          // All others become ghost dots — the branch tree provides navigation
+          const idleR = isActive
+            ? interpolate(pulseSpring, [0, 1], [26, 30])
+            : interpolate(dist, [0, 6], [26, 22], { extrapolateRight: 'clamp' });
+
+          const playedR = 28; // played node (smaller than before — zoomed view magnifies it)
+          const ghostR = 3;   // everything else becomes a tiny ghost
+
+          let targetR: number;
+          let targetOpacity: number;
+          if (isPlayed) {
+            targetR = playedR;
+            targetOpacity = 1;
+          } else {
+            // ALL non-played nodes become ghost dots when zoomed
+            targetR = ghostR;
+            targetOpacity = 0.04;
+          }
+
+          // Smooth transition between idle and zoomed states
+          const nodeR = idleR + (targetR - idleR) * zp;
+          const nodeOpacity = (isActive ? 1 : interpolate(dist, [0, 6], [1, 0.35], { extrapolateRight: 'clamp' }))
+            * (1 - zp) + targetOpacity * zp;
 
           const glowColor = isActive
             ? (activeMode === 'minor' ? palette.purple : palette.cyan)
-            : isPlayed
-              ? palette.teal
-              : palette.cyan;
-
-          const nodeOpacity = isActive
-            ? 1
-            : isPlayed
-              ? 0.8
-              : interpolate(dist, [0, 6], [1, 0.35], { extrapolateRight: 'clamp' });
+            : isPlayed ? palette.cyan
+            : isAdjacent ? relColor
+            : palette.cyan;
 
           return (
             <g key={`maj-${i}`}>
-              {/* Active key: massive radial glow */}
-              {isActive && (
+              {/* Active key glow (idle state) */}
+              {isActive && zp < 0.5 && (
                 <>
-                  <circle
-                    cx={x} cy={y} r={70}
-                    fill={glowColor}
-                    opacity={0.06 + 0.03 * Math.sin(frame * 0.04)}
+                  <circle cx={x} cy={y} r={70}
+                    fill={glowColor} opacity={(0.06 + 0.03 * Math.sin(frame * 0.04)) * (1 - zp * 2)}
                     filter="url(#cof-glow-lg)"
                   />
-                  <circle
-                    cx={x} cy={y} r={45}
-                    fill={glowColor}
-                    opacity={0.1 + 0.05 * Math.sin(frame * 0.06)}
+                  <circle cx={x} cy={y} r={45}
+                    fill={glowColor} opacity={(0.1 + 0.05 * Math.sin(frame * 0.06)) * (1 - zp * 2)}
                     filter="url(#cof-glow-md)"
                   />
-                  {/* Double ripple rings */}
-                  {[0, 15].map((offset) => {
-                    const rippleR = 30 + ((frame + offset) % 60);
-                    const rippleOpacity = interpolate(
-                      (frame + offset) % 60,
-                      [0, 60],
-                      [0.35, 0],
-                    );
+                </>
+              )}
+
+              {/* ── PLAYED: focused glow (scaled for zoom magnification) ── */}
+              {isPlayed && zp > 0.05 && (
+                <>
+                  <circle cx={x} cy={y}
+                    r={nodeR + 16 + 3 * Math.sin(frame * 0.06)}
+                    fill={palette.cyan} opacity={0.04 + 0.02 * zp}
+                  />
+                  <circle cx={x} cy={y}
+                    r={nodeR + 8}
+                    fill={palette.cyan} opacity={0.08 + 0.04 * zp}
+                  />
+                  {/* Neon ring */}
+                  <circle cx={x} cy={y} r={nodeR + 3}
+                    fill="none" stroke={palette.cyan}
+                    strokeWidth={1.5} opacity={0.5 + 0.2 * Math.sin(frame * 0.07)}
+                  />
+                  {/* Single subtle ripple */}
+                  {(() => {
+                    const ripR = nodeR + 4 + (frame % 50);
+                    const ripOp = interpolate(frame % 50, [0, 50], [0.15 * zp, 0]);
                     return (
-                      <circle
-                        key={`ripple-${offset}`}
-                        cx={x} cy={y} r={rippleR}
-                        fill="none"
-                        stroke={glowColor}
-                        strokeWidth={1.5}
-                        opacity={rippleOpacity}
+                      <circle cx={x} cy={y} r={ripR}
+                        fill="none" stroke={palette.cyan} strokeWidth={0.8} opacity={ripOp}
                       />
                     );
-                  })}
+                  })()}
                 </>
               )}
 
-              {/* Played note glow — layered opacity circles */}
-              {isPlayed && !isActive && (
-                <>
-                  <circle
-                    cx={x} cy={y} r={nodeR + 16}
-                    fill={palette.teal}
-                    opacity={0.05}
-                  />
-                  <circle
-                    cx={x} cy={y} r={nodeR + 10}
-                    fill={palette.teal}
-                    opacity={0.1}
-                  />
-                </>
-              )}
-
-              {/* Aurora glow aura for nearby nodes — layered opacity instead of blur */}
-              {dist <= 2 && !isActive && !isPlayed && (
-                <>
-                  <circle
-                    cx={x} cy={y} r={nodeR + 20}
-                    fill={palette.teal}
-                    opacity={0.03}
-                  />
-                  <circle
-                    cx={x} cy={y} r={nodeR + 12}
-                    fill={palette.teal}
-                    opacity={0.06}
-                  />
-                </>
-              )}
+              {/* Adjacent glow removed — branch tree provides navigation */}
 
               {/* Node body */}
-              <circle
-                cx={x} cy={y} r={nodeR}
+              <circle cx={x} cy={y} r={nodeR}
                 fill={palette.bg}
-                stroke={glowColor}
-                strokeWidth={isActive ? 2.5 : 1.5}
+                stroke={isPlayed ? palette.cyan : glowColor}
+                strokeWidth={isPlayed ? 3 : isAdjacent && zp > 0.3 ? 2 : 1.5}
                 opacity={nodeOpacity}
               />
-              {/* Inner fill — aurora gradient feel */}
-              <circle
-                cx={x} cy={y} r={nodeR - 4}
-                fill={glowColor}
-                opacity={isActive ? 0.2 + 0.08 * Math.sin(frame * 0.05) : nodeOpacity * 0.08}
+              {/* Inner fill */}
+              <circle cx={x} cy={y} r={Math.max(0, nodeR - 4)}
+                fill={isPlayed ? palette.cyan : glowColor}
+                opacity={isPlayed ? 0.35 + 0.1 * Math.sin(frame * 0.05)
+                  : isAdjacent && zp > 0.3 ? 0.15 * zp
+                  : isActive ? 0.2 + 0.08 * Math.sin(frame * 0.05) : nodeOpacity * 0.08}
               />
 
-              {/* Label */}
-              <text
-                x={x} y={y + 5}
+              {/* Key name label */}
+              <text x={x} y={y + (isPlayed && zp > 0.3 ? 4 : 5)}
                 textAnchor="middle"
-                fill={palette.text}
-                fontSize={isActive ? 16 : 14}
+                fill={isPlayed ? '#ffffff' : palette.text}
+                fontSize={isPlayed && zp > 0.3 ? 12 : 14}
                 fontFamily="monospace"
-                fontWeight={isActive ? 800 : 500}
+                fontWeight={isPlayed ? 900 : isActive ? 800 : 500}
                 opacity={nodeOpacity}
               >
                 {key}
               </text>
+
+              {/* Roman numeral labels moved to branch tree */}
             </g>
           );
         })}
@@ -900,7 +938,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
               const cx = startX + ci * (cardW + gap);
               const cy2 = H - 52;
               const isLatest = ci === total - 1;
-              const fadeOpacity = interpolate(ci, [0, total - 1], [0.25, 0.9]);
+              const fadeOpacity = total <= 1 ? 0.9 : interpolate(ci, [0, total - 1], [0.25, 0.9]);
 
               return (
                 <g key={`prog-${ci}`}>
@@ -961,101 +999,159 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
             />
           );
         })}
-        {/* ── Directional guide lines (zoomed view) ─────────────────────── */}
+        {/* ── Branch tree: local radial nodes around played chord ─────── */}
         {zoom.primaryPlayedIdx >= 0 && zoom.zoomProgress > 0.05 && (() => {
           const pi = zoom.primaryPlayedIdx;
           const [px, py] = polarToXY(CX, CY, OUTER_R, nodeAngle(pi));
-          const fifthUp = (pi + 1) % 12;
-          const fifthDown = (pi + 11) % 12;
-          const [upX, upY] = polarToXY(CX, CY, OUTER_R, nodeAngle(fifthUp));
-          const [dnX, dnY] = polarToXY(CX, CY, OUTER_R, nodeAngle(fifthDown));
-          const [minX, minY] = polarToXY(CX, CY, MIDDLE_R, nodeAngle(pi));
-          const lineOp = zoom.zoomProgress * 0.5;
-          const arrowSize = 8;
+          const zp = zoom.zoomProgress;
 
-          // Arrow head helper: draws a small triangle at (tx,ty) pointing from (fx,fy)
-          const arrowHead = (fx: number, fy: number, tx: number, ty: number, color: string, key: string) => {
-            const dx = tx - fx, dy = ty - fy;
-            const len = Math.sqrt(dx * dx + dy * dy);
-            if (len === 0) return null;
-            const ux = dx / len, uy = dy / len;
-            // Pull arrow back from target center so it doesn't overlap the node
-            const pullback = 30;
-            const ax = tx - ux * pullback, ay = ty - uy * pullback;
-            const px1 = ax - ux * arrowSize - uy * arrowSize * 0.5;
-            const py1 = ay - uy * arrowSize + ux * arrowSize * 0.5;
-            const px2 = ax - ux * arrowSize + uy * arrowSize * 0.5;
-            const py2 = ay - uy * arrowSize - ux * arrowSize * 0.5;
-            return <polygon key={key} points={`${ax},${ay} ${px1},${py1} ${px2},${py2}`} fill={color} opacity={lineOp * 1.4} />;
-          };
+          // Branch radius — distance from played node in SVG coords
+          // These are in the zoomed-in coordinate space, so they appear larger on screen
+          const branchR1 = 55 * scale;  // tier 1 — closest
+          const branchR2 = 85 * scale;  // tier 2
+          const branchR3 = 115 * scale; // tier 3 — furthest
+
+          // Branch targets with angular placement (local, not circle positions)
+          const branches: Array<{
+            label: string; roman: string; color: string;
+            angle: number; dist: number; tier: number;
+            transition: string; width: number;
+          }> = [
+            // Tier 1 — primary (inner ring, largest)
+            { label: MAJOR_KEYS[(pi + 1) % 12],  roman: 'V',    color: palette.cyan,   angle: -30,  dist: branchR1, tier: 1, transition: MAJOR_KEYS[(pi + 1) % 12] + '7', width: 3 },
+            { label: MAJOR_KEYS[(pi + 11) % 12], roman: 'IV',   color: palette.teal,   angle: -150, dist: branchR1, tier: 1, transition: '', width: 3 },
+            { label: MAJOR_KEYS[(pi + 2) % 12],  roman: 'ii',   color: '#60a5fa',      angle: 30,   dist: branchR1, tier: 1, transition: MAJOR_KEYS[(pi + 2) % 12] + '7', width: 2.5 },
+            // Tier 2 — common (middle ring)
+            { label: MINOR_KEYS[pi],              roman: 'vi',   color: palette.purple,  angle: 180,  dist: branchR2, tier: 2, transition: '', width: 2 },
+            { label: MAJOR_KEYS[(pi + 10) % 12], roman: 'bVII', color: '#fb923c',      angle: -100, dist: branchR2, tier: 2, transition: '', width: 2 },
+            { label: MAJOR_KEYS[(pi + 9) % 12],  roman: 'bVI',  color: '#e879f9',      angle: -60,  dist: branchR2, tier: 2, transition: '', width: 1.5 },
+            { label: MAJOR_KEYS[(pi + 3) % 12],  roman: 'iii',  color: '#818cf8',      angle: 80,   dist: branchR2, tier: 2, transition: MAJOR_KEYS[(pi + 3) % 12] + '7', width: 1.5 },
+            // Tier 3 — chromatic / exotic (outer ring)
+            { label: MAJOR_KEYS[(pi + 8) % 12],  roman: 'bV',   color: '#f87171',      angle: -80,  dist: branchR3, tier: 3, transition: '', width: 1 },
+            { label: MAJOR_KEYS[(pi + 5) % 12],  roman: 'vii°', color: palette.gold,   angle: 60,   dist: branchR3, tier: 3, transition: '', width: 1 },
+            { label: MAJOR_KEYS[(pi + 7) % 12],  roman: 'bIII', color: '#34d399',      angle: 140,  dist: branchR3, tier: 3, transition: '', width: 1 },
+            { label: MAJOR_KEYS[(pi + 4) % 12],  roman: 'V/vi', color: '#c084fc',      angle: 110,  dist: branchR3, tier: 3, transition: '', width: 1 },
+          ];
 
           return (
-            <g>
-              {/* Fifth up (clockwise) — cyan */}
-              <line x1={px} y1={py} x2={upX} y2={upY}
-                stroke={palette.cyan} strokeWidth={1.8} opacity={lineOp}
-                strokeDasharray="6 4" strokeDashoffset={-frame * 0.8}
-              />
-              {arrowHead(px, py, upX, upY, palette.cyan, 'arr-up')}
-              <text x={(px + upX) / 2 + 12} y={(py + upY) / 2 - 6}
-                fill={palette.cyan} fontSize={9} fontFamily="monospace"
-                opacity={lineOp * 1.2} textAnchor="start"
-              >V</text>
+            <g opacity={zp}>
+              {branches.map((b, bi) => {
+                // Position relative to the played node
+                const rad = (b.angle - 90) * Math.PI / 180;
+                const tx = px + b.dist * Math.cos(rad);
+                const ty = py + b.dist * Math.sin(rad);
 
-              {/* Fifth down (counter-clockwise) — teal */}
-              <line x1={px} y1={py} x2={dnX} y2={dnY}
-                stroke={palette.teal} strokeWidth={1.8} opacity={lineOp}
-                strokeDasharray="6 4" strokeDashoffset={-frame * 0.8}
-              />
-              {arrowHead(px, py, dnX, dnY, palette.teal, 'arr-dn')}
-              <text x={(px + dnX) / 2 - 16} y={(py + dnY) / 2 - 6}
-                fill={palette.teal} fontSize={9} fontFamily="monospace"
-                opacity={lineOp * 1.2} textAnchor="end"
-              >IV</text>
+                // Curved branch line — slight curve away from center
+                const mx = (px + tx) / 2;
+                const my = (py + ty) / 2;
+                const perpX = -(ty - py);
+                const perpY = (tx - px);
+                const perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
+                const curveMag = (b.tier === 1 ? 8 : b.tier === 2 ? 12 : 16) * scale;
+                const cpx = mx + (perpLen > 0 ? perpX / perpLen * curveMag : 0);
+                const cpy = my + (perpLen > 0 ? perpY / perpLen * curveMag : 0);
+                const arcD = `M ${px} ${py} Q ${cpx} ${cpy} ${tx} ${ty}`;
 
-              {/* Relative minor (inward) — purple */}
-              <line x1={px} y1={py} x2={minX} y2={minY}
-                stroke={palette.purple} strokeWidth={1.5} opacity={lineOp * 0.8}
-                strokeDasharray="4 3" strokeDashoffset={-frame * 0.6}
-              />
-              {arrowHead(px, py, minX, minY, palette.purple, 'arr-min')}
-              <text x={(px + minX) / 2 + 10} y={(py + minY) / 2 + 4}
-                fill={palette.purple} fontSize={8} fontFamily="monospace"
-                opacity={lineOp * 1.0} textAnchor="start"
-              >vi</text>
+                const nodeR = b.tier === 1 ? 14 * scale : b.tier === 2 ? 10 * scale : 8 * scale;
+                const dashLen = b.tier === 1 ? 8 : 5;
+                const gapLen = b.tier === 1 ? 4 : 5;
+
+                return (
+                  <g key={`branch-${bi}`}>
+                    {/* Glow under branch line */}
+                    {b.tier <= 2 && (
+                      <path d={arcD} fill="none"
+                        stroke={b.color} strokeWidth={b.width * 3}
+                        opacity={0.04} strokeLinecap="round"
+                      />
+                    )}
+                    {/* Branch line — animated dash flowing outward */}
+                    <path d={arcD} fill="none"
+                      stroke={b.color} strokeWidth={b.width}
+                      opacity={b.tier === 1 ? 0.5 : b.tier === 2 ? 0.35 : 0.2}
+                      strokeDasharray={`${dashLen} ${gapLen}`}
+                      strokeDashoffset={-frame * (b.tier === 1 ? 1.2 : 0.7)}
+                      strokeLinecap="round"
+                    />
+
+                    {/* Transition label on branch midpoint */}
+                    {b.transition && (
+                      <g>
+                        <rect
+                          x={cpx - 12 * scale} y={cpy - 5 * scale}
+                          width={24 * scale} height={10 * scale} rx={2}
+                          fill="rgba(8,14,24,0.85)"
+                          stroke={b.color} strokeWidth={0.3}
+                          opacity={0.7}
+                        />
+                        <text x={cpx} y={cpy + 2.5 * scale}
+                          textAnchor="middle" fill={b.color}
+                          fontSize={5.5 * scale} fontFamily="monospace" fontWeight={600}
+                          opacity={0.85}
+                        >
+                          {b.transition}
+                        </text>
+                      </g>
+                    )}
+
+                    {/* Target node — glass circle */}
+                    <circle cx={tx} cy={ty} r={nodeR + 6}
+                      fill={b.color} opacity={0.04 + 0.02 * Math.sin(frame * 0.05 + bi)}
+                    />
+                    <circle cx={tx} cy={ty} r={nodeR}
+                      fill={palette.bg} stroke={b.color}
+                      strokeWidth={b.tier === 1 ? 2 : 1.2}
+                      opacity={b.tier === 1 ? 0.9 : b.tier === 2 ? 0.7 : 0.5}
+                    />
+                    <circle cx={tx} cy={ty} r={nodeR - 3}
+                      fill={b.color}
+                      opacity={b.tier === 1 ? 0.15 : 0.08}
+                    />
+
+                    {/* Chord name */}
+                    <text x={tx} y={ty + 1}
+                      textAnchor="middle" dominantBaseline="central"
+                      fill={palette.text}
+                      fontSize={b.tier === 1 ? 9 * scale : b.tier === 2 ? 7 * scale : 6 * scale}
+                      fontFamily="monospace" fontWeight={b.tier === 1 ? 700 : 500}
+                      opacity={b.tier === 1 ? 1 : b.tier === 2 ? 0.85 : 0.65}
+                    >
+                      {b.label}
+                    </text>
+
+                    {/* Roman numeral below node */}
+                    <text x={tx} y={ty + nodeR + 6 * scale}
+                      textAnchor="middle"
+                      fill={b.color}
+                      fontSize={5 * scale} fontFamily="monospace" fontWeight={600}
+                      opacity={b.tier === 1 ? 0.7 : 0.45}
+                    >
+                      {b.roman}
+                    </text>
+
+                    {/* Flowing particle along branch */}
+                    {b.tier <= 2 && (() => {
+                      const period = b.tier === 1 ? 60 : 90;
+                      const progress = ((frame * 2 + bi * 20) % period) / period;
+                      const t2 = progress;
+                      const mt = 1 - t2;
+                      const bx2 = mt * mt * px + 2 * mt * t2 * cpx + t2 * t2 * tx;
+                      const by2 = mt * mt * py + 2 * mt * t2 * cpy + t2 * t2 * ty;
+                      return (
+                        <>
+                          <circle cx={bx2} cy={by2} r={2.5 * scale} fill={b.color} opacity={0.12} />
+                          <circle cx={bx2} cy={by2} r={1.2 * scale} fill={b.color} opacity={0.6} />
+                        </>
+                      );
+                    })()}
+                  </g>
+                );
+              })}
             </g>
           );
         })()}
 
-        {/* ── Chord keyboards: crossfade between adjacent (zoomed) and full (unzoomed) ── */}
-        {zoom.primaryPlayedIdx >= 0 && zoom.zoomProgress > 0.01 && (
-          <AdjacentChordsPanel
-            anchorX={polarToXY(CX, CY, OUTER_R, nodeAngle(zoom.primaryPlayedIdx))[0]}
-            anchorY={polarToXY(CX, CY, OUTER_R, nodeAngle(zoom.primaryPlayedIdx))[1]}
-            playedIndex={zoom.primaryPlayedIdx}
-            accentColor={palette.cyan}
-            secondaryColor={palette.purple}
-            textColor={palette.text}
-            textDimColor={palette.textDim}
-            opacity={zoom.zoomProgress}
-          />
-        )}
-        {zoom.zoomProgress < 0.99 && (
-          <DiatonicChordsPanel
-            x={1660}
-            y={120}
-            activeKey={activeKey}
-            activeMode={activeMode}
-            accentColor={palette.cyan}
-            secondaryColor={palette.purple}
-            textColor={palette.text}
-            textDimColor={palette.textDim}
-            kbWidth={130}
-            kbHeight={38}
-            spacing={68}
-            opacity={0.85 * (1 - zoom.zoomProgress)}
-          />
-        )}
+        {/* Keyboard panels removed — app bottom bar handles chord suggestions */}
       </svg>
     </AbsoluteFill>
   );

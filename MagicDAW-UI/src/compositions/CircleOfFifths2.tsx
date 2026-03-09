@@ -6,7 +6,6 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
-import { DiatonicChordsPanel, AdjacentChordsPanel } from './MiniKeyboard';
 import { useCircleZoom, chordToRingIndex } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -25,17 +24,14 @@ export interface CircleOfFifthsProps {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const W = 1920;
-const H = 1080;
-const CX = W / 2;
-const CY = H / 2;
-
-const OUTER_R = 320;
-const MIDDLE_R = 240;
-const INNER_R = 160;
-const NODE_R_OUTER = 28;
-const NODE_R_MIDDLE = 22;
-const NODE_R_INNER = 18;
+// Base design dimensions — actual W/H come from useVideoConfig()
+const BASE_H = 1080;
+const OUTER_R_BASE = 420;
+const MIDDLE_R_BASE = 320;
+const INNER_R_BASE = 220;
+const NODE_R_OUTER_BASE = 28;
+const NODE_R_MIDDLE_BASE = 22;
+const NODE_R_INNER_BASE = 18;
 
 const MAJOR_KEYS = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F'];
 const MINOR_KEYS = ['Am', 'Em', 'Bm', 'F#m', 'C#m', 'G#m', 'Ebm', 'Bbm', 'Fm', 'Cm', 'Gm', 'Dm'];
@@ -57,7 +53,7 @@ const aurora = {
   textDim: '#94a3b8',
 };
 
-const MANDALA_RADII = [80, 140, 200, 260, 320, 380];
+const MANDALA_RADII_BASE = [80, 140, 200, 260, 320, 380];
 const RADIAL_COUNT = 24;
 const STAR_COUNT = 180;
 
@@ -79,9 +75,9 @@ function normalizeKey(k: string): string {
   return normalized + k.slice(root[1].length);
 }
 
-function posOnRing(index: number, radius: number, offsetDeg: number = -90): [number, number] {
+function posOnRing(cx: number, cy: number, index: number, radius: number, offsetDeg: number = -90): [number, number] {
   const angle = ((index / 12) * 360 + offsetDeg) * (Math.PI / 180);
-  return [CX + radius * Math.cos(angle), CY + radius * Math.sin(angle)];
+  return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)];
 }
 
 function angleDeg(index: number, offsetDeg: number = -90): number {
@@ -114,7 +110,18 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
   highlightedDegrees,
 }) => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, width: W, height: H } = useVideoConfig();
+  const CX = W / 2;
+  const CY = H / 2;
+
+  // Scale radii proportionally to height
+  const scale = H / BASE_H;
+  const OUTER_R = OUTER_R_BASE * scale;
+  const MIDDLE_R = MIDDLE_R_BASE * scale;
+  const INNER_R = INNER_R_BASE * scale;
+  const NODE_R_OUTER = NODE_R_OUTER_BASE * scale;
+  const NODE_R_MIDDLE = NODE_R_MIDDLE_BASE * scale;
+  const NODE_R_INNER = NODE_R_INNER_BASE * scale;
 
   // ── Derived state ──────────────────────────────────────────────────────
 
@@ -159,21 +166,21 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
       speed: rng() * 0.03 + 0.01,
       hue: rng() > 0.7 ? (rng() > 0.5 ? 280 : 180) : 220,
     }));
-  }, []);
+  }, [W, H]);
 
   // ── Outer node positions (cached) ────────────────────────────────────
 
   const outerPositions = useMemo(
-    () => MAJOR_KEYS.map((_, i) => posOnRing(i, OUTER_R)),
-    [],
+    () => MAJOR_KEYS.map((_, i) => posOnRing(CX, CY, i, OUTER_R)),
+    [CX, CY, OUTER_R],
   );
   const middlePositions = useMemo(
-    () => MINOR_KEYS.map((_, i) => posOnRing(i, MIDDLE_R)),
-    [],
+    () => MINOR_KEYS.map((_, i) => posOnRing(CX, CY, i, MIDDLE_R)),
+    [CX, CY, MIDDLE_R],
   );
   const innerPositions = useMemo(
-    () => DIM_KEYS.map((_, i) => posOnRing(i, INNER_R)),
-    [],
+    () => DIM_KEYS.map((_, i) => posOnRing(CX, CY, i, INNER_R)),
+    [CX, CY, INNER_R],
   );
 
   // ── Pathfinder edge path ─────────────────────────────────────────────
@@ -287,13 +294,14 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
 
   const renderMandala = () => {
     const mandalaPulse = interpolate(pulsePhase, [0, 1], [0.08, 0.16]);
+    const mandalaRadii = MANDALA_RADII_BASE.map(r => r * scale);
     return (
       <g
         transform={`rotate(${mandalaRotation}, ${CX}, ${CY})`}
         opacity={0.4}
       >
         {/* Concentric circles */}
-        {MANDALA_RADII.map((r, i) => (
+        {mandalaRadii.map((r, i) => (
           <circle
             key={`mandala-c-${i}`}
             cx={CX}
@@ -308,8 +316,8 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
         {/* Radial lines */}
         {Array.from({ length: RADIAL_COUNT }, (_, i) => {
           const angle = (i / RADIAL_COUNT) * 360 * (Math.PI / 180);
-          const x2 = CX + 400 * Math.cos(angle);
-          const y2 = CY + 400 * Math.sin(angle);
+          const x2 = CX + (400 * scale) * Math.cos(angle);
+          const y2 = CY + (400 * scale) * Math.sin(angle);
           return (
             <line
               key={`mandala-r-${i}`}
@@ -868,7 +876,7 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
     return (
       <g>
         {recent.map((chord, i) => {
-          const alpha = interpolate(i, [0, recent.length - 1], [0.3, 1]);
+          const alpha = recent.length <= 1 ? 1 : interpolate(i, [0, recent.length - 1], [0.3, 1]);
           return (
             <text
               key={`prog-${i}`}
@@ -1020,7 +1028,7 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
       }}
     >
       <svg
-        viewBox={zoom.viewBox}
+        viewBox={`0 0 ${W} ${H}`}
         width="100%"
         height="100%"
         style={{ position: 'absolute', inset: 0 }}
@@ -1031,7 +1039,7 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
         <circle
           cx={CX}
           cy={CY}
-          r={450}
+          r={450 * scale}
           fill="url(#cof2-aurora-radial)"
         />
 
@@ -1072,35 +1080,7 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
         {/* Progression trail */}
         {renderProgression()}
 
-        {/* ── Chord keyboards: crossfade between adjacent and diatonic ── */}
-        {zoom.primaryPlayedIdx >= 0 && zoom.zoomProgress > 0.01 && (
-          <AdjacentChordsPanel
-            anchorX={posOnRing(zoom.primaryPlayedIdx, OUTER_R)[0]}
-            anchorY={posOnRing(zoom.primaryPlayedIdx, OUTER_R)[1]}
-            playedIndex={zoom.primaryPlayedIdx}
-            accentColor="#67e8f9"
-            secondaryColor="#a78bfa"
-            textColor="#e2e8f0"
-            textDimColor="#94a3b8"
-            opacity={zoom.zoomProgress}
-          />
-        )}
-        {zoom.zoomProgress < 0.99 && (
-          <DiatonicChordsPanel
-            x={1660}
-            y={120}
-            activeKey={activeKey}
-            activeMode={activeMode}
-            accentColor="#67e8f9"
-            secondaryColor="#a78bfa"
-            textColor="#e2e8f0"
-            textDimColor="#94a3b8"
-            kbWidth={130}
-            kbHeight={38}
-            spacing={68}
-            opacity={0.85 * (1 - zoom.zoomProgress)}
-          />
-        )}
+        {/* Keyboard panels removed — app bottom bar handles chord suggestions */}
       </svg>
     </AbsoluteFill>
   );

@@ -379,8 +379,8 @@ export const AdjacentChordsPanel: React.FC<AdjacentChordsPanelProps> = ({
     return result;
   }, [playedIndex]);
 
-  const panelX = anchorX + 60;
-  const panelY = anchorY - (entries.length * 50) / 2;
+  const panelX = anchorX;
+  const panelY = anchorY;
 
   return (
     <g opacity={opacity}>
