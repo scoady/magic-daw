@@ -6,7 +6,8 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
-import { DiatonicChordsPanel } from './MiniKeyboard';
+import { DiatonicChordsPanel, AdjacentChordsPanel } from './MiniKeyboard';
+import { useCircleZoom } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -132,6 +133,20 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
     () => new Set(activeNotes.map((n) => ((n % 12) * 7) % 12)),
     [activeNotes],
   );
+
+  // ── Zoom into played node's quadrant
+  const zoom = useCircleZoom({
+    playedIndices,
+    cx: CX, cy: CY, outerR: OUTER_R,
+    fullW: W, fullH: H,
+    frame, fps,
+    zoomFraction: 0.5,
+  });
+
+  const primaryPlayedIdx = useMemo(() => {
+    if (playedIndices.size === 0) return -1;
+    return playedIndices.values().next().value!;
+  }, [playedIndices]);
 
   // ── Stars background ──────────────────────────────────────────────────
 
@@ -949,7 +964,7 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
       }}
     >
       <svg
-        viewBox={`0 0 ${W} ${H}`}
+        viewBox={zoom.viewBox}
         width="100%"
         height="100%"
         style={{ position: 'absolute', inset: 0 }}
@@ -1001,21 +1016,34 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
         {/* Progression trail */}
         {renderProgression()}
 
-        {/* ── Diatonic chords with mini keyboards ────────────────────── */}
-        <DiatonicChordsPanel
-          x={1660}
-          y={120}
-          activeKey={activeKey}
-          activeMode={activeMode}
-          accentColor="#67e8f9"
-          secondaryColor="#a78bfa"
-          textColor="#e2e8f0"
-          textDimColor="#94a3b8"
-          kbWidth={130}
-          kbHeight={38}
-          spacing={68}
-          opacity={0.85}
-        />
+        {/* ── Chord keyboards: zoomed = adjacent only, unzoomed = all 7 ── */}
+        {zoom.isZoomed && primaryPlayedIdx >= 0 ? (
+          <AdjacentChordsPanel
+            anchorX={posOnRing(primaryPlayedIdx, OUTER_R)[0]}
+            anchorY={posOnRing(primaryPlayedIdx, OUTER_R)[1]}
+            playedIndex={primaryPlayedIdx}
+            accentColor="#67e8f9"
+            secondaryColor="#a78bfa"
+            textColor="#e2e8f0"
+            textDimColor="#94a3b8"
+            opacity={zoom.zoomProgress}
+          />
+        ) : (
+          <DiatonicChordsPanel
+            x={1660}
+            y={120}
+            activeKey={activeKey}
+            activeMode={activeMode}
+            accentColor="#67e8f9"
+            secondaryColor="#a78bfa"
+            textColor="#e2e8f0"
+            textDimColor="#94a3b8"
+            kbWidth={130}
+            kbHeight={38}
+            spacing={68}
+            opacity={0.85 * (1 - zoom.zoomProgress)}
+          />
+        )}
       </svg>
     </AbsoluteFill>
   );

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 
 // ── Chord voicing engine ──────────────────────────────────────────────────
 
@@ -261,6 +261,186 @@ export const DiatonicChordsPanel: React.FC<DiatonicChordsPanelProps> = ({
               width={kbWidth}
               height={kbHeight}
               highlightNotes={notes}
+              highlightColor={color}
+              highlightBlackColor={color}
+            />
+          </g>
+        );
+      })}
+    </g>
+  );
+};
+
+// ── Adjacent Chords Panel (for zoom view) ────────────────────────────────
+
+const MAJOR_KEYS_CIRCLE = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F'];
+const MINOR_KEYS_CIRCLE = ['Am', 'Em', 'Bm', 'F#m', 'C#m', 'G#m', 'Ebm', 'Bbm', 'Fm', 'Cm', 'Gm', 'Dm'];
+
+interface AdjacentChordsPanelProps {
+  /** Center X of the played node (SVG coords) */
+  anchorX: number;
+  /** Center Y of the played node (SVG coords) */
+  anchorY: number;
+  /** The primary played index on circle of fifths */
+  playedIndex: number;
+  /** Accent color */
+  accentColor?: string;
+  /** Secondary color */
+  secondaryColor?: string;
+  /** Text color */
+  textColor?: string;
+  /** Dim text color */
+  textDimColor?: string;
+  /** Overall opacity */
+  opacity?: number;
+}
+
+/**
+ * Shows mini keyboards for adjacent chords when zoomed in.
+ * Positioned near the played node, showing only directly available next chords:
+ * - Current chord (the played note)
+ * - V (fifth up / clockwise)
+ * - IV (fifth down / counter-clockwise)
+ * - vi (relative minor)
+ */
+export const AdjacentChordsPanel: React.FC<AdjacentChordsPanelProps> = ({
+  anchorX,
+  anchorY,
+  playedIndex,
+  accentColor = '#67e8f9',
+  secondaryColor = '#a78bfa',
+  textColor = '#e2e8f0',
+  textDimColor = '#94a3b8',
+  opacity = 1,
+}) => {
+  const kbWidth = 100;
+  const kbHeight = 32;
+
+  const entries = useMemo(() => {
+    const result: Array<{
+      name: string;
+      notes: number[];
+      label: string;
+      isCurrent: boolean;
+      isMinor: boolean;
+    }> = [];
+
+    const currentKey = MAJOR_KEYS_CIRCLE[playedIndex];
+    if (currentKey) {
+      const rootPc = normNote(currentKey);
+      result.push({
+        name: currentKey,
+        notes: [rootPc, (rootPc + 4) % 12, (rootPc + 7) % 12],
+        label: 'NOW PLAYING',
+        isCurrent: true,
+        isMinor: false,
+      });
+    }
+
+    const fifthUp = (playedIndex + 1) % 12;
+    const fifthUpKey = MAJOR_KEYS_CIRCLE[fifthUp];
+    if (fifthUpKey) {
+      const rootPc = normNote(fifthUpKey);
+      result.push({
+        name: fifthUpKey,
+        notes: [rootPc, (rootPc + 4) % 12, (rootPc + 7) % 12],
+        label: 'V \u2192 fifth up',
+        isCurrent: false,
+        isMinor: false,
+      });
+    }
+
+    const fifthDown = (playedIndex + 11) % 12;
+    const fifthDownKey = MAJOR_KEYS_CIRCLE[fifthDown];
+    if (fifthDownKey) {
+      const rootPc = normNote(fifthDownKey);
+      result.push({
+        name: fifthDownKey,
+        notes: [rootPc, (rootPc + 4) % 12, (rootPc + 7) % 12],
+        label: 'IV \u2190 fifth down',
+        isCurrent: false,
+        isMinor: false,
+      });
+    }
+
+    const relMinor = MINOR_KEYS_CIRCLE[playedIndex];
+    if (relMinor) {
+      const minRoot = relMinor.replace(/m$/, '');
+      const rootPc = normNote(minRoot);
+      result.push({
+        name: relMinor,
+        notes: [rootPc, (rootPc + 3) % 12, (rootPc + 7) % 12],
+        label: 'vi \u2194 relative minor',
+        isCurrent: false,
+        isMinor: true,
+      });
+    }
+
+    return result;
+  }, [playedIndex]);
+
+  const panelX = anchorX + 60;
+  const panelY = anchorY - (entries.length * 50) / 2;
+
+  return (
+    <g opacity={opacity}>
+      <rect
+        x={panelX - 12}
+        y={panelY - 22}
+        width={kbWidth + 60}
+        height={entries.length * 50 + 20}
+        rx={6}
+        fill="rgba(0,0,0,0.5)"
+        stroke="rgba(255,255,255,0.06)"
+        strokeWidth={0.5}
+      />
+      <text
+        x={panelX + kbWidth / 2 + 12}
+        y={panelY - 8}
+        textAnchor="middle"
+        fill={textDimColor}
+        fontSize={7}
+        fontFamily="'SF Pro Display', system-ui"
+        letterSpacing="0.2em"
+      >
+        NEXT CHORDS
+      </text>
+
+      {entries.map((entry, i) => {
+        const ey = panelY + i * 50;
+        const color = entry.isCurrent ? accentColor : entry.isMinor ? secondaryColor : accentColor;
+        const entryOpacity = entry.isCurrent ? 1 : 0.85;
+
+        return (
+          <g key={`adj-${i}`} opacity={entryOpacity}>
+            <text
+              x={panelX}
+              y={ey + 2}
+              fill={entry.isCurrent ? accentColor : textDimColor}
+              fontSize={6}
+              fontFamily="'SF Pro Display', system-ui"
+              letterSpacing="0.1em"
+              opacity={0.7}
+            >
+              {entry.label}
+            </text>
+            <text
+              x={panelX + kbWidth + 20}
+              y={ey + 24}
+              textAnchor="end"
+              fill={color}
+              fontSize={14}
+              fontWeight={entry.isCurrent ? 700 : 500}
+              fontFamily="'Georgia', 'Palatino', serif"
+            >
+              {entry.name}
+            </text>
+            <MiniKeyboard
+              x={panelX}
+              y={ey + 8}
+              width={kbWidth}
+              height={kbHeight}
+              highlightNotes={entry.notes}
               highlightColor={color}
               highlightBlackColor={color}
             />

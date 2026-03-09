@@ -1,0 +1,166 @@
+import { useMemo, useRef } from 'react';
+import { spring, interpolate } from 'remotion';
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+export interface ZoomTarget {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface ZoomState {
+  viewBox: string;
+  isZoomed: boolean;
+  /** Circle-of-fifths indices of the "next playable" chords (adjacent fifths + relative minor) */
+  adjacentIndices: number[];
+  /** Zoom progress 0→1 (0=full view, 1=fully zoomed) */
+  zoomProgress: number;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function polarToXY(cx: number, cy: number, r: number, index: number): [number, number] {
+  const angleDeg = (index / 12) * 360;
+  const rad = ((angleDeg - 90) * Math.PI) / 180;
+  return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+}
+
+// ── Hook ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Computes a smoothly animated SVG viewBox that zooms into the quadrant
+ * containing the played note(s) on the circle of fifths.
+ *
+ * When no notes are played, returns the full viewport.
+ * When zoomed, also returns the indices of adjacent "next playable" chords
+ * so the composition can show only relevant mini keyboards.
+ */
+export function useCircleZoom(opts: {
+  playedIndices: Set<number>;
+  cx: number;
+  cy: number;
+  outerR: number;
+  fullW: number;
+  fullH: number;
+  frame: number;
+  fps: number;
+  /** Zoom level: fraction of full viewport (0.5 = 2× zoom). Default 0.5 */
+  zoomFraction?: number;
+}): ZoomState {
+  const {
+    playedIndices,
+    cx, cy, outerR,
+    fullW, fullH,
+    frame, fps,
+    zoomFraction = 0.5,
+  } = opts;
+
+  // Compute target viewBox based on played notes
+  const zoomTarget = useMemo((): ZoomTarget => {
+    if (playedIndices.size === 0) {
+      return { x: 0, y: 0, w: fullW, h: fullH };
+    }
+
+    // Find centroid of played nodes on outer ring
+    let sumX = 0, sumY = 0, count = 0;
+    playedIndices.forEach((idx) => {
+      const [nx, ny] = polarToXY(cx, cy, outerR, idx);
+      sumX += nx;
+      sumY += ny;
+      count++;
+    });
+    const centroidX = sumX / count;
+    const centroidY = sumY / count;
+
+    // Zoom window
+    const zw = fullW * zoomFraction;
+    const zh = fullH * zoomFraction;
+
+    // Center on centroid, clamp to viewport
+    return {
+      x: Math.max(0, Math.min(fullW - zw, centroidX - zw / 2)),
+      y: Math.max(0, Math.min(fullH - zh, centroidY - zh / 2)),
+      w: zw,
+      h: zh,
+    };
+  }, [playedIndices, cx, cy, outerR, fullW, fullH, zoomFraction]);
+
+  // Track previous target for spring animation
+  const prevRef = useRef<{ target: ZoomTarget; changeFrame: number }>({
+    target: { x: 0, y: 0, w: fullW, h: fullH },
+    changeFrame: 0,
+  });
+
+  // Detect target change
+  const prev = prevRef.current;
+  const targetChanged =
+    prev.target.x !== zoomTarget.x ||
+    prev.target.y !== zoomTarget.y ||
+    prev.target.w !== zoomTarget.w ||
+    prev.target.h !== zoomTarget.h;
+
+  if (targetChanged) {
+    // Snapshot the current interpolated position as the new "from"
+    const elapsed = frame - prev.changeFrame;
+    const oldProgress = Math.min(1, elapsed / (fps * 1.5));
+    prevRef.current = {
+      target: {
+        x: prev.target.x + (zoomTarget.x - prev.target.x) * oldProgress,
+        y: prev.target.y + (zoomTarget.y - prev.target.y) * oldProgress,
+        w: prev.target.w + (zoomTarget.w - prev.target.w) * oldProgress,
+        h: prev.target.h + (zoomTarget.h - prev.target.h) * oldProgress,
+      },
+      changeFrame: frame,
+    };
+  }
+
+  const from = prevRef.current.target;
+  const elapsed = frame - prevRef.current.changeFrame;
+
+  // Spring-driven progress
+  const progress = spring({
+    frame: elapsed,
+    fps,
+    config: { damping: 18, stiffness: 60, mass: 0.8 },
+    durationInFrames: Math.round(fps * 2),
+  });
+
+  const vx = interpolate(progress, [0, 1], [from.x, zoomTarget.x]);
+  const vy = interpolate(progress, [0, 1], [from.y, zoomTarget.y]);
+  const vw = interpolate(progress, [0, 1], [from.w, zoomTarget.w]);
+  const vh = interpolate(progress, [0, 1], [from.h, zoomTarget.h]);
+
+  const isZoomed = playedIndices.size > 0;
+
+  // Compute adjacent "next playable" indices
+  const adjacentIndices = useMemo(() => {
+    if (playedIndices.size === 0) return [];
+
+    const indices: Set<number> = new Set();
+    playedIndices.forEach((idx) => {
+      // The played note itself
+      indices.add(idx);
+      // Adjacent fifths (clockwise and counter-clockwise)
+      indices.add((idx + 1) % 12);
+      indices.add((idx + 11) % 12);
+      // Two steps away (less common but still visible)
+      indices.add((idx + 2) % 12);
+      indices.add((idx + 10) % 12);
+    });
+    return Array.from(indices).sort((a, b) => a - b);
+  }, [playedIndices]);
+
+  // Zoom progress for opacity transitions (0 = full, 1 = zoomed)
+  const zoomProgress = isZoomed
+    ? interpolate(progress, [0, 1], [0, 1])
+    : interpolate(progress, [0, 1], [1, 0]);
+
+  return {
+    viewBox: `${vx} ${vy} ${vw} ${vh}`,
+    isZoomed,
+    adjacentIndices,
+    zoomProgress: isZoomed ? progress : 1 - progress,
+  };
+}

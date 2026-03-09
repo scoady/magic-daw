@@ -6,7 +6,8 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
-import { DiatonicChordsPanel } from './MiniKeyboard';
+import { DiatonicChordsPanel, AdjacentChordsPanel } from './MiniKeyboard';
+import { useCircleZoom } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -120,6 +121,20 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
     [activeNotes],
   );
 
+  // ── Zoom into played node's quadrant
+  const zoom = useCircleZoom({
+    playedIndices,
+    cx: CX, cy: CY, outerR: OUTER_R,
+    fullW: W, fullH: H,
+    frame, fps,
+    zoomFraction: 0.45,  // tighter zoom for minimalist aesthetic
+  });
+
+  const primaryPlayedIdx = useMemo(() => {
+    if (playedIndices.size === 0) return -1;
+    return playedIndices.values().next().value!;
+  }, [playedIndices]);
+
   // ── Pathfinder lookup ──────────────────────────────────────────────────
 
   const pathfinderNodeSet = useMemo(() => {
@@ -215,7 +230,7 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
 
   return (
     <AbsoluteFill style={{ backgroundColor: palette.bg }}>
-      <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H}>
+      <svg viewBox={zoom.viewBox} width={W} height={H}>
         <defs>
           {/* Massive glow for active key */}
           <filter id="gw-glow-massive" x="-200%" y="-200%" width="500%" height="500%">
@@ -533,21 +548,37 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
           );
         })}
 
-        {/* Diatonic chords with mini keyboards */}
-        <DiatonicChordsPanel
-          x={1660}
-          y={120}
-          activeKey={activeKey}
-          activeMode={activeMode}
-          accentColor="#bfdbfe"
-          secondaryColor="rgba(255,255,255,0.5)"
-          textColor="rgba(255,255,255,0.7)"
-          textDimColor="rgba(255,255,255,0.3)"
-          kbWidth={130}
-          kbHeight={38}
-          spacing={68}
-          opacity={0.6}
-        />
+        {/* ── Chord keyboards: zoomed = adjacent only, unzoomed = all 7 ── */}
+        {zoom.isZoomed && primaryPlayedIdx >= 0 ? (() => {
+          const pos = ringPos(primaryPlayedIdx, OUTER_R);
+          return (
+            <AdjacentChordsPanel
+              anchorX={pos.x}
+              anchorY={pos.y}
+              playedIndex={primaryPlayedIdx}
+              accentColor="#bfdbfe"
+              secondaryColor="rgba(255,255,255,0.5)"
+              textColor="rgba(255,255,255,0.7)"
+              textDimColor="rgba(255,255,255,0.3)"
+              opacity={zoom.zoomProgress}
+            />
+          );
+        })() : (
+          <DiatonicChordsPanel
+            x={1660}
+            y={120}
+            activeKey={activeKey}
+            activeMode={activeMode}
+            accentColor="#bfdbfe"
+            secondaryColor="rgba(255,255,255,0.5)"
+            textColor="rgba(255,255,255,0.7)"
+            textDimColor="rgba(255,255,255,0.3)"
+            kbWidth={130}
+            kbHeight={38}
+            spacing={68}
+            opacity={0.6 * (1 - zoom.zoomProgress)}
+          />
+        )}
       </svg>
     </AbsoluteFill>
   );

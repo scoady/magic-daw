@@ -6,7 +6,8 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
-import { DiatonicChordsPanel } from './MiniKeyboard';
+import { DiatonicChordsPanel, AdjacentChordsPanel } from './MiniKeyboard';
+import { useCircleZoom } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -183,6 +184,21 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
     [activeNotes],
   );
 
+  // ── Zoom into played node's quadrant ─────────────────────────────────
+  const zoom = useCircleZoom({
+    playedIndices,
+    cx: CX, cy: CY, outerR: OUTER_R,
+    fullW: W, fullH: H,
+    frame, fps,
+    zoomFraction: 0.5,
+  });
+
+  // Primary played index (first one for anchor positioning)
+  const primaryPlayedIdx = useMemo(() => {
+    if (playedIndices.size === 0) return -1;
+    return playedIndices.values().next().value!;
+  }, [playedIndices]);
+
   const bgStars = useMemo(() => generateStars(220), []);
   const accretionDisk = useMemo(() => generateAccretionDisk(28), []);
   const dodecagon = useMemo(() => generateDodecagonPoints(), []);
@@ -274,7 +290,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
 
   return (
     <AbsoluteFill style={{ backgroundColor: palette.bg }}>
-      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
+      <svg width={W} height={H} viewBox={zoom.viewBox}>
         <defs>
           {/* Reusable blur filters — max 3 */}
           <filter id="cof-glow-sm" x="-50%" y="-50%" width="200%" height="200%">
@@ -935,21 +951,34 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
             />
           );
         })}
-        {/* ── Diatonic chords with mini keyboards ────────────────────── */}
-        <DiatonicChordsPanel
-          x={1660}
-          y={120}
-          activeKey={activeKey}
-          activeMode={activeMode}
-          accentColor={palette.cyan}
-          secondaryColor={palette.purple}
-          textColor={palette.text}
-          textDimColor={palette.textDim}
-          kbWidth={130}
-          kbHeight={38}
-          spacing={68}
-          opacity={0.85}
-        />
+        {/* ── Chord keyboards: zoomed = adjacent only, unzoomed = all 7 ── */}
+        {zoom.isZoomed && primaryPlayedIdx >= 0 ? (
+          <AdjacentChordsPanel
+            anchorX={polarToXY(CX, CY, OUTER_R, nodeAngle(primaryPlayedIdx))[0]}
+            anchorY={polarToXY(CX, CY, OUTER_R, nodeAngle(primaryPlayedIdx))[1]}
+            playedIndex={primaryPlayedIdx}
+            accentColor={palette.cyan}
+            secondaryColor={palette.purple}
+            textColor={palette.text}
+            textDimColor={palette.textDim}
+            opacity={zoom.zoomProgress}
+          />
+        ) : (
+          <DiatonicChordsPanel
+            x={1660}
+            y={120}
+            activeKey={activeKey}
+            activeMode={activeMode}
+            accentColor={palette.cyan}
+            secondaryColor={palette.purple}
+            textColor={palette.text}
+            textDimColor={palette.textDim}
+            kbWidth={130}
+            kbHeight={38}
+            spacing={68}
+            opacity={0.85 * (1 - zoom.zoomProgress)}
+          />
+        )}
       </svg>
     </AbsoluteFill>
   );
