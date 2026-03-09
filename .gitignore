@@ -34,3 +34,4 @@ GeneratedPlugins/
 # Audio cache
 *.wav.cache
 *.aiff.cache
+dist/
