@@ -12,6 +12,7 @@ import { MixView } from './views/MixView';
 import { InstrumentView } from './views/InstrumentView';
 import { PluginView } from './views/PluginView';
 import { ChordVisualizerPanel } from './components/ChordVisualizerPanel';
+import { CircleOfFifthsPanel } from './components/CircleOfFifthsPanel';
 import { ToastProvider, useToast } from './components/Toast';
 import { ContextMenuProvider } from './components/ContextMenu';
 
@@ -22,6 +23,7 @@ const VIEW_TABS: { id: ViewId; label: string; key: string }[] = [
   { id: 'instruments', label: 'Instruments', key: '4' },
   { id: 'plugins', label: 'Plugins', key: '5' },
   { id: 'visualizer', label: 'Visualizer', key: '6' },
+  { id: 'circle', label: 'Circle', key: '7' },
 ];
 
 const VIEW_IDS: ViewId[] = VIEW_TABS.map((t) => t.id);
@@ -557,7 +559,7 @@ const AppInner: React.FC = () => {
       }
 
       // 1-6: Switch views
-      if (!meta && !shift && e.key >= '1' && e.key <= '6') {
+      if (!meta && !shift && e.key >= '1' && e.key <= '7') {
         const idx = parseInt(e.key) - 1;
         if (idx < VIEW_IDS.length) {
           e.preventDefault();
@@ -702,6 +704,8 @@ const AppInner: React.FC = () => {
         return <PluginView />;
       case 'visualizer':
         return <ChordVisualizerPanel />;
+      case 'circle':
+        return <CircleOfFifthsPanel />;
     }
   };
 
@@ -767,7 +771,7 @@ const AppInner: React.FC = () => {
         {/* Main area: TrackList sidebar + View content */}
         <div className="flex flex-1 min-h-0">
           {/* Track list sidebar (visible in arrange/edit/mix views) */}
-          {activeView !== 'instruments' && activeView !== 'plugins' && activeView !== 'visualizer' && (
+          {activeView !== 'instruments' && activeView !== 'plugins' && activeView !== 'visualizer' && activeView !== 'circle' && (
             <TrackList
               tracks={dawState.tracks}
               selectedTrackId={dawState.selectedTrackId}
