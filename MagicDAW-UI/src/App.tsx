@@ -13,6 +13,7 @@ import { InstrumentView } from './views/InstrumentView';
 import { PluginView } from './views/PluginView';
 import { ChordVisualizerPanel } from './components/ChordVisualizerPanel';
 import { CircleOfFifthsPanel } from './components/CircleOfFifthsPanel';
+import { IntervalTrainerPanel } from './components/IntervalTrainerPanel';
 import { ToastProvider, useToast } from './components/Toast';
 import { ContextMenuProvider } from './components/ContextMenu';
 
@@ -24,6 +25,7 @@ const VIEW_TABS: { id: ViewId; label: string; key: string }[] = [
   { id: 'plugins', label: 'Plugins', key: '5' },
   { id: 'visualizer', label: 'Visualizer', key: '6' },
   { id: 'circle', label: 'Circle', key: '7' },
+  { id: 'trainer', label: 'Trainer', key: '8' },
 ];
 
 const VIEW_IDS: ViewId[] = VIEW_TABS.map((t) => t.id);
@@ -706,6 +708,8 @@ const AppInner: React.FC = () => {
         return <ChordVisualizerPanel />;
       case 'circle':
         return <CircleOfFifthsPanel />;
+      case 'trainer':
+        return <IntervalTrainerPanel />;
     }
   };
 
@@ -771,7 +775,7 @@ const AppInner: React.FC = () => {
         {/* Main area: TrackList sidebar + View content */}
         <div className="flex flex-1 min-h-0">
           {/* Track list sidebar (visible in arrange/edit/mix views) */}
-          {activeView !== 'instruments' && activeView !== 'plugins' && activeView !== 'visualizer' && activeView !== 'circle' && (
+          {activeView !== 'instruments' && activeView !== 'plugins' && activeView !== 'visualizer' && activeView !== 'circle' && activeView !== 'trainer' && (
             <TrackList
               tracks={dawState.tracks}
               selectedTrackId={dawState.selectedTrackId}

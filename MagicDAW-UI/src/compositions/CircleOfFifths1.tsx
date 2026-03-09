@@ -2429,8 +2429,10 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           );
         })()}
 
-        {/* ── Scale piano overlay — bottom-left, root-to-root ────── */}
+        {/* ── Scale piano overlay — REMOVED, replaced by HUD degree strip ── */}
         {(() => {
+          // Old piano removed — the HUD harmonic context strip handles this now
+          return null;
           const zp = zoom.zoomProgress;
           const pianoOpacity = 1 - zp * 0.8;
           if (pianoOpacity < 0.05) return null;
@@ -2822,6 +2824,160 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           );
         })()}
       </svg>
+
+      {/* ── HUD Harmonic Context Strip — slides down from top when zoomed ── */}
+      {(() => {
+        const zp = zoom.zoomProgress;
+        const hudProgress = Math.max(0, Math.min(1, (zp - 0.25) / 0.4));
+        if (hudProgress < 0.01) return null;
+
+        // Cinematic slide-down from top
+        const slideY = interpolate(hudProgress, [0, 1], [-30, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+        const fadeIn = interpolate(hudProgress, [0, 0.3, 1], [0, 0.5, 0.95], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+        const neonColor = activeMode === 'minor' ? palette.purple : palette.cyan;
+        const pulse = Math.sin(frame * 0.06) * 0.08;
+
+        // Build diatonic chords for the current key
+        const norm = ENHARMONIC[activeKey] ?? activeKey;
+        const rootIdx = CHROMATIC.indexOf(norm);
+        const intervals = activeMode === 'major' ? MAJOR_INTERVALS : MINOR_INTERVALS;
+        const qualities = activeMode === 'major' ? MAJOR_QUALITIES : MINOR_QUALITIES;
+        const romansMajor = ['I', 'ii', 'iii', 'IV', 'V', 'vi', 'vii°'];
+        const romansMinor = ['i', 'ii°', 'III', 'iv', 'v', 'VI', 'VII'];
+        const romans = activeMode === 'major' ? romansMajor : romansMinor;
+        const useFlats = FLAT_KEYS.has(activeKey);
+        const names = useFlats ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP;
+
+        const degrees = intervals.map((interval, di) => {
+          const noteIdx = (rootIdx + interval) % 12;
+          const chordName = names[noteIdx] + qualities[di];
+          const normalized = normalizeChordForMatch(chordName);
+          const func = chordFunction(chordName, activeKey);
+          const funcColor = FUNCTION_COLORS[func];
+          // Check if this chord is in the current path
+          const inPath = chordPath.some(n => n.chord === normalized);
+          // Check if this is the latest chord
+          const isLatest = chordPath.length > 0 && chordPath[chordPath.length - 1].chord === normalized;
+          return { roman: romans[di], chordName, normalized, funcColor, func, inPath, isLatest, degreeIdx: di };
+        });
+
+        // Layout
+        const stripW = Math.min(W * 0.55, 640);
+        const cellW = stripW / 7;
+        const stripH = 42;
+        const stripX = (W - stripW) / 2;
+        const stripY = 12;
+        const dotR = 5;
+        const dotY = stripY + 16;
+        const romanY = stripY + 32;
+        const chordY = stripY + 10;
+
+        return (
+          <svg
+            width={W} height={H}
+            viewBox={`0 0 ${W} ${H}`}
+            style={{
+              position: 'absolute', top: 0, left: 0,
+              pointerEvents: 'none',
+              opacity: fadeIn,
+              transform: `translateY(${slideY}px)`,
+            }}
+          >
+            <defs>
+              <filter id="hud-dot-glow" x="-100%" y="-100%" width="300%" height="300%">
+                <feGaussianBlur stdDeviation="3" result="blur" />
+                <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+              </filter>
+            </defs>
+
+            {/* Glass backdrop */}
+            <rect
+              x={stripX - 16} y={stripY - 6}
+              width={stripW + 32} height={stripH + 12}
+              rx={6}
+              fill="rgba(6,10,18,0.82)"
+              stroke={neonColor}
+              strokeWidth={0.5}
+              strokeOpacity={0.15}
+            />
+            {/* Top aurora gradient line */}
+            <line
+              x1={stripX - 16} y1={stripY - 6}
+              x2={stripX + stripW + 16} y2={stripY - 6}
+              stroke={neonColor}
+              strokeWidth={1}
+              opacity={0.2}
+            />
+
+            {/* Key label — left side */}
+            <text
+              x={stripX - 8} y={stripY + stripH / 2 + 1}
+              textAnchor="end"
+              fill={neonColor}
+              fontSize={11}
+              fontFamily="monospace"
+              fontWeight={700}
+              opacity={0.6}
+            >
+              {activeKey} {activeMode}
+            </text>
+
+            {/* Degree cells */}
+            {degrees.map((d, i) => {
+              const cx = stripX + i * cellW + cellW / 2;
+              const isActive = d.inPath || d.isLatest;
+              const glowOp = d.isLatest ? 0.4 + pulse : d.inPath ? 0.2 : 0;
+
+              return (
+                <g key={`deg-${i}`}>
+                  {/* Neon glow behind active dots */}
+                  {isActive && (
+                    <circle
+                      cx={cx} cy={dotY} r={dotR + 4}
+                      fill={d.isLatest ? palette.gold : d.funcColor}
+                      opacity={glowOp}
+                      filter="url(#hud-dot-glow)"
+                    />
+                  )}
+                  {/* Dot */}
+                  <circle
+                    cx={cx} cy={dotY}
+                    r={d.isLatest ? dotR + 1.5 : isActive ? dotR : dotR - 1.5}
+                    fill={d.isLatest ? palette.gold : isActive ? d.funcColor : 'transparent'}
+                    stroke={isActive ? 'none' : d.funcColor}
+                    strokeWidth={0.8}
+                    opacity={isActive ? 1 : 0.3}
+                  />
+                  {/* Chord name above dot */}
+                  <text
+                    x={cx} y={chordY}
+                    textAnchor="middle"
+                    fill={d.isLatest ? palette.gold : isActive ? d.funcColor : palette.textDim}
+                    fontSize={8}
+                    fontFamily="monospace"
+                    fontWeight={d.isLatest ? 800 : isActive ? 700 : 500}
+                    opacity={isActive ? 0.95 : 0.35}
+                  >
+                    {d.chordName}
+                  </text>
+                  {/* Roman numeral below dot */}
+                  <text
+                    x={cx} y={romanY}
+                    textAnchor="middle"
+                    fill={d.isLatest ? palette.gold : isActive ? palette.text : palette.textDim}
+                    fontSize={7}
+                    fontFamily="monospace"
+                    fontWeight={d.isLatest ? 700 : 500}
+                    opacity={isActive ? 0.7 : 0.25}
+                  >
+                    {d.roman}
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
+        );
+      })()}
     </AbsoluteFill>
   );
 };
