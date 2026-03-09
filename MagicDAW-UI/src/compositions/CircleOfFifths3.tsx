@@ -125,11 +125,6 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
 
   const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
 
-  const primaryPlayedIdx = useMemo(() => {
-    if (playedIndices.size === 0) return -1;
-    return playedIndices.values().next().value!;
-  }, [playedIndices]);
-
   // ── Gravity well contour lines ───────────────────────────────────────
   const contourLines = useMemo(() => {
     const lines: React.ReactNode[] = [];
@@ -866,14 +861,14 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
         {progressionTimeline}
         {timestamp}
 
-        {/* ── Chord keyboards: zoomed = adjacent only, unzoomed = all 7 ── */}
-        {zoom.isZoomed && primaryPlayedIdx >= 0 ? (() => {
-          const pos = posOnRing(primaryPlayedIdx, OUTER_R);
+        {/* ── Chord keyboards: crossfade between adjacent and diatonic ── */}
+        {zoom.primaryPlayedIdx >= 0 && zoom.zoomProgress > 0.01 && (() => {
+          const pos = posOnRing(zoom.primaryPlayedIdx, OUTER_R);
           return (
             <AdjacentChordsPanel
               anchorX={pos.x}
               anchorY={pos.y}
-              playedIndex={primaryPlayedIdx}
+              playedIndex={zoom.primaryPlayedIdx}
               accentColor="#60a5fa"
               secondaryColor="#93c5fd"
               textColor="#9ca3af"
@@ -881,7 +876,8 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
               opacity={zoom.zoomProgress}
             />
           );
-        })() : (
+        })()}
+        {zoom.zoomProgress < 0.99 && (
           <DiatonicChordsPanel
             x={1660}
             y={120}

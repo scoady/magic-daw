@@ -21,13 +21,11 @@ export interface DetectedRing {
   index: number;
 }
 
-/** Parse a detected chord name (e.g. "Am", "Bdim", "C", "F#m7") and return
- *  which ring it belongs to and its circle-of-fifths index. */
+/** Parse a detected chord name and return which ring + index it maps to. */
 export function chordToRingIndex(chord: string | null): DetectedRing {
   if (!chord) return { ring: null, index: -1 };
   const base = chord.replace(/(maj7|m7|7|9|11|13|sus[24]|aug|\?)$/i, '');
 
-  // Diminished
   if (base.endsWith('dim') || chord.includes('dim')) {
     const root = base.replace(/dim$/, '');
     const norm = normalizeNoteForRing(root);
@@ -38,7 +36,6 @@ export function chordToRingIndex(chord: string | null): DetectedRing {
     return { ring: idx >= 0 ? 'dim' : null, index: idx };
   }
 
-  // Minor
   if (base.endsWith('m')) {
     const root = base.slice(0, -1);
     const norm = normalizeNoteForRing(root);
@@ -49,7 +46,6 @@ export function chordToRingIndex(chord: string | null): DetectedRing {
     return { ring: idx >= 0 ? 'minor' : null, index: idx };
   }
 
-  // Major
   const m = base.match(/^([A-G][#b]?)/);
   const root = m ? normalizeNoteForRing(m[1]) : '';
   const idx = FIFTHS_MAJOR.indexOf(root);
@@ -67,10 +63,13 @@ export interface ZoomTarget {
 
 export interface ZoomState {
   viewBox: string;
+  /** True while actively zoomed (notes held OR within linger window) */
   isZoomed: boolean;
-  /** Circle-of-fifths indices of the "next playable" chords (adjacent fifths + relative minor) */
+  /** Adjacent chord indices for the keyboard panel */
   adjacentIndices: number[];
-  /** Zoom progress 0→1 (0=full view, 1=fully zoomed) */
+  /** The primary played index (persists during linger/zoom-out) */
+  primaryPlayedIdx: number;
+  /** 0 = full view, 1 = fully zoomed. Drives opacity crossfade. */
   zoomProgress: number;
 }
 
@@ -82,15 +81,45 @@ function polarToXY(cx: number, cy: number, r: number, index: number): [number, n
   return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
 }
 
+function computeZoomWindow(
+  indices: Set<number>,
+  cx: number, cy: number, outerR: number,
+  fullW: number, fullH: number, zoomFraction: number,
+): ZoomTarget {
+  let sumX = 0, sumY = 0, count = 0;
+  indices.forEach((idx) => {
+    const [nx, ny] = polarToXY(cx, cy, outerR, idx);
+    sumX += nx;
+    sumY += ny;
+    count++;
+  });
+  const centroidX = sumX / count;
+  const centroidY = sumY / count;
+  const zw = fullW * zoomFraction;
+  const zh = fullH * zoomFraction;
+  return {
+    x: Math.max(0, Math.min(fullW - zw, centroidX - zw / 2)),
+    y: Math.max(0, Math.min(fullH - zh, centroidY - zh / 2)),
+    w: zw,
+    h: zh,
+  };
+}
+
+// ── Spring config ────────────────────────────────────────────────────────────
+
+const ZOOM_IN_SPRING = { damping: 22, stiffness: 35, mass: 1.2 };
+const ZOOM_OUT_SPRING = { damping: 20, stiffness: 20, mass: 1.5 }; // slower zoom out
+
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
 /**
- * Computes a smoothly animated SVG viewBox that zooms into the quadrant
- * containing the played note(s) on the circle of fifths.
+ * Smooth SVG viewBox zoom that tracks played notes on the circle of fifths.
  *
- * When no notes are played, returns the full viewport.
- * When zoomed, also returns the indices of adjacent "next playable" chords
- * so the composition can show only relevant mini keyboards.
+ * Behavior:
+ * - Note pressed → zoom in to that node's quadrant
+ * - New note while zoomed → smoothly pan to the new node (stay zoomed)
+ * - Note released → LINGER for `lingerSeconds` at the last position
+ * - After linger expires with no new notes → slowly zoom out to full view
  */
 export function useCircleZoom(opts: {
   playedIndices: Set<number>;
@@ -101,8 +130,9 @@ export function useCircleZoom(opts: {
   fullH: number;
   frame: number;
   fps: number;
-  /** Zoom level: fraction of full viewport (0.5 = 2× zoom). Default 0.5 */
   zoomFraction?: number;
+  /** How long to stay zoomed after note release (seconds). Default 5 */
+  lingerSeconds?: number;
 }): ZoomState {
   const {
     playedIndices,
@@ -110,118 +140,178 @@ export function useCircleZoom(opts: {
     fullW, fullH,
     frame, fps,
     zoomFraction = 0.5,
+    lingerSeconds = 5,
   } = opts;
 
-  // Compute target viewBox based on played notes
-  const zoomTarget = useMemo((): ZoomTarget => {
-    if (playedIndices.size === 0) {
-      return { x: 0, y: 0, w: fullW, h: fullH };
-    }
+  const fullView: ZoomTarget = { x: 0, y: 0, w: fullW, h: fullH };
+  const lingerFrames = Math.round(lingerSeconds * fps);
 
-    // Find centroid of played nodes on outer ring
-    let sumX = 0, sumY = 0, count = 0;
-    playedIndices.forEach((idx) => {
-      const [nx, ny] = polarToXY(cx, cy, outerR, idx);
-      sumX += nx;
-      sumY += ny;
-      count++;
-    });
-    const centroidX = sumX / count;
-    const centroidY = sumY / count;
+  // ── Persistent state across frames ──────────────────────────────────────
 
-    // Zoom window
-    const zw = fullW * zoomFraction;
-    const zh = fullH * zoomFraction;
-
-    // Center on centroid, clamp to viewport
-    return {
-      x: Math.max(0, Math.min(fullW - zw, centroidX - zw / 2)),
-      y: Math.max(0, Math.min(fullH - zh, centroidY - zh / 2)),
-      w: zw,
-      h: zh,
-    };
-  }, [playedIndices, cx, cy, outerR, fullW, fullH, zoomFraction]);
-
-  // Track previous target for spring animation
-  const prevRef = useRef<{ target: ZoomTarget; changeFrame: number }>({
-    target: { x: 0, y: 0, w: fullW, h: fullH },
-    changeFrame: 0,
+  const stateRef = useRef<{
+    /** The "from" position for the current spring transition */
+    from: ZoomTarget;
+    /** The "to" position we're springing toward */
+    to: ZoomTarget;
+    /** Frame when the current transition started */
+    transitionFrame: number;
+    /** Frame when notes were last released (0 = notes still held) */
+    releaseFrame: number;
+    /** Last played indices (persisted for linger) */
+    lastIndices: number[];
+    lastPrimaryIdx: number;
+    /** Are we currently in zoomed or zooming-out state? */
+    phase: 'idle' | 'zoomed' | 'lingering' | 'zooming-out';
+  }>({
+    from: fullView,
+    to: fullView,
+    transitionFrame: 0,
+    releaseFrame: 0,
+    lastIndices: [],
+    lastPrimaryIdx: -1,
+    phase: 'idle',
   });
 
-  // Detect target change
-  const prev = prevRef.current;
-  const targetChanged =
-    prev.target.x !== zoomTarget.x ||
-    prev.target.y !== zoomTarget.y ||
-    prev.target.w !== zoomTarget.w ||
-    prev.target.h !== zoomTarget.h;
+  const s = stateRef.current;
+  const notesActive = playedIndices.size > 0;
 
-  if (targetChanged) {
-    // Snapshot the current interpolated position as the new "from"
-    // Use spring to compute where we currently are in the old transition
-    const elapsed = frame - prev.changeFrame;
-    const oldProgress = spring({
-      frame: elapsed,
-      fps,
-      config: { damping: 22, stiffness: 35, mass: 1.2 },
-      durationInFrames: Math.round(fps * 2.5),
+  // ── State machine ─────────────────────────────────────────────────────
+
+  if (notesActive) {
+    // Notes are being held — compute zoom target
+    const zoomTarget = computeZoomWindow(
+      playedIndices, cx, cy, outerR, fullW, fullH, zoomFraction,
+    );
+
+    // Update persisted played info
+    const adjSet = new Set<number>();
+    playedIndices.forEach((idx) => {
+      adjSet.add(idx);
+      adjSet.add((idx + 1) % 12);
+      adjSet.add((idx + 11) % 12);
+      adjSet.add((idx + 2) % 12);
+      adjSet.add((idx + 10) % 12);
     });
-    prevRef.current = {
-      target: {
-        x: prev.target.x + (zoomTarget.x - prev.target.x) * oldProgress,
-        y: prev.target.y + (zoomTarget.y - prev.target.y) * oldProgress,
-        w: prev.target.w + (zoomTarget.w - prev.target.w) * oldProgress,
-        h: prev.target.h + (zoomTarget.h - prev.target.h) * oldProgress,
-      },
-      changeFrame: frame,
-    };
+    s.lastIndices = Array.from(adjSet).sort((a, b) => a - b);
+    s.lastPrimaryIdx = playedIndices.values().next().value!;
+
+    if (s.phase === 'idle' || s.phase === 'zooming-out') {
+      // Start zooming in — snapshot current position as "from"
+      const elapsed = frame - s.transitionFrame;
+      const oldSpring = s.phase === 'zooming-out' ? ZOOM_OUT_SPRING : ZOOM_IN_SPRING;
+      const oldProgress = spring({
+        frame: elapsed, fps,
+        config: oldSpring,
+        durationInFrames: Math.round(fps * 2.5),
+      });
+      s.from = {
+        x: s.from.x + (s.to.x - s.from.x) * oldProgress,
+        y: s.from.y + (s.to.y - s.from.y) * oldProgress,
+        w: s.from.w + (s.to.w - s.from.w) * oldProgress,
+        h: s.from.h + (s.to.h - s.from.h) * oldProgress,
+      };
+      s.to = zoomTarget;
+      s.transitionFrame = frame;
+      s.phase = 'zoomed';
+    } else if (s.phase === 'zoomed' || s.phase === 'lingering') {
+      // Already zoomed — check if target moved (different note)
+      const targetMoved =
+        Math.abs(s.to.x - zoomTarget.x) > 1 ||
+        Math.abs(s.to.y - zoomTarget.y) > 1;
+
+      if (targetMoved) {
+        // Pan to new node — snapshot current interpolated position
+        const elapsed = frame - s.transitionFrame;
+        const prog = spring({
+          frame: elapsed, fps,
+          config: ZOOM_IN_SPRING,
+          durationInFrames: Math.round(fps * 2.5),
+        });
+        s.from = {
+          x: s.from.x + (s.to.x - s.from.x) * prog,
+          y: s.from.y + (s.to.y - s.from.y) * prog,
+          w: s.from.w + (s.to.w - s.from.w) * prog,
+          h: s.from.h + (s.to.h - s.from.h) * prog,
+        };
+        s.to = zoomTarget;
+        s.transitionFrame = frame;
+      }
+      s.phase = 'zoomed';
+    }
+
+    s.releaseFrame = 0; // notes are held
+  } else {
+    // No notes held
+    if (s.phase === 'zoomed') {
+      // Just released — start lingering
+      s.releaseFrame = frame;
+      s.phase = 'lingering';
+    } else if (s.phase === 'lingering') {
+      // Check if linger expired
+      if (frame - s.releaseFrame >= lingerFrames) {
+        // Start slow zoom out
+        const elapsed = frame - s.transitionFrame;
+        const prog = spring({
+          frame: elapsed, fps,
+          config: ZOOM_IN_SPRING,
+          durationInFrames: Math.round(fps * 2.5),
+        });
+        s.from = {
+          x: s.from.x + (s.to.x - s.from.x) * prog,
+          y: s.from.y + (s.to.y - s.from.y) * prog,
+          w: s.from.w + (s.to.w - s.from.w) * prog,
+          h: s.from.h + (s.to.h - s.from.h) * prog,
+        };
+        s.to = fullView;
+        s.transitionFrame = frame;
+        s.phase = 'zooming-out';
+      }
+    } else if (s.phase === 'zooming-out') {
+      // Check if zoom-out spring is done
+      const elapsed = frame - s.transitionFrame;
+      const prog = spring({
+        frame: elapsed, fps,
+        config: ZOOM_OUT_SPRING,
+        durationInFrames: Math.round(fps * 3),
+      });
+      if (prog >= 0.999) {
+        s.phase = 'idle';
+        s.from = fullView;
+        s.to = fullView;
+      }
+    }
   }
 
-  const from = prevRef.current.target;
-  const elapsed = frame - prevRef.current.changeFrame;
+  // ── Compute current viewBox from spring ────────────────────────────────
 
-  // Spring-driven progress — smooth, visible zoom (not instant)
+  const elapsed = frame - s.transitionFrame;
+  const springConfig = s.phase === 'zooming-out' ? ZOOM_OUT_SPRING : ZOOM_IN_SPRING;
+  const dur = s.phase === 'zooming-out' ? Math.round(fps * 3) : Math.round(fps * 2.5);
   const progress = spring({
     frame: elapsed,
     fps,
-    config: { damping: 22, stiffness: 35, mass: 1.2 },
-    durationInFrames: Math.round(fps * 2.5),
+    config: springConfig,
+    durationInFrames: dur,
   });
 
-  const vx = interpolate(progress, [0, 1], [from.x, zoomTarget.x]);
-  const vy = interpolate(progress, [0, 1], [from.y, zoomTarget.y]);
-  const vw = interpolate(progress, [0, 1], [from.w, zoomTarget.w]);
-  const vh = interpolate(progress, [0, 1], [from.h, zoomTarget.h]);
+  const vx = interpolate(progress, [0, 1], [s.from.x, s.to.x]);
+  const vy = interpolate(progress, [0, 1], [s.from.y, s.to.y]);
+  const vw = interpolate(progress, [0, 1], [s.from.w, s.to.w]);
+  const vh = interpolate(progress, [0, 1], [s.from.h, s.to.h]);
 
-  const isZoomed = playedIndices.size > 0;
+  // Zoom progress: 0 = full view, 1 = fully zoomed
+  // Derived from how far the current viewBox width is from full vs zoomed
+  const zoomedW = fullW * zoomFraction;
+  const zoomProgress = 1 - Math.max(0, Math.min(1, (vw - zoomedW) / (fullW - zoomedW)));
 
-  // Compute adjacent "next playable" indices
-  const adjacentIndices = useMemo(() => {
-    if (playedIndices.size === 0) return [];
-
-    const indices: Set<number> = new Set();
-    playedIndices.forEach((idx) => {
-      // The played note itself
-      indices.add(idx);
-      // Adjacent fifths (clockwise and counter-clockwise)
-      indices.add((idx + 1) % 12);
-      indices.add((idx + 11) % 12);
-      // Two steps away (less common but still visible)
-      indices.add((idx + 2) % 12);
-      indices.add((idx + 10) % 12);
-    });
-    return Array.from(indices).sort((a, b) => a - b);
-  }, [playedIndices]);
-
-  // Zoom progress for opacity transitions (0 = full, 1 = zoomed)
-  const zoomProgress = isZoomed
-    ? interpolate(progress, [0, 1], [0, 1])
-    : interpolate(progress, [0, 1], [1, 0]);
+  const isZoomed = s.phase === 'zoomed' || s.phase === 'lingering' ||
+    (s.phase === 'zooming-out' && zoomProgress > 0.05);
 
   return {
     viewBox: `${vx} ${vy} ${vw} ${vh}`,
     isZoomed,
-    adjacentIndices,
-    zoomProgress: isZoomed ? progress : 1 - progress,
+    adjacentIndices: s.lastIndices,
+    primaryPlayedIdx: s.lastPrimaryIdx,
+    zoomProgress,
   };
 }

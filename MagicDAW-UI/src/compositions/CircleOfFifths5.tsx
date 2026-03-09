@@ -132,11 +132,6 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
 
   const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
 
-  const primaryPlayedIdx = useMemo(() => {
-    if (playedIndices.size === 0) return -1;
-    return playedIndices.values().next().value!;
-  }, [playedIndices]);
-
   // ── Pathfinder lookup ──────────────────────────────────────────────────
 
   const pathfinderNodeSet = useMemo(() => {
@@ -557,14 +552,14 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
           );
         })}
 
-        {/* ── Chord keyboards: zoomed = adjacent only, unzoomed = all 7 ── */}
-        {zoom.isZoomed && primaryPlayedIdx >= 0 ? (() => {
-          const pos = ringPos(primaryPlayedIdx, OUTER_R);
+        {/* ── Chord keyboards: crossfade between adjacent and diatonic ── */}
+        {zoom.primaryPlayedIdx >= 0 && zoom.zoomProgress > 0.01 && (() => {
+          const pos = ringPos(zoom.primaryPlayedIdx, OUTER_R);
           return (
             <AdjacentChordsPanel
               anchorX={pos.x}
               anchorY={pos.y}
-              playedIndex={primaryPlayedIdx}
+              playedIndex={zoom.primaryPlayedIdx}
               accentColor="#bfdbfe"
               secondaryColor="rgba(255,255,255,0.5)"
               textColor="rgba(255,255,255,0.7)"
@@ -572,7 +567,8 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
               opacity={zoom.zoomProgress}
             />
           );
-        })() : (
+        })()}
+        {zoom.zoomProgress < 0.99 && (
           <DiatonicChordsPanel
             x={1660}
             y={120}

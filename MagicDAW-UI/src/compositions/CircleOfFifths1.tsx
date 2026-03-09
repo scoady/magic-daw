@@ -197,12 +197,6 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
     zoomFraction: 0.5,
   });
 
-  // Primary played index (first one for anchor positioning)
-  const primaryPlayedIdx = useMemo(() => {
-    if (playedIndices.size === 0) return -1;
-    return playedIndices.values().next().value!;
-  }, [playedIndices]);
-
   const bgStars = useMemo(() => generateStars(220), []);
   const accretionDisk = useMemo(() => generateAccretionDisk(28), []);
   const dodecagon = useMemo(() => generateDodecagonPoints(), []);
@@ -965,19 +959,86 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
             />
           );
         })}
-        {/* ── Chord keyboards: zoomed = adjacent only, unzoomed = all 7 ── */}
-        {zoom.isZoomed && primaryPlayedIdx >= 0 ? (
+        {/* ── Directional guide lines (zoomed view) ─────────────────────── */}
+        {zoom.primaryPlayedIdx >= 0 && zoom.zoomProgress > 0.05 && (() => {
+          const pi = zoom.primaryPlayedIdx;
+          const [px, py] = polarToXY(CX, CY, OUTER_R, nodeAngle(pi));
+          const fifthUp = (pi + 1) % 12;
+          const fifthDown = (pi + 11) % 12;
+          const [upX, upY] = polarToXY(CX, CY, OUTER_R, nodeAngle(fifthUp));
+          const [dnX, dnY] = polarToXY(CX, CY, OUTER_R, nodeAngle(fifthDown));
+          const [minX, minY] = polarToXY(CX, CY, MIDDLE_R, nodeAngle(pi));
+          const lineOp = zoom.zoomProgress * 0.5;
+          const arrowSize = 8;
+
+          // Arrow head helper: draws a small triangle at (tx,ty) pointing from (fx,fy)
+          const arrowHead = (fx: number, fy: number, tx: number, ty: number, color: string, key: string) => {
+            const dx = tx - fx, dy = ty - fy;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len === 0) return null;
+            const ux = dx / len, uy = dy / len;
+            // Pull arrow back from target center so it doesn't overlap the node
+            const pullback = 30;
+            const ax = tx - ux * pullback, ay = ty - uy * pullback;
+            const px1 = ax - ux * arrowSize - uy * arrowSize * 0.5;
+            const py1 = ay - uy * arrowSize + ux * arrowSize * 0.5;
+            const px2 = ax - ux * arrowSize + uy * arrowSize * 0.5;
+            const py2 = ay - uy * arrowSize - ux * arrowSize * 0.5;
+            return <polygon key={key} points={`${ax},${ay} ${px1},${py1} ${px2},${py2}`} fill={color} opacity={lineOp * 1.4} />;
+          };
+
+          return (
+            <g>
+              {/* Fifth up (clockwise) — cyan */}
+              <line x1={px} y1={py} x2={upX} y2={upY}
+                stroke={palette.cyan} strokeWidth={1.8} opacity={lineOp}
+                strokeDasharray="6 4" strokeDashoffset={-frame * 0.8}
+              />
+              {arrowHead(px, py, upX, upY, palette.cyan, 'arr-up')}
+              <text x={(px + upX) / 2 + 12} y={(py + upY) / 2 - 6}
+                fill={palette.cyan} fontSize={9} fontFamily="monospace"
+                opacity={lineOp * 1.2} textAnchor="start"
+              >V</text>
+
+              {/* Fifth down (counter-clockwise) — teal */}
+              <line x1={px} y1={py} x2={dnX} y2={dnY}
+                stroke={palette.teal} strokeWidth={1.8} opacity={lineOp}
+                strokeDasharray="6 4" strokeDashoffset={-frame * 0.8}
+              />
+              {arrowHead(px, py, dnX, dnY, palette.teal, 'arr-dn')}
+              <text x={(px + dnX) / 2 - 16} y={(py + dnY) / 2 - 6}
+                fill={palette.teal} fontSize={9} fontFamily="monospace"
+                opacity={lineOp * 1.2} textAnchor="end"
+              >IV</text>
+
+              {/* Relative minor (inward) — purple */}
+              <line x1={px} y1={py} x2={minX} y2={minY}
+                stroke={palette.purple} strokeWidth={1.5} opacity={lineOp * 0.8}
+                strokeDasharray="4 3" strokeDashoffset={-frame * 0.6}
+              />
+              {arrowHead(px, py, minX, minY, palette.purple, 'arr-min')}
+              <text x={(px + minX) / 2 + 10} y={(py + minY) / 2 + 4}
+                fill={palette.purple} fontSize={8} fontFamily="monospace"
+                opacity={lineOp * 1.0} textAnchor="start"
+              >vi</text>
+            </g>
+          );
+        })()}
+
+        {/* ── Chord keyboards: crossfade between adjacent (zoomed) and full (unzoomed) ── */}
+        {zoom.primaryPlayedIdx >= 0 && zoom.zoomProgress > 0.01 && (
           <AdjacentChordsPanel
-            anchorX={polarToXY(CX, CY, OUTER_R, nodeAngle(primaryPlayedIdx))[0]}
-            anchorY={polarToXY(CX, CY, OUTER_R, nodeAngle(primaryPlayedIdx))[1]}
-            playedIndex={primaryPlayedIdx}
+            anchorX={polarToXY(CX, CY, OUTER_R, nodeAngle(zoom.primaryPlayedIdx))[0]}
+            anchorY={polarToXY(CX, CY, OUTER_R, nodeAngle(zoom.primaryPlayedIdx))[1]}
+            playedIndex={zoom.primaryPlayedIdx}
             accentColor={palette.cyan}
             secondaryColor={palette.purple}
             textColor={palette.text}
             textDimColor={palette.textDim}
             opacity={zoom.zoomProgress}
           />
-        ) : (
+        )}
+        {zoom.zoomProgress < 0.99 && (
           <DiatonicChordsPanel
             x={1660}
             y={120}
