@@ -123,9 +123,13 @@ const ZOOM_OUT_SPRING = { damping: 20, stiffness: 20, mass: 1.5 }; // slower zoo
  */
 export function useCircleZoom(opts: {
   playedIndices: Set<number>;
+  /** Detected chord ring info — when present, zoom targets this instead of individual notes */
+  detectedRing?: DetectedRing;
   cx: number;
   cy: number;
   outerR: number;
+  middleR?: number;
+  innerR?: number;
   fullW: number;
   fullH: number;
   frame: number;
@@ -136,7 +140,10 @@ export function useCircleZoom(opts: {
 }): ZoomState {
   const {
     playedIndices,
+    detectedRing: dRing,
     cx, cy, outerR,
+    middleR = outerR * 0.75,
+    innerR = outerR * 0.5,
     fullW, fullH,
     frame, fps,
     zoomFraction = 0.5,
@@ -178,22 +185,38 @@ export function useCircleZoom(opts: {
   // ── State machine ─────────────────────────────────────────────────────
 
   if (notesActive) {
-    // Notes are being held — compute zoom target
-    const zoomTarget = computeZoomWindow(
-      playedIndices, cx, cy, outerR, fullW, fullH, zoomFraction,
-    );
+    // When a chord is detected, zoom to the chord's ring position
+    // instead of the centroid of individual notes on the major ring
+    let zoomTarget: ZoomTarget;
+    let primaryIdx: number;
 
-    // Update persisted played info
+    if (dRing && dRing.ring && dRing.index >= 0) {
+      // Chord detected — zoom to the chord's position on its ring
+      const ringR = dRing.ring === 'major' ? outerR
+        : dRing.ring === 'minor' ? middleR : innerR;
+      const chordSet = new Set([dRing.index]);
+      zoomTarget = computeZoomWindow(
+        chordSet, cx, cy, ringR, fullW, fullH, zoomFraction,
+      );
+      primaryIdx = dRing.index;
+    } else {
+      // No chord — use individual note positions
+      zoomTarget = computeZoomWindow(
+        playedIndices, cx, cy, outerR, fullW, fullH, zoomFraction,
+      );
+      primaryIdx = playedIndices.values().next().value!;
+    }
+
+    // Update persisted played info (adjacent indices for keyboard panel)
     const adjSet = new Set<number>();
-    playedIndices.forEach((idx) => {
-      adjSet.add(idx);
-      adjSet.add((idx + 1) % 12);
-      adjSet.add((idx + 11) % 12);
-      adjSet.add((idx + 2) % 12);
-      adjSet.add((idx + 10) % 12);
-    });
+    const focusIdx = primaryIdx;
+    adjSet.add(focusIdx);
+    adjSet.add((focusIdx + 1) % 12);
+    adjSet.add((focusIdx + 11) % 12);
+    adjSet.add((focusIdx + 2) % 12);
+    adjSet.add((focusIdx + 10) % 12);
     s.lastIndices = Array.from(adjSet).sort((a, b) => a - b);
-    s.lastPrimaryIdx = playedIndices.values().next().value!;
+    s.lastPrimaryIdx = primaryIdx;
 
     if (s.phase === 'idle' || s.phase === 'zooming-out') {
       // Start zooming in — snapshot current position as "from"

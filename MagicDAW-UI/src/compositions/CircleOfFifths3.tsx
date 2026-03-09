@@ -114,16 +114,18 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
     [activeNotes],
   );
 
+  const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
+
   // ── Zoom into played node's quadrant
   const zoom = useCircleZoom({
     playedIndices,
+    detectedRing,
     cx: CX, cy: CY, outerR: OUTER_R,
+    middleR: MIDDLE_R, innerR: INNER_R,
     fullW: W, fullH: H,
     frame, fps,
     zoomFraction: 0.5,
   });
-
-  const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
 
   // ── Gravity well contour lines ───────────────────────────────────────
   const contourLines = useMemo(() => {

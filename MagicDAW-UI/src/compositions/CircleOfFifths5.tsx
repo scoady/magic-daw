@@ -121,16 +121,18 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
     [activeNotes],
   );
 
+  const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
+
   // ── Zoom into played node's quadrant
   const zoom = useCircleZoom({
     playedIndices,
+    detectedRing,
     cx: CX, cy: CY, outerR: OUTER_R,
+    middleR: MIDDLE_R, innerR: INNER_R,
     fullW: W, fullH: H,
     frame, fps,
-    zoomFraction: 0.45,  // tighter zoom for minimalist aesthetic
+    zoomFraction: 0.45,
   });
-
-  const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
 
   // ── Pathfinder lookup ──────────────────────────────────────────────────
 
