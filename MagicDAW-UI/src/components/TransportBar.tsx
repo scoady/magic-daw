@@ -5,6 +5,9 @@ import {
   Play,
   Circle,
   Pause,
+  Repeat,
+  Music,
+  Timer,
 } from 'lucide-react';
 import { VUMeter } from './VUMeter';
 import { aurora } from '../mockData';
@@ -21,10 +24,21 @@ interface TransportBarProps {
   masterLevelR: number;
   midiInputActive: boolean;
   ollamaConnected: boolean;
+  metronomeEnabled?: boolean;
+  loopEnabled?: boolean;
+  loopStart?: number;
+  loopEnd?: number;
+  countInEnabled?: boolean;
   onPlay?: () => void;
   onStop?: () => void;
   onRecord?: () => void;
   onRewind?: () => void;
+  onMetronomeToggle?: (enabled: boolean) => void;
+  onLoopToggle?: (enabled: boolean) => void;
+  onLoopRegionChange?: (startBar: number, endBar: number) => void;
+  onCountInToggle?: (enabled: boolean) => void;
+  projectDirty?: boolean;
+  projectName?: string;
 }
 
 export const TransportBar: React.FC<TransportBarProps> = ({
@@ -39,13 +53,26 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   masterLevelR,
   midiInputActive,
   ollamaConnected,
+  metronomeEnabled = false,
+  loopEnabled = false,
+  loopStart = 1,
+  loopEnd = 5,
+  countInEnabled = false,
   onPlay,
   onStop,
   onRecord,
   onRewind,
+  onMetronomeToggle,
+  onLoopToggle,
+  onLoopRegionChange,
+  onCountInToggle,
+  projectDirty = false,
 }) => {
   const [editingBpm, setEditingBpm] = useState(false);
   const [bpmInput, setBpmInput] = useState(String(bpm));
+  const [editingLoop, setEditingLoop] = useState(false);
+  const [loopStartInput, setLoopStartInput] = useState(String(loopStart));
+  const [loopEndInput, setLoopEndInput] = useState(String(loopEnd));
 
   const formatTime = (ms: number) => {
     const s = Math.floor(ms / 1000);
@@ -63,9 +90,30 @@ export const TransportBar: React.FC<TransportBarProps> = ({
     setEditingBpm(false);
   };
 
+  const handleLoopSubmit = () => {
+    const start = parseInt(loopStartInput);
+    const end = parseInt(loopEndInput);
+    if (start >= 1 && end > start) {
+      onLoopRegionChange?.(start - 1, end - 1); // convert to 0-indexed bars
+    }
+    setEditingLoop(false);
+  };
+
+  const toggleBtnStyle = (active: boolean) => ({
+    width: 28,
+    height: 28,
+    ...(active
+      ? {
+          background: 'rgba(52, 211, 153, 0.15)',
+          borderColor: 'rgba(52, 211, 153, 0.4)',
+          boxShadow: '0 0 10px rgba(52, 211, 153, 0.15)',
+        }
+      : {}),
+  });
+
   return (
     <div className="transport-bar flex items-center px-4 gap-4 select-none">
-      {/* Logo */}
+      {/* Logo + unsaved indicator */}
       <div className="flex items-center gap-2 mr-2">
         <span
           style={{
@@ -78,6 +126,20 @@ export const TransportBar: React.FC<TransportBarProps> = ({
         >
           Magic DAW
         </span>
+        {projectDirty && (
+          <div
+            title="Unsaved changes"
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: '50%',
+              background: aurora.gold,
+              boxShadow: `0 0 8px ${aurora.gold}`,
+              flexShrink: 0,
+              animation: 'pulse 2s ease-in-out infinite',
+            }}
+          />
+        )}
       </div>
 
       {/* Divider */}
@@ -220,6 +282,107 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             className={recording ? 'animate-pulse-glow' : ''}
           />
         </button>
+      </div>
+
+      {/* Divider */}
+      <div style={{ width: 1, height: 28, background: 'var(--border)' }} />
+
+      {/* Metronome Toggle */}
+      <button
+        className="glass-button flex items-center justify-center"
+        style={toggleBtnStyle(metronomeEnabled)}
+        onClick={() => onMetronomeToggle?.(!metronomeEnabled)}
+        title="Metronome"
+      >
+        <Music
+          size={12}
+          style={{ color: metronomeEnabled ? aurora.green : 'var(--text-dim)' }}
+        />
+      </button>
+
+      {/* Count-in Toggle */}
+      <button
+        className="glass-button flex items-center justify-center"
+        style={toggleBtnStyle(countInEnabled)}
+        onClick={() => onCountInToggle?.(!countInEnabled)}
+        title="Count-in (1 bar)"
+      >
+        <Timer
+          size={12}
+          style={{ color: countInEnabled ? aurora.green : 'var(--text-dim)' }}
+        />
+      </button>
+
+      {/* Loop Toggle + Region */}
+      <div className="flex items-center gap-1">
+        <button
+          className="glass-button flex items-center justify-center"
+          style={toggleBtnStyle(loopEnabled)}
+          onClick={() => onLoopToggle?.(!loopEnabled)}
+          title="Loop"
+        >
+          <Repeat
+            size={12}
+            style={{ color: loopEnabled ? aurora.green : 'var(--text-dim)' }}
+          />
+        </button>
+        {loopEnabled && (
+          editingLoop ? (
+            <div className="flex items-center gap-1" style={{ fontSize: 10 }}>
+              <input
+                type="number"
+                value={loopStartInput}
+                onChange={(e) => setLoopStartInput(e.target.value)}
+                className="text-center rounded"
+                style={{
+                  width: 28,
+                  height: 20,
+                  background: 'rgba(0,0,0,0.4)',
+                  border: '1px solid var(--cyan)',
+                  color: 'var(--cyan)',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 10,
+                  outline: 'none',
+                }}
+              />
+              <span style={{ color: 'var(--text-muted)' }}>-</span>
+              <input
+                type="number"
+                value={loopEndInput}
+                onChange={(e) => setLoopEndInput(e.target.value)}
+                onBlur={handleLoopSubmit}
+                onKeyDown={(e) => e.key === 'Enter' && handleLoopSubmit()}
+                className="text-center rounded"
+                style={{
+                  width: 28,
+                  height: 20,
+                  background: 'rgba(0,0,0,0.4)',
+                  border: '1px solid var(--cyan)',
+                  color: 'var(--cyan)',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 10,
+                  outline: 'none',
+                }}
+              />
+            </div>
+          ) : (
+            <span
+              onClick={() => {
+                setEditingLoop(true);
+                setLoopStartInput(String(Math.round(loopStart) + 1));
+                setLoopEndInput(String(Math.round(loopEnd) + 1));
+              }}
+              style={{
+                fontSize: 10,
+                color: aurora.cyan,
+                cursor: 'pointer',
+                fontFamily: 'var(--font-mono)',
+              }}
+            >
+              {Math.round(loopStart) + 1}-{Math.round(loopEnd) + 1}
+            </span>
+          )
+        )}
       </div>
 
       {/* Position Display */}

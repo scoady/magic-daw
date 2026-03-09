@@ -1,12 +1,25 @@
 // ── Core DAW Types ──────────────────────────────────────────────────────────
 
 export interface MidiNote {
+  id: string;          // unique identifier for selection/manipulation
   pitch: number;       // MIDI note number 0-127
   start: number;       // beat position
   duration: number;    // in beats
   velocity: number;    // 0-127
   channel: number;
 }
+
+/** Quantize grid size in beats */
+export type QuantizeValue = 0 | 0.125 | 0.25 | 0.5 | 1;
+
+/** Labels for quantize dropdown */
+export const QUANTIZE_LABELS: Record<QuantizeValue, string> = {
+  0: 'Off',
+  0.125: '1/32',
+  0.25: '1/16',
+  0.5: '1/8',
+  1: '1/4',
+};
 
 export interface Track {
   id: string;
@@ -19,7 +32,83 @@ export interface Track {
   soloed: boolean;
   armed: boolean;
   clips: Clip[];
+  effects?: EffectSlot[];
+  sends?: SendLevel[];
 }
+
+// ── Effects Chain Types ─────────────────────────────────────────────────────
+
+export type EffectTypeName = 'eq' | 'compressor' | 'reverb' | 'delay' | 'chorus' | 'distortion';
+
+export interface EffectSlot {
+  id: string;
+  type: EffectTypeName;
+  bypassed: boolean;
+  params: Record<string, number>;
+}
+
+export interface SendLevel {
+  id: string;
+  busTrackId: string;
+  level: number;
+  isPreFader: boolean;
+}
+
+export interface EffectParamDef {
+  name: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  unit?: string;
+}
+
+export const EFFECT_PARAMS: Record<EffectTypeName, EffectParamDef[]> = {
+  eq: [
+    { name: 'lowFreq', label: 'Low Freq', min: 20, max: 500, step: 1, unit: 'Hz' },
+    { name: 'lowGain', label: 'Low Gain', min: -24, max: 24, step: 0.5, unit: 'dB' },
+    { name: 'midFreq', label: 'Mid Freq', min: 200, max: 5000, step: 1, unit: 'Hz' },
+    { name: 'midGain', label: 'Mid Gain', min: -24, max: 24, step: 0.5, unit: 'dB' },
+    { name: 'midQ', label: 'Mid Q', min: 0.1, max: 10, step: 0.1 },
+    { name: 'highFreq', label: 'High Freq', min: 2000, max: 20000, step: 1, unit: 'Hz' },
+    { name: 'highGain', label: 'High Gain', min: -24, max: 24, step: 0.5, unit: 'dB' },
+  ],
+  compressor: [
+    { name: 'threshold', label: 'Threshold', min: -60, max: 0, step: 0.5, unit: 'dB' },
+    { name: 'ratio', label: 'Ratio', min: 1, max: 20, step: 0.1 },
+    { name: 'attack', label: 'Attack', min: 0.1, max: 200, step: 0.1, unit: 'ms' },
+    { name: 'release', label: 'Release', min: 10, max: 2000, step: 1, unit: 'ms' },
+    { name: 'makeupGain', label: 'Makeup', min: -12, max: 24, step: 0.5, unit: 'dB' },
+  ],
+  reverb: [
+    { name: 'wetDry', label: 'Wet/Dry', min: 0, max: 100, step: 1, unit: '%' },
+    { name: 'roomSize', label: 'Room', min: 0, max: 4, step: 1 },
+  ],
+  delay: [
+    { name: 'time', label: 'Time', min: 1, max: 2000, step: 1, unit: 'ms' },
+    { name: 'feedback', label: 'Feedback', min: 0, max: 100, step: 1, unit: '%' },
+    { name: 'wetDry', label: 'Wet/Dry', min: 0, max: 100, step: 1, unit: '%' },
+  ],
+  chorus: [
+    { name: 'rate', label: 'Rate', min: 0.1, max: 10, step: 0.1, unit: 'Hz' },
+    { name: 'depth', label: 'Depth', min: 0, max: 1, step: 0.01 },
+    { name: 'wetDry', label: 'Wet/Dry', min: 0, max: 100, step: 1, unit: '%' },
+  ],
+  distortion: [
+    { name: 'drive', label: 'Drive', min: 0, max: 1, step: 0.01 },
+    { name: 'wetDry', label: 'Wet/Dry', min: 0, max: 100, step: 1, unit: '%' },
+    { name: 'type', label: 'Type', min: 0, max: 2, step: 1 },
+  ],
+};
+
+export const EFFECT_DISPLAY_NAMES: Record<EffectTypeName, string> = {
+  eq: 'EQ',
+  compressor: 'Compressor',
+  reverb: 'Reverb',
+  delay: 'Delay',
+  chorus: 'Chorus',
+  distortion: 'Distortion',
+};
 
 export interface Clip {
   id: string;
@@ -29,6 +118,16 @@ export interface Clip {
   color: string;
   notes?: MidiNote[];
   selected?: boolean;
+  /** Downsampled waveform data for audio clip preview (0-1 peak values) */
+  waveform?: number[];
+  /** Audio file reference (relative path in project bundle or absolute path) */
+  audioFile?: string;
+}
+
+export interface AudioInputDevice {
+  uid: string;
+  name: string;
+  channelCount: number;
 }
 
 export interface TransportState {
@@ -44,6 +143,8 @@ export interface TransportState {
   loopStart: number;
   loopEnd: number;
   loopEnabled: boolean;
+  metronomeEnabled: boolean;
+  countInEnabled: boolean;
 }
 
 export interface KeySignature {
@@ -102,6 +203,13 @@ export interface DAWState {
   projectSaved: boolean;
   /** Whether the in-memory state has unsaved changes */
   projectDirty: boolean;
+  /** Available audio input devices */
+  inputDevices: AudioInputDevice[];
+  /** Whether input monitoring is active */
+  monitorEnabled: boolean;
+  /** Input metering levels (for armed/recording tracks) */
+  inputLevelL: number;
+  inputLevelR: number;
 }
 
 export type ViewId = 'arrange' | 'edit' | 'mix' | 'instruments' | 'plugins' | 'visualizer';

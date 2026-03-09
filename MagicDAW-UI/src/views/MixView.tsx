@@ -1,9 +1,14 @@
-import React, { useCallback, useRef, useMemo } from 'react';
+import React, { useCallback, useRef, useMemo, useState, useEffect } from 'react';
 import { Player } from '@remotion/player';
 import { LiveMixer } from '../compositions/LiveMixer';
 import type { LiveMixerProps } from '../compositions/LiveMixer';
-import type { Track } from '../types/daw';
-import { sendToSwift, BridgeMessages } from '../bridge';
+import type { Track, EffectTypeName, EffectSlot } from '../types/daw';
+import { EFFECT_PARAMS, EFFECT_DISPLAY_NAMES } from '../types/daw';
+import {
+  sendToSwift, BridgeMessages, onSwiftMessage,
+  addEffect, removeEffect, setEffectParam, bypassEffect, setSendLevel,
+} from '../bridge';
+import type { EffectsChainUpdatedPayload } from '../bridge';
 
 interface MixViewProps {
   tracks: Track[];
@@ -14,6 +19,8 @@ interface MixViewProps {
   onSoloToggle?: (trackId: string) => void;
   onEffectChange?: (trackId: string, effectIndex: number, paramName: string, value: number) => void;
 }
+
+const EFFECT_TYPES: EffectTypeName[] = ['eq', 'compressor', 'reverb', 'delay', 'chorus', 'distortion'];
 
 export const MixView: React.FC<MixViewProps> = ({
   tracks,
@@ -31,6 +38,28 @@ export const MixView: React.FC<MixViewProps> = ({
     startX: number;
     startValue: number;
   } | null>(null);
+
+  // ── Effects Chain State ──
+  const [effectsChains, setEffectsChains] = useState<Record<string, EffectSlot[]>>({});
+  const [selectedEffectTrack, setSelectedEffectTrack] = useState<string | null>(null);
+  const [showEffectDropdown, setShowEffectDropdown] = useState<string | null>(null);
+
+  // Listen for effects chain updates from Swift
+  useEffect(() => {
+    const unsub = onSwiftMessage(BridgeMessages.EFFECTS_CHAIN_UPDATED, (payload) => {
+      const p = payload as EffectsChainUpdatedPayload;
+      setEffectsChains(prev => ({
+        ...prev,
+        [p.trackId]: p.effects.map((e, i) => ({
+          id: `${p.trackId}-${i}`,
+          type: e.type,
+          bypassed: e.bypassed,
+          params: e.params,
+        })),
+      }));
+    });
+    return unsub;
+  }, []);
 
   // Derive soloed/muted lists for the composition
   const soloedTracks = useMemo(
@@ -60,6 +89,8 @@ export const MixView: React.FC<MixViewProps> = ({
     [tracks],
   );
 
+  const busTracks = useMemo(() => tracks.filter(t => t.type === 'bus'), [tracks]);
+
   // Build input props for the Remotion composition
   const inputProps: LiveMixerProps = useMemo(() => ({
     tracks,
@@ -69,7 +100,8 @@ export const MixView: React.FC<MixViewProps> = ({
     selectedTrackId,
     soloedTracks,
     mutedTracks,
-  }), [tracks, masterLevelL, masterLevelR, trackLevels, selectedTrackId, soloedTracks, mutedTracks]);
+    effectsChains,
+  }), [tracks, masterLevelL, masterLevelR, trackLevels, selectedTrackId, soloedTracks, mutedTracks, effectsChains]);
 
   // Interactive overlay: handle clicks on mute/solo buttons rendered in the composition
   const handleOverlayClick = useCallback((e: React.MouseEvent) => {
@@ -85,12 +117,29 @@ export const MixView: React.FC<MixViewProps> = ({
       onMuteToggle?.(trackId);
     } else if (action === 'solo') {
       onSoloToggle?.(trackId);
+    } else if (action === 'add-effect') {
+      setShowEffectDropdown(prev => prev === trackId ? null : trackId);
+    } else if (action === 'select-effect') {
+      const effectType = actionEl.dataset.effectType as EffectTypeName;
+      if (effectType) {
+        addEffect(trackId, effectType);
+        setShowEffectDropdown(null);
+      }
+    } else if (action === 'remove-effect') {
+      const idx = parseInt(actionEl.dataset.effectIndex ?? '0', 10);
+      removeEffect(trackId, idx);
+    } else if (action === 'bypass-effect') {
+      const idx = parseInt(actionEl.dataset.effectIndex ?? '0', 10);
+      const chain = effectsChains[trackId] ?? [];
+      const current = chain[idx]?.bypassed ?? false;
+      bypassEffect(trackId, idx, !current);
+    } else if (action === 'show-effect-params') {
+      setSelectedEffectTrack(prev => prev === trackId ? null : trackId);
     }
-  }, [onMuteToggle, onSoloToggle]);
+  }, [onMuteToggle, onSoloToggle, effectsChains]);
 
   // Fader dragging on the overlay layer
   const handleOverlayMouseDown = useCallback((e: React.MouseEvent) => {
-    // Check if the click is on a fader area (within a channel strip)
     const target = e.target as HTMLElement;
     const stripEl = target.closest('[data-track-id]') as HTMLElement | null;
     if (!stripEl) return;
@@ -98,7 +147,6 @@ export const MixView: React.FC<MixViewProps> = ({
     const trackId = stripEl.dataset.trackId;
     if (!trackId) return;
 
-    // Only start fader drag if not clicking a button
     const actionEl = target.closest('[data-action]');
     if (actionEl) return;
 
@@ -170,6 +218,59 @@ export const MixView: React.FC<MixViewProps> = ({
     window.addEventListener('mouseup', handleMouseUp);
   }, [tracks, onPanChange]);
 
+  // ── Effect Parameter Panel ──
+  const effectParamPanel = useMemo(() => {
+    if (!selectedEffectTrack) return null;
+    const chain = effectsChains[selectedEffectTrack] ?? [];
+    if (chain.length === 0) return null;
+    const track = tracks.find(t => t.id === selectedEffectTrack);
+    if (!track) return null;
+
+    return (
+      <div style={{
+        position: 'absolute', bottom: 65, left: 8, right: 8,
+        background: 'rgba(10,15,26,0.95)', border: '1px solid rgba(120,200,220,0.2)',
+        borderRadius: 8, padding: 10, zIndex: 20, backdropFilter: 'blur(20px)',
+        maxHeight: 200, overflowY: 'auto',
+      }}>
+        <div style={{ fontSize: 10, color: '#67e8f9', marginBottom: 6, fontWeight: 700 }}>
+          {track.name} — Effects
+        </div>
+        {chain.map((effect, idx) => {
+          const params = EFFECT_PARAMS[effect.type] ?? [];
+          return (
+            <div key={effect.id} style={{ marginBottom: 8 }}>
+              <div style={{
+                fontSize: 9, color: effect.bypassed ? '#64748b' : '#e2e8f0',
+                fontWeight: 600, marginBottom: 3,
+                textDecoration: effect.bypassed ? 'line-through' : 'none',
+              }}>
+                {EFFECT_DISPLAY_NAMES[effect.type]}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {params.map(p => (
+                  <label key={p.name} style={{ display: 'flex', flexDirection: 'column', gap: 1, fontSize: 7, color: '#94a3b8' }}>
+                    {p.label}
+                    <input
+                      type="range"
+                      min={p.min} max={p.max} step={p.step}
+                      value={effect.params[p.name] ?? (p.min + p.max) / 2}
+                      onChange={(e) => setEffectParam(selectedEffectTrack, idx, p.name, parseFloat(e.target.value))}
+                      style={{ width: 60, height: 10, accentColor: '#67e8f9' }}
+                    />
+                    <span style={{ fontSize: 6, color: '#64748b' }}>
+                      {(effect.params[p.name] ?? 0).toFixed(1)}{p.unit ? ` ${p.unit}` : ''}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }, [selectedEffectTrack, effectsChains, tracks]);
+
   return (
     <div
       ref={containerRef}
@@ -205,12 +306,40 @@ export const MixView: React.FC<MixViewProps> = ({
           inset: 0,
           zIndex: 10,
           cursor: 'default',
-          // Transparent — all visuals come from the Remotion layer below
         }}
         onClick={handleOverlayClick}
         onMouseDown={handleOverlayMouseDown}
         onContextMenu={handleOverlayContextMenu}
       />
+
+      {/* Effect parameter panel overlay */}
+      {effectParamPanel}
+
+      {/* Effect type dropdown */}
+      {showEffectDropdown && (
+        <div style={{
+          position: 'absolute', top: 40, left: '50%', transform: 'translateX(-50%)',
+          background: 'rgba(10,15,26,0.95)', border: '1px solid rgba(120,200,220,0.3)',
+          borderRadius: 6, padding: 4, zIndex: 30, backdropFilter: 'blur(20px)',
+        }}>
+          {EFFECT_TYPES.map(type => (
+            <div
+              key={type}
+              data-action="select-effect"
+              data-track-id={showEffectDropdown}
+              data-effect-type={type}
+              style={{
+                padding: '4px 12px', fontSize: 10, color: '#e2e8f0', cursor: 'pointer',
+                borderRadius: 3,
+              }}
+              onMouseEnter={(e) => { (e.target as HTMLElement).style.background = 'rgba(120,200,220,0.15)'; }}
+              onMouseLeave={(e) => { (e.target as HTMLElement).style.background = 'transparent'; }}
+            >
+              {EFFECT_DISPLAY_NAMES[type]}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

@@ -151,6 +151,8 @@ export const mockDAWState: DAWState = {
     loopStart: 17,
     loopEnd: 25,
     loopEnabled: true,
+    metronomeEnabled: false,
+    countInEnabled: false,
   },
   tracks: mockTracks,
   keySignature: {
@@ -166,6 +168,10 @@ export const mockDAWState: DAWState = {
   projectName: 'Untitled',
   projectSaved: false,
   projectDirty: false,
+  inputDevices: [],
+  monitorEnabled: false,
+  inputLevelL: 0,
+  inputLevelR: 0,
 };
 
 // ── Mock Chord Suggestions ─────────────────────────────────────────────────
@@ -281,33 +287,33 @@ export const mockPluginConnections: PluginConnection[] = [
 
 export const mockPianoRollNotes = [
   // Em chord voicings
-  { pitch: 64, start: 0, duration: 2.5, velocity: 95, channel: 0 },  // E4
-  { pitch: 67, start: 0.12, duration: 2.5, velocity: 88, channel: 0 },  // G4
-  { pitch: 71, start: 0.24, duration: 2.5, velocity: 90, channel: 0 },  // B4
-  { pitch: 74, start: 0.36, duration: 2.0, velocity: 85, channel: 0 },  // D5
-  { pitch: 78, start: 0.48, duration: 2.0, velocity: 82, channel: 0 },  // F#5
+  { id: 'mock-1', pitch: 64, start: 0, duration: 2.5, velocity: 95, channel: 0 },  // E4
+  { id: 'mock-2', pitch: 67, start: 0.12, duration: 2.5, velocity: 88, channel: 0 },  // G4
+  { id: 'mock-3', pitch: 71, start: 0.24, duration: 2.5, velocity: 90, channel: 0 },  // B4
+  { id: 'mock-4', pitch: 74, start: 0.36, duration: 2.0, velocity: 85, channel: 0 },  // D5
+  { id: 'mock-5', pitch: 78, start: 0.48, duration: 2.0, velocity: 82, channel: 0 },  // F#5
 
   // Melody
-  { pitch: 78, start: 0.5, duration: 0.8, velocity: 110, channel: 0 },
-  { pitch: 79, start: 1.5, duration: 0.5, velocity: 105, channel: 0 },
-  { pitch: 81, start: 2.0, duration: 1.0, velocity: 115, channel: 0 },
-  { pitch: 83, start: 3.5, duration: 0.6, velocity: 100, channel: 0 },
-  { pitch: 81, start: 4.2, duration: 0.7, velocity: 108, channel: 0 },
-  { pitch: 79, start: 5.0, duration: 0.9, velocity: 112, channel: 0 },
-  { pitch: 78, start: 5.8, duration: 0.5, velocity: 95, channel: 0 },
-  { pitch: 76, start: 6.5, duration: 1.2, velocity: 90, channel: 0 },
-  { pitch: 74, start: 7.2, duration: 0.6, velocity: 85, channel: 0 },
+  { id: 'mock-6', pitch: 78, start: 0.5, duration: 0.8, velocity: 110, channel: 0 },
+  { id: 'mock-7', pitch: 79, start: 1.5, duration: 0.5, velocity: 105, channel: 0 },
+  { id: 'mock-8', pitch: 81, start: 2.0, duration: 1.0, velocity: 115, channel: 0 },
+  { id: 'mock-9', pitch: 83, start: 3.5, duration: 0.6, velocity: 100, channel: 0 },
+  { id: 'mock-10', pitch: 81, start: 4.2, duration: 0.7, velocity: 108, channel: 0 },
+  { id: 'mock-11', pitch: 79, start: 5.0, duration: 0.9, velocity: 112, channel: 0 },
+  { id: 'mock-12', pitch: 78, start: 5.8, duration: 0.5, velocity: 95, channel: 0 },
+  { id: 'mock-13', pitch: 76, start: 6.5, duration: 1.2, velocity: 90, channel: 0 },
+  { id: 'mock-14', pitch: 74, start: 7.2, duration: 0.6, velocity: 85, channel: 0 },
 
   // Second chord Am7
-  { pitch: 64, start: 3.0, duration: 2.0, velocity: 80, channel: 0 },
-  { pitch: 67, start: 3.1, duration: 2.0, velocity: 78, channel: 0 },
-  { pitch: 71, start: 3.2, duration: 2.0, velocity: 82, channel: 0 },
+  { id: 'mock-15', pitch: 64, start: 3.0, duration: 2.0, velocity: 80, channel: 0 },
+  { id: 'mock-16', pitch: 67, start: 3.1, duration: 2.0, velocity: 78, channel: 0 },
+  { id: 'mock-17', pitch: 71, start: 3.2, duration: 2.0, velocity: 82, channel: 0 },
 
   // Bass
-  { pitch: 52, start: 0, duration: 1.8, velocity: 70, channel: 0 },   // E3
-  { pitch: 48, start: 2.0, duration: 1.5, velocity: 68, channel: 0 }, // C3
-  { pitch: 52, start: 4.0, duration: 1.8, velocity: 72, channel: 0 }, // E3
-  { pitch: 55, start: 6.0, duration: 1.5, velocity: 65, channel: 0 }, // G3
+  { id: 'mock-18', pitch: 52, start: 0, duration: 1.8, velocity: 70, channel: 0 },   // E3
+  { id: 'mock-19', pitch: 48, start: 2.0, duration: 1.5, velocity: 68, channel: 0 }, // C3
+  { id: 'mock-20', pitch: 52, start: 4.0, duration: 1.8, velocity: 72, channel: 0 }, // E3
+  { id: 'mock-21', pitch: 55, start: 6.0, duration: 1.5, velocity: 65, channel: 0 }, // G3
 ];
 
 // ── Swift TrackColor → hex mapping ────────────────────────────────────────

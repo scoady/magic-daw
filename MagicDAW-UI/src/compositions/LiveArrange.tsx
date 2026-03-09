@@ -24,6 +24,11 @@ export interface LiveArrangeProps {
   loopStart?: number;
   loopEnd?: number;
   markers: Array<{ position: number; label: string; color: string }>;
+  // Drag preview offsets (optional)
+  dragOffsetBars?: number;
+  dragOffsetTracks?: number;
+  dragMode?: string;
+  selectedClipIds?: string[];
 }
 
 // ── Theme ────────────────────────────────────────────────────────────────────
@@ -56,7 +61,6 @@ const ENERGY_H = 24;
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function hexToRgba(hex: string, alpha: number): string {
-  // Handle rgba() pass-through
   if (hex.startsWith('rgba') || hex.startsWith('rgb')) return hex;
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
@@ -85,7 +89,7 @@ const DEFAULT_SECTIONS = [
   { position: 25, label: 'BRIDGE', color: A.purple },
 ];
 
-// ── Constellation background dots ────────────────────────────────────────────
+// ── Constellation background dots (reduced count for perf) ──────────────
 
 function generateConstellationDots(count: number, w: number, h: number) {
   const rng = seededRandom(42);
@@ -101,7 +105,7 @@ function generateConstellationDots(count: number, w: number, h: number) {
   return dots;
 }
 
-// ── Energy curve calculation ─────────────────────────────────────────────────
+// ── Energy curve calculation ─────────────────────────────────────────────
 
 function computeEnergy(tracks: Track[], totalBars: number): number[] {
   const energy: number[] = [];
@@ -121,19 +125,18 @@ function computeEnergy(tracks: Track[], totalBars: number): number[] {
   return energy;
 }
 
-// ── Clip content renderers ───────────────────────────────────────────────────
+// ── Clip content renderers ───────────────────────────────────────────────
 
 function renderMidiContent(
   x: number, y: number, w: number, h: number,
   color: string, seed: number, clip: Clip,
 ): React.ReactNode {
-  // If clip has real notes, render them as mini bars
   if (clip.notes && clip.notes.length > 0) {
     const notes = clip.notes;
     const minPitch = Math.min(...notes.map(n => n.pitch));
     const maxPitch = Math.max(...notes.map(n => n.pitch));
     const pitchRange = Math.max(maxPitch - minPitch, 1);
-    const totalBeats = clip.lengthBars * 4; // assume 4/4
+    const totalBeats = clip.lengthBars * 4;
     const contentY = y + 16;
     const contentH = h - 20;
 
@@ -157,7 +160,6 @@ function renderMidiContent(
     );
   }
 
-  // Fallback: procedural mini-melody bars
   const rng = seededRandom(seed);
   const barCount = Math.max(8, Math.floor(w / 6));
   const contentY = y + 16;
@@ -191,7 +193,6 @@ function renderAudioContent(
   const contentH = h - 20;
   const midY = contentY + contentH / 2;
 
-  // Build top and bottom waveform paths
   let topPath = `M ${x + 3} ${midY}`;
   let bottomPath = `M ${x + 3} ${midY}`;
   for (let i = 0; i <= steps; i++) {
@@ -229,6 +230,183 @@ function renderBusContent(
   );
 }
 
+// ── Memoized background layer ───────────────────────────────────────────
+
+const Background = React.memo<{ W: number; H: number; totalH: number; entrance: number }>(
+  ({ W, H, totalH, entrance }) => {
+    const dots = useMemo(() => generateConstellationDots(40, W, H), [W, H]);
+    const frame = useCurrentFrame();
+    return (
+      <>
+        <rect x={0} y={0} width={W} height={Math.max(H, totalH)} fill={A.bgDeep} />
+        {dots.map((d, i) => {
+          const twinkle = 0.3 + 0.7 * Math.abs(Math.sin(frame * 0.04 + d.phase));
+          return (
+            <circle
+              key={`dot-${i}`}
+              cx={d.x} cy={d.y} r={d.r}
+              fill={A.textMuted}
+              opacity={twinkle * 0.2 * entrance}
+            />
+          );
+        })}
+      </>
+    );
+  },
+);
+
+// ── Memoized ruler ──────────────────────────────────────────────────────
+
+const Ruler = React.memo<{
+  W: number; visibleBars: number; scrollOffsetBars: number;
+  beatsPerBar: number; totalBars: number; playheadBar: number;
+  entrance: number; sections: Array<{ position: number; label: string; color: string }>;
+}>(({ W, visibleBars, scrollOffsetBars, beatsPerBar, totalBars, playheadBar, entrance, sections }) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const gridW = W - HEADER_W;
+  const barW = gridW / visibleBars;
+
+  return (
+    <g>
+      <rect x={0} y={0} width={W} height={RULER_H} fill="rgba(8,14,24,0.9)" opacity={entrance} />
+      <line x1={0} y1={RULER_H} x2={W} y2={RULER_H} stroke={A.glassBorder} strokeWidth={0.5} />
+      {Array.from({ length: Math.ceil(visibleBars) + 1 }, (_, i) => {
+        const bar = Math.floor(scrollOffsetBars) + i + 1;
+        if (bar < 1 || bar > totalBars) return null;
+        const x = HEADER_W + (bar - 1 - scrollOffsetBars) * barW;
+        const isPlayheadBar = Math.floor(playheadBar) === bar;
+        const barEntrance = spring({
+          frame: frame - 2 - i,
+          fps,
+          config: { damping: 60, stiffness: 40 },
+        });
+
+        return (
+          <g key={`bar-${bar}`} opacity={barEntrance}>
+            <text
+              x={x + barW / 2} y={14}
+              textAnchor="middle"
+              fill={isPlayheadBar ? A.cyan : A.textMuted}
+              fontSize={9}
+              fontWeight={isPlayheadBar ? 'bold' : 'normal'}
+              style={isPlayheadBar
+                ? { filter: 'drop-shadow(0 0 4px rgba(103,232,249,0.6))' }
+                : undefined}
+            >
+              {bar}
+            </text>
+            {Array.from({ length: beatsPerBar }, (_, bi) => {
+              const tickX = x + (bi / beatsPerBar) * barW;
+              return (
+                <line
+                  key={`tick-${bar}-${bi}`}
+                  x1={tickX} y1={bi === 0 ? 20 : 26}
+                  x2={tickX} y2={RULER_H}
+                  stroke={bi === 0 ? 'rgba(120,200,220,0.25)' : 'rgba(120,200,220,0.08)'}
+                  strokeWidth={bi === 0 ? 0.8 : 0.4}
+                />
+              );
+            })}
+          </g>
+        );
+      })}
+      {sections.map((section) => {
+        const x = HEADER_W + (section.position - 1 - scrollOffsetBars) * barW;
+        if (x < HEADER_W - 50 || x > W + 20) return null;
+        return (
+          <g key={`sec-${section.position}`} opacity={entrance}>
+            <rect
+              x={x} y={2}
+              width={50} height={14}
+              rx={3}
+              fill={hexToRgba(section.color, 0.15)}
+              stroke={hexToRgba(section.color, 0.4)}
+              strokeWidth={0.5}
+            />
+            <text
+              x={x + 25} y={12}
+              textAnchor="middle"
+              fill={section.color} fontSize={7} fontWeight="bold"
+            >
+              {section.label}
+            </text>
+          </g>
+        );
+      })}
+    </g>
+  );
+});
+
+// ── Memoized grid lines ─────────────────────────────────────────────────
+
+const GridLines = React.memo<{
+  W: number; tracks: Track[]; visibleBars: number; scrollOffsetBars: number;
+  contentTop: number; isPlaying: boolean; playheadBar: number; entrance: number;
+  activeLanes: Set<string>; pulse: number;
+  sections: Array<{ position: number; label: string; color: string }>;
+}>(({ W, tracks, visibleBars, scrollOffsetBars, contentTop, isPlaying, playheadBar, entrance, activeLanes, pulse, sections }) => {
+  const gridW = W - HEADER_W;
+  const barW = gridW / visibleBars;
+
+  return (
+    <g opacity={entrance}>
+      {tracks.map((track, i) => {
+        const ly = contentTop + i * TRACK_H;
+        const laneAlpha = i % 2 === 0 ? 0.02 : 0.04;
+        return (
+          <g key={`lane-${i}`}>
+            <rect
+              x={HEADER_W} y={ly}
+              width={gridW} height={TRACK_H}
+              fill={`rgba(120,200,220,${laneAlpha})`}
+            />
+            {activeLanes.has(track.id) && isPlaying && (
+              <rect
+                x={HEADER_W} y={ly}
+                width={gridW} height={TRACK_H}
+                fill={hexToRgba(track.color, 0.02 + pulse * 0.02)}
+              />
+            )}
+            {track.muted && (
+              <rect
+                x={HEADER_W} y={ly}
+                width={gridW} height={TRACK_H}
+                fill="rgba(8,14,24,0.4)"
+              />
+            )}
+            <line
+              x1={HEADER_W} y1={ly + TRACK_H}
+              x2={W} y2={ly + TRACK_H}
+              stroke="rgba(120,200,220,0.06)"
+              strokeWidth={0.5}
+            />
+          </g>
+        );
+      })}
+      {Array.from({ length: Math.ceil(visibleBars) + 2 }, (_, i) => {
+        const bar = Math.floor(scrollOffsetBars) + i;
+        const x = HEADER_W + (bar - scrollOffsetBars) * barW;
+        if (x < HEADER_W || x > W) return null;
+        const distFromPlayhead = Math.abs(bar - (playheadBar - 1));
+        const spotlightAlpha = isPlaying
+          ? interpolate(distFromPlayhead, [0, 3, 10], [0.2, 0.1, 0.04], { extrapolateRight: 'clamp' })
+          : 0.06;
+        const isSection = sections.some(s => s.position === bar + 1);
+        return (
+          <line
+            key={`vl-${bar}`}
+            x1={x} y1={contentTop}
+            x2={x} y2={contentTop + tracks.length * TRACK_H}
+            stroke={`rgba(120,200,220,${isSection ? spotlightAlpha * 2 : spotlightAlpha})`}
+            strokeWidth={0.5}
+          />
+        );
+      })}
+    </g>
+  );
+});
+
 // ── Main Composition ─────────────────────────────────────────────────────────
 
 export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
@@ -246,6 +424,10 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
     loopStart,
     loopEnd,
     markers,
+    dragOffsetBars = 0,
+    dragOffsetTracks = 0,
+    dragMode = 'idle',
+    selectedClipIds = [],
   } = props;
 
   const frame = useCurrentFrame();
@@ -264,27 +446,22 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
   // Sections / markers
   const sections = markers.length > 0 ? markers : DEFAULT_SECTIONS;
 
-  // Constellation dots
-  const dots = useMemo(() => generateConstellationDots(80, W, H), [W, H]);
-
-  // Energy curve
+  // Energy curve (memoized)
   const energy = useMemo(() => computeEnergy(tracks, totalBars), [tracks, totalBars]);
 
   // Entrance animation
   const entrance = spring({ frame, fps, config: { damping: 60, stiffness: 30 } });
 
-  // Pulse clock (for selected-glow and active-lane effects)
+  // Pulse clock
   const pulse = Math.sin(frame * 0.08) * 0.5 + 0.5;
 
-  // Determine which tracks have clips under the playhead
+  // Active lanes (memoized)
   const activeLanes = useMemo(() => {
     const set = new Set<string>();
     for (const track of tracks) {
       if (track.muted) continue;
       for (const clip of track.clips) {
-        const clipStartBar = clip.startBar;
-        const clipEndBar = clip.startBar + clip.lengthBars;
-        if (playheadBar >= clipStartBar && playheadBar < clipEndBar) {
+        if (playheadBar >= clip.startBar && playheadBar < clip.startBar + clip.lengthBars) {
           set.add(track.id);
           break;
         }
@@ -293,11 +470,86 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
     return set;
   }, [tracks, playheadBar]);
 
+  // Selected clip ID set for fast lookup
+  const selectedSet = useMemo(() => new Set(selectedClipIds), [selectedClipIds]);
+  const isDragging = dragMode === 'moving' || dragMode === 'resizing' || dragMode === 'duplicating';
+
+  // Pre-compute clip layout positions (memoized)
+  const clipLayouts = useMemo(() => {
+    const layouts: Array<{
+      clip: Clip;
+      track: Track;
+      trackIdx: number;
+      cx: number;
+      cy: number;
+      cw: number;
+      ch: number;
+      isSelected: boolean;
+      isGhost: boolean; // for duplicate drag preview
+    }> = [];
+
+    tracks.forEach((track, trackIdx) => {
+      track.clips.forEach((clip) => {
+        const isSelected = selectedSet.has(clip.id) || clip.id === selectedClipId || clip.selected === true;
+
+        // Apply drag offset for selected clips
+        let effectiveStartBar = clip.startBar;
+        let effectiveTrackIdx = trackIdx;
+        let effectiveLengthBars = clip.lengthBars;
+        let isGhost = false;
+
+        if (isSelected && isDragging && dragOffsetBars !== 0 || (isSelected && isDragging && dragOffsetTracks !== 0)) {
+          if (dragMode === 'moving') {
+            effectiveStartBar = Math.max(1, clip.startBar + dragOffsetBars);
+            effectiveTrackIdx = Math.max(0, Math.min(tracks.length - 1, trackIdx + dragOffsetTracks));
+          } else if (dragMode === 'resizing') {
+            effectiveLengthBars = Math.max(1, clip.lengthBars + dragOffsetBars);
+          } else if (dragMode === 'duplicating') {
+            // Show ghost at new position, keep original in place
+            layouts.push({
+              clip,
+              track,
+              trackIdx,
+              cx: HEADER_W + (clip.startBar - 1 - scrollOffsetBars) * barW,
+              cy: contentTop + trackIdx * TRACK_H + 3,
+              cw: clip.lengthBars * barW - 2,
+              ch: TRACK_H - 6,
+              isSelected: false,
+              isGhost: false,
+            });
+            // Ghost duplicate
+            effectiveStartBar = Math.max(1, clip.startBar + dragOffsetBars);
+            effectiveTrackIdx = Math.max(0, Math.min(tracks.length - 1, trackIdx + dragOffsetTracks));
+            isGhost = true;
+          }
+        }
+
+        const clipBarStart = effectiveStartBar - 1 - scrollOffsetBars;
+        const cx = HEADER_W + clipBarStart * barW;
+        const cy = contentTop + effectiveTrackIdx * TRACK_H + 3;
+        const cw = effectiveLengthBars * barW - 2;
+        const ch = TRACK_H - 6;
+
+        // Off-screen culling
+        if (cx + cw >= HEADER_W && cx <= W) {
+          layouts.push({
+            clip,
+            track,
+            trackIdx: effectiveTrackIdx,
+            cx, cy, cw, ch,
+            isSelected: isSelected && !isGhost,
+            isGhost,
+          });
+        }
+      });
+    });
+    return layouts;
+  }, [tracks, selectedSet, selectedClipId, isDragging, dragOffsetBars, dragOffsetTracks, dragMode, scrollOffsetBars, barW, contentTop, W]);
+
   return (
     <AbsoluteFill style={{ backgroundColor: 'transparent', overflow: 'hidden' }}>
       <svg width={W} height={Math.max(H, totalH)} style={{ fontFamily: "'Space Mono', monospace" }}>
         <defs>
-          {/* Playhead glow filter */}
           <filter id="la-playhead-glow" x="-100%" y="-10%" width="300%" height="120%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur" />
             <feMerge>
@@ -305,7 +557,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
               <feMergeNode in="SourceGraphic" />
             </feMerge>
           </filter>
-          {/* Clip selected glow */}
           <filter id="la-clip-glow" x="-10%" y="-20%" width="120%" height="140%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur" />
             <feMerge>
@@ -313,7 +564,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
               <feMergeNode in="SourceGraphic" />
             </feMerge>
           </filter>
-          {/* Aurora gradient for energy curve */}
           <linearGradient id="la-energy-grad" x1="0" y1="0" x2="1" y2="0">
             <stop offset="0%" stopColor={A.teal} />
             <stop offset="25%" stopColor={A.cyan} />
@@ -321,13 +571,11 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
             <stop offset="75%" stopColor={A.pink} />
             <stop offset="100%" stopColor={A.gold} />
           </linearGradient>
-          {/* Playhead trail gradient */}
           <linearGradient id="la-played-tint" x1="0" y1="0" x2="1" y2="0">
             <stop offset="0%" stopColor={A.cyan} stopOpacity={0} />
             <stop offset="90%" stopColor={A.cyan} stopOpacity={0.03} />
             <stop offset="100%" stopColor={A.cyan} stopOpacity={0.06} />
           </linearGradient>
-          {/* Clip prismatic border gradient */}
           <linearGradient id="la-prism" x1="0" y1="0" x2="1" y2="1">
             <stop offset="0%" stopColor={A.teal} stopOpacity={0.6} />
             <stop offset="33%" stopColor={A.cyan} stopOpacity={0.4} />
@@ -336,23 +584,10 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
           </linearGradient>
         </defs>
 
-        {/* ── Deep navy background ──────────────────────────────────────── */}
-        <rect x={0} y={0} width={W} height={Math.max(H, totalH)} fill={A.bgDeep} />
+        {/* ── Background + constellation dots ─────────────────────────────── */}
+        <Background W={W} H={H} totalH={totalH} entrance={entrance} />
 
-        {/* ── Constellation dots ─────────────────────────────────────────── */}
-        {dots.map((d, i) => {
-          const twinkle = 0.3 + 0.7 * Math.abs(Math.sin(frame * 0.04 + d.phase));
-          return (
-            <circle
-              key={`dot-${i}`}
-              cx={d.x} cy={d.y} r={d.r}
-              fill={A.textMuted}
-              opacity={twinkle * 0.2 * entrance}
-            />
-          );
-        })}
-
-        {/* ── Aurora waves (intensity based on energy near playhead) ───── */}
+        {/* ── Aurora waves ────────────────────────────────────────────────── */}
         {(() => {
           const pbIdx = clamp(Math.floor(playheadBar) - 1, 0, energy.length - 1);
           const localEnergy = energy[pbIdx] ?? 0;
@@ -408,7 +643,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
 
           return (
             <g key={`th-${track.id}`} opacity={headerEntrance}>
-              {/* Selected track aurora border */}
               {isSelected && (
                 <rect
                   x={1} y={ty + 1}
@@ -420,7 +654,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
                   style={{ filter: 'blur(1px)' }}
                 />
               )}
-              {/* Color stripe */}
               <rect
                 x={2} y={ty + 4}
                 width={3} height={TRACK_H - 8}
@@ -428,7 +661,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
                 fill={track.color}
                 opacity={track.muted ? 0.3 : 0.8}
               />
-              {/* Track name */}
               <text
                 x={12} y={ty + 22}
                 fill={track.muted ? A.textMuted : A.text}
@@ -436,7 +668,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
               >
                 {track.name}
               </text>
-              {/* Mute / Solo mini indicators */}
               <text
                 x={12} y={ty + 38}
                 fill={track.muted ? A.orange : A.textMuted}
@@ -451,7 +682,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
               >
                 S
               </text>
-              {/* Active glow pulse on lane */}
               {isActive && (
                 <rect
                   x={0} y={ty}
@@ -459,7 +689,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
                   fill={hexToRgba(track.color, 0.04 + pulse * 0.03)}
                 />
               )}
-              {/* Track separator */}
               <line
                 x1={0} y1={ty + TRACK_H}
                 x2={HEADER_W} y2={ty + TRACK_H}
@@ -469,85 +698,17 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
           );
         })}
 
-        {/* ── Ruler (top bar) ────────────────────────────────────────────── */}
-        <rect x={0} y={0} width={W} height={RULER_H} fill="rgba(8,14,24,0.9)" opacity={entrance} />
-        <line x1={0} y1={RULER_H} x2={W} y2={RULER_H} stroke={A.glassBorder} strokeWidth={0.5} />
-
-        {/* Bar numbers & beat ticks */}
-        {Array.from({ length: Math.ceil(visibleBars) + 1 }, (_, i) => {
-          const bar = Math.floor(scrollOffsetBars) + i + 1;
-          if (bar < 1 || bar > totalBars) return null;
-          const x = HEADER_W + (bar - 1 - scrollOffsetBars) * barW;
-          const isPlayheadBar = Math.floor(playheadBar) === bar;
-          const barEntrance = spring({
-            frame: frame - 2 - i,
-            fps,
-            config: { damping: 60, stiffness: 40 },
-          });
-
-          return (
-            <g key={`bar-${bar}`} opacity={barEntrance}>
-              {/* Bar number — glows if current */}
-              <text
-                x={x + barW / 2} y={14}
-                textAnchor="middle"
-                fill={isPlayheadBar ? A.cyan : A.textMuted}
-                fontSize={9}
-                fontWeight={isPlayheadBar ? 'bold' : 'normal'}
-                style={isPlayheadBar
-                  ? { filter: 'drop-shadow(0 0 4px rgba(103,232,249,0.6))' }
-                  : undefined}
-              >
-                {bar}
-              </text>
-              {/* Beat subdivision ticks */}
-              {Array.from({ length: beatsPerBar }, (_, bi) => {
-                const tickX = x + (bi / beatsPerBar) * barW;
-                return (
-                  <line
-                    key={`tick-${bar}-${bi}`}
-                    x1={tickX} y1={bi === 0 ? 20 : 26}
-                    x2={tickX} y2={RULER_H}
-                    stroke={bi === 0 ? 'rgba(120,200,220,0.25)' : 'rgba(120,200,220,0.08)'}
-                    strokeWidth={bi === 0 ? 0.8 : 0.4}
-                  />
-                );
-              })}
-            </g>
-          );
-        })}
-
-        {/* ── Section markers on ruler ────────────────────────────────────── */}
-        {sections.map((section) => {
-          const x = HEADER_W + (section.position - 1 - scrollOffsetBars) * barW;
-          if (x < HEADER_W - 50 || x > W + 20) return null;
-          return (
-            <g key={`sec-${section.position}`} opacity={entrance}>
-              {/* Glass label */}
-              <rect
-                x={x} y={2}
-                width={50} height={14}
-                rx={3}
-                fill={hexToRgba(section.color, 0.15)}
-                stroke={hexToRgba(section.color, 0.4)}
-                strokeWidth={0.5}
-              />
-              <text
-                x={x + 25} y={12}
-                textAnchor="middle"
-                fill={section.color} fontSize={7} fontWeight="bold"
-              >
-                {section.label}
-              </text>
-              {/* Section boundary line through tracks */}
-              <rect
-                x={x - 0.5} y={contentTop}
-                width={1} height={tracks.length * TRACK_H}
-                fill={hexToRgba(section.color, 0.1)}
-              />
-            </g>
-          );
-        })}
+        {/* ── Ruler ──────────────────────────────────────────────────────── */}
+        <Ruler
+          W={W}
+          visibleBars={visibleBars}
+          scrollOffsetBars={scrollOffsetBars}
+          beatsPerBar={beatsPerBar}
+          totalBars={totalBars}
+          playheadBar={playheadBar}
+          entrance={entrance}
+          sections={sections}
+        />
 
         {/* ── Energy curve ────────────────────────────────────────────────── */}
         {(() => {
@@ -568,7 +729,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
               <rect x={HEADER_W} y={ey} width={gridW} height={eh}
                 fill="rgba(8,14,24,0.4)" />
               <path d={pathD} fill="url(#la-energy-grad)" opacity={0.15} />
-              {/* Re-draw the line as a stroke on top */}
               <path
                 d={pathD.replace(/ Z$/, '')}
                 fill="none"
@@ -581,72 +741,19 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
         })()}
 
         {/* ── Grid lines ─────────────────────────────────────────────────── */}
-        <g opacity={entrance}>
-          {/* Horizontal track separators */}
-          {tracks.map((track, i) => {
-            const ly = contentTop + i * TRACK_H;
-            // Alternating lane tints
-            const laneAlpha = i % 2 === 0 ? 0.02 : 0.04;
-            return (
-              <g key={`lane-${i}`}>
-                <rect
-                  x={HEADER_W} y={ly}
-                  width={gridW} height={TRACK_H}
-                  fill={`rgba(120,200,220,${laneAlpha})`}
-                />
-                {/* Active lane glow */}
-                {activeLanes.has(track.id) && isPlaying && (
-                  <rect
-                    x={HEADER_W} y={ly}
-                    width={gridW} height={TRACK_H}
-                    fill={hexToRgba(track.color, 0.02 + pulse * 0.02)}
-                  />
-                )}
-                {/* Muted lane dim overlay */}
-                {track.muted && (
-                  <rect
-                    x={HEADER_W} y={ly}
-                    width={gridW} height={TRACK_H}
-                    fill="rgba(8,14,24,0.4)"
-                  />
-                )}
-                <line
-                  x1={HEADER_W} y1={ly + TRACK_H}
-                  x2={W} y2={ly + TRACK_H}
-                  stroke="rgba(120,200,220,0.06)"
-                  strokeWidth={0.5}
-                />
-              </g>
-            );
-          })}
-
-          {/* Vertical bar lines — spotlight effect: brighter near playhead */}
-          {Array.from({ length: Math.ceil(visibleBars) + 2 }, (_, i) => {
-            const bar = Math.floor(scrollOffsetBars) + i;
-            const x = HEADER_W + (bar - scrollOffsetBars) * barW;
-            if (x < HEADER_W || x > W) return null;
-
-            // Distance from playhead in bars for spotlight
-            const distFromPlayhead = Math.abs(bar - (playheadBar - 1));
-            const spotlightAlpha = isPlaying
-              ? interpolate(distFromPlayhead, [0, 3, 10], [0.2, 0.1, 0.04], {
-                  extrapolateRight: 'clamp',
-                })
-              : 0.06;
-
-            const isSection = sections.some(s => s.position === bar + 1);
-
-            return (
-              <line
-                key={`vl-${bar}`}
-                x1={x} y1={contentTop}
-                x2={x} y2={contentTop + tracks.length * TRACK_H}
-                stroke={`rgba(120,200,220,${isSection ? spotlightAlpha * 2 : spotlightAlpha})`}
-                strokeWidth={0.5}
-              />
-            );
-          })}
-        </g>
+        <GridLines
+          W={W}
+          tracks={tracks}
+          visibleBars={visibleBars}
+          scrollOffsetBars={scrollOffsetBars}
+          contentTop={contentTop}
+          isPlaying={isPlaying}
+          playheadBar={playheadBar}
+          entrance={entrance}
+          activeLanes={activeLanes}
+          pulse={pulse}
+          sections={sections}
+        />
 
         {/* ── Played-area tint ───────────────────────────────────────────── */}
         {isPlaying && playheadX > HEADER_W && (
@@ -666,13 +773,11 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
             const lw = (loopEnd - loopStart) * barW;
             return (
               <g opacity={entrance}>
-                {/* Loop overlay */}
                 <rect
                   x={lx} y={contentTop}
                   width={lw} height={tracks.length * TRACK_H}
                   fill={hexToRgba(A.teal, 0.04)}
                 />
-                {/* Loop bracket start */}
                 <line
                   x1={lx} y1={RULER_H}
                   x2={lx} y2={contentTop + tracks.length * TRACK_H}
@@ -680,7 +785,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
                   strokeWidth={1.5}
                   strokeDasharray="4 2"
                 />
-                {/* Loop bracket end */}
                 <line
                   x1={lx + lw} y1={RULER_H}
                   x2={lx + lw} y2={contentTop + tracks.length * TRACK_H}
@@ -688,7 +792,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
                   strokeWidth={1.5}
                   strokeDasharray="4 2"
                 />
-                {/* Glowing bracket markers */}
                 <rect
                   x={lx - 1} y={RULER_H - 2}
                   width={3} height={6}
@@ -706,107 +809,107 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
           })()
         )}
 
-        {/* ── Clips ──────────────────────────────────────────────────────── */}
-        {tracks.map((track, trackIdx) =>
-          track.clips.map((clip, clipIdx) => {
-            const clipBarStart = clip.startBar - 1 - scrollOffsetBars;
-            const cx = HEADER_W + clipBarStart * barW;
-            const cy = contentTop + trackIdx * TRACK_H + 3;
-            const cw = clip.lengthBars * barW - 2;
-            const ch = TRACK_H - 6;
+        {/* ── Clips (using pre-computed layout) ──────────────────────────── */}
+        {clipLayouts.map((layout) => {
+          const { clip, track, cx, cy, cw, ch, isSelected, isGhost } = layout;
+          const clipEntrance = spring({
+            frame: frame - 8 - layout.trackIdx * 2,
+            fps,
+            config: { damping: 40, stiffness: 50, mass: 0.8 },
+          });
 
-            // Off-screen culling
-            if (cx + cw < HEADER_W || cx > W) return null;
+          const showDetail = barW > 25;
+          const ghostOpacity = isGhost ? 0.5 : 1;
 
-            const isSelected = clip.id === selectedClipId || clip.selected;
-            const clipEntrance = spring({
-              frame: frame - 8 - trackIdx * 2 - clipIdx,
-              fps,
-              config: { damping: 40, stiffness: 50, mass: 0.8 },
-            });
+          return (
+            <g key={isGhost ? `ghost-${clip.id}` : clip.id} opacity={clipEntrance * ghostOpacity}>
+              {/* Selected clip outer glow */}
+              {isSelected && (
+                <rect
+                  x={cx - 2} y={cy - 2}
+                  width={cw + 4} height={ch + 4}
+                  rx={6}
+                  fill="none"
+                  stroke={hexToRgba(track.color, 0.5 + pulse * 0.3)}
+                  strokeWidth={1.5}
+                  filter="url(#la-clip-glow)"
+                />
+              )}
 
-            // Zoom level — decide detail vs compact
-            const showDetail = barW > 25;
-
-            return (
-              <g key={clip.id} opacity={clipEntrance}>
-                {/* Selected clip outer glow */}
-                {isSelected && (
-                  <rect
-                    x={cx - 2} y={cy - 2}
-                    width={cw + 4} height={ch + 4}
-                    rx={6}
-                    fill="none"
-                    stroke={hexToRgba(track.color, 0.5 + pulse * 0.3)}
-                    strokeWidth={1.5}
-                    filter="url(#la-clip-glow)"
-                  />
-                )}
-
-                {/* Glass card body */}
+              {/* Ghost duplicate dashed outline */}
+              {isGhost && (
                 <rect
                   x={cx} y={cy}
                   width={cw} height={ch}
                   rx={4}
-                  fill={hexToRgba(track.color, isSelected ? 0.18 : 0.1)}
-                  stroke={isSelected
-                    ? 'url(#la-prism)'
-                    : hexToRgba(track.color, track.muted ? 0.12 : 0.25)}
-                  strokeWidth={isSelected ? 1.2 : 0.6}
+                  fill="none"
+                  stroke={hexToRgba(track.color, 0.5)}
+                  strokeWidth={1}
+                  strokeDasharray="4 2"
                 />
+              )}
 
-                {/* Prismatic edge highlight (left edge refraction) */}
+              {/* Glass card body */}
+              <rect
+                x={cx} y={cy}
+                width={cw} height={ch}
+                rx={4}
+                fill={hexToRgba(track.color, isSelected ? 0.18 : 0.1)}
+                stroke={isSelected
+                  ? 'url(#la-prism)'
+                  : hexToRgba(track.color, track.muted ? 0.12 : 0.25)}
+                strokeWidth={isSelected ? 1.2 : 0.6}
+              />
+
+              {/* Left edge refraction */}
+              <rect
+                x={cx} y={cy}
+                width={2} height={ch}
+                rx={1}
+                fill={hexToRgba(track.color, 0.4)}
+              />
+              {/* Right edge — resize handle indicator for selected clips */}
+              <rect
+                x={cx + cw - 1.5} y={cy}
+                width={1.5} height={ch}
+                rx={0.75}
+                fill={hexToRgba(isSelected ? A.teal : A.cyan, isSelected ? 0.35 : 0.15)}
+              />
+
+              {/* Clip content */}
+              {showDetail ? (
+                track.type === 'midi'
+                  ? renderMidiContent(cx, cy, cw, ch, track.color, clip.startBar * 17, clip)
+                  : track.type === 'audio'
+                    ? renderAudioContent(cx, cy, cw, ch, track.color, clip.startBar * 17)
+                    : renderBusContent(cx, cy, cw, ch, track.color)
+              ) : (
                 <rect
-                  x={cx} y={cy}
-                  width={2} height={ch}
-                  rx={1}
-                  fill={hexToRgba(track.color, 0.4)}
+                  x={cx + 2} y={cy + ch * 0.3}
+                  width={cw - 4} height={ch * 0.4}
+                  rx={2}
+                  fill={hexToRgba(track.color, 0.25)}
                 />
-                {/* Right edge subtle refraction */}
-                <rect
-                  x={cx + cw - 1.5} y={cy}
-                  width={1.5} height={ch}
-                  rx={0.75}
-                  fill={hexToRgba(A.cyan, 0.15)}
-                />
+              )}
 
-                {/* Clip content based on type + zoom */}
-                {showDetail ? (
-                  track.type === 'midi'
-                    ? renderMidiContent(cx, cy, cw, ch, track.color, clipIdx * 17 + clip.startBar, clip)
-                    : track.type === 'audio'
-                      ? renderAudioContent(cx, cy, cw, ch, track.color, clipIdx * 17 + clip.startBar)
-                      : renderBusContent(cx, cy, cw, ch, track.color)
-                ) : (
-                  /* Zoomed-out compact: just a colored aurora bar */
-                  <rect
-                    x={cx + 2} y={cy + ch * 0.3}
-                    width={cw - 4} height={ch * 0.4}
-                    rx={2}
-                    fill={hexToRgba(track.color, 0.25)}
-                  />
-                )}
-
-                {/* Clip name */}
-                {showDetail && (
-                  <text
-                    x={cx + 6} y={cy + 11}
-                    fill={hexToRgba(track.color, track.muted ? 0.4 : 0.75)}
-                    fontSize={8}
-                    fontWeight="500"
-                  >
-                    {clip.name}
-                  </text>
-                )}
-              </g>
-            );
-          }),
-        )}
+              {/* Clip name */}
+              {showDetail && (
+                <text
+                  x={cx + 6} y={cy + 11}
+                  fill={hexToRgba(track.color, track.muted ? 0.4 : 0.75)}
+                  fontSize={8}
+                  fontWeight="500"
+                >
+                  {clip.name}
+                </text>
+              )}
+            </g>
+          );
+        })}
 
         {/* ── Playhead ───────────────────────────────────────────────────── */}
         {playheadX >= HEADER_W && playheadX <= W && (
           <g>
-            {/* Fading light trail (behind playhead) */}
             {isPlaying && (
               <rect
                 x={Math.max(HEADER_W, playheadX - 30)}
@@ -818,7 +921,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
               />
             )}
 
-            {/* Main playhead line — aurora beam */}
             <line
               x1={playheadX} y1={0}
               x2={playheadX}
@@ -829,7 +931,6 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
               filter="url(#la-playhead-glow)"
             />
 
-            {/* Diamond marker on ruler */}
             <polygon
               points={`${playheadX},2 ${playheadX + 5},${RULER_H / 2} ${playheadX},${RULER_H - 2} ${playheadX - 5},${RULER_H / 2}`}
               fill={A.cyan}

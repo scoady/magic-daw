@@ -41,6 +41,30 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     /// Sound design service for AI patch generation
     private lazy var soundDesignService = SoundDesignService(router: aiRouter)
 
+    // MARK: - Note Editing Undo Stack
+
+    /// Undo stack for clip note editing — stores snapshots of MIDIEvents before each edit
+    private var noteUndoStack: [[MIDIEvent]] = []
+    /// Redo stack for clip note editing
+    private var noteRedoStack: [[MIDIEvent]] = []
+    /// Maximum undo history entries
+    private let maxUndoEntries = 50
+    /// The clip currently being edited in the piano roll
+    private var editingClipId: UUID?
+
+    /// MIDI recorder for capturing incoming notes during record mode.
+    private let midiRecorder = MIDIRecorder()
+
+    /// MIDI player for clip playback.
+    private let midiPlayer = MIDIPlayer()
+
+    /// Metronome click track.
+    private lazy var metronome: Metronome = {
+        let m = Metronome(engine: audioEngine.avEngine)
+        m.connect(to: audioEngine.avEngine.mainMixerNode)
+        return m
+    }()
+
     /// MIDI router with chord detection and key analysis
     private lazy var midiRouter: MIDIRouter = {
         MIDIRouter(midiManager: midiManager, audioEngine: audioEngine)
@@ -62,6 +86,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         super.init()
         setupCallbacks()
         setupMIDIRouter()
+        setupTransportCallbacks()
         startMeterTimer()
     }
 
@@ -70,10 +95,20 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     private func setupCallbacks() {
         // Forward MIDI note-on events to JavaScript via bridge.ts pub/sub
         // Also play through the sampler if samples are loaded
+        // Also feed into MIDIRecorder when recording
         midiManager.onNoteOn = { [weak self] note, velocity, channel in
             guard let self else { return }
             if self.sampler.hasSamples {
                 self.sampler.noteOn(note: note, velocity: velocity)
+            }
+            // Record if armed track and transport is recording
+            if self.audioEngine.isRecording {
+                self.midiRecorder.noteOn(
+                    note: note,
+                    velocity: velocity,
+                    channel: channel,
+                    currentBeat: self.audioEngine.currentBeat
+                )
             }
             self.sendEvent("midi_note_on", data: [
                 "note": note,
@@ -87,6 +122,14 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             guard let self else { return }
             if self.sampler.hasSamples {
                 self.sampler.noteOff(note: note)
+            }
+            // Record if armed track and transport is recording
+            if self.audioEngine.isRecording {
+                self.midiRecorder.noteOff(
+                    note: note,
+                    channel: channel,
+                    currentBeat: self.audioEngine.currentBeat
+                )
             }
             self.sendEvent("midi_note_off", data: [
                 "note": note,
@@ -109,6 +152,47 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
                 "value": value,
                 "channel": channel,
             ])
+        }
+    }
+
+    /// Set up transport callbacks for MIDI playback, recording, and metronome.
+    private func setupTransportCallbacks() {
+        // Wire the MIDI player to use our sampler and MIDI manager
+        midiPlayer.sampler = sampler
+        midiPlayer.midiManager = midiManager
+
+        // High-frequency transport tick: drive MIDIPlayer and Metronome
+        audioEngine.onTransportTick = { [weak self] currentBeat in
+            guard let self else { return }
+            self.midiPlayer.process(currentBeat: currentBeat)
+            self.metronome.process(currentBeat: currentBeat)
+        }
+
+        // When recording actually starts (after optional count-in)
+        audioEngine.onRecordingStarted = { [weak self] in
+            guard let self else { return }
+            // Find the first armed MIDI track
+            if let project = self.currentProject,
+               let armedTrack = project.tracks.first(where: { $0.isArmed && $0.type == .midi }) {
+                self.midiRecorder.trackID = armedTrack.id
+
+                // Check for overdub: does the armed track have clips at the current position?
+                let currentBar = self.audioEngine.currentBeat / 4.0
+                let hasOverlapClip = armedTrack.clips.contains {
+                    $0.type == .midi && $0.startBar <= currentBar && $0.endBar > currentBar
+                }
+                self.midiRecorder.overdubMode = hasOverlapClip
+
+                self.midiRecorder.startRecording(atBeat: self.audioEngine.currentBeat)
+            }
+        }
+
+        // When transport stops: finalize recording
+        audioEngine.onTransportStopped = { [weak self] in
+            guard let self else { return }
+            self.midiPlayer.stopPlayback()
+            self.metronome.reset()
+            self.finalizeRecording()
         }
     }
 
@@ -306,22 +390,54 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
 
         // Audio/Transport messages (from bridge.ts BridgeMessages constants)
         case "transport_play", "audio.play":
-            audioEngine.play()
+            startPlayback()
             startTransportStateTimer()
             sendTransportState()
 
         case "transport_stop", "audio.stop":
+            // Finalize any active audio recording before stopping
+            let recordingTrackID = audioEngine.recordingTrackID
+            let recordStartBeat = audioEngine.recordStartBeat
+            if let result = audioEngine.stopRecordingInput(),
+               let project = currentProject,
+               let trackID = recordingTrackID {
+                handleRecordingComplete(
+                    fileURL: result.url,
+                    durationSeconds: result.durationSeconds,
+                    trackID: trackID,
+                    startBeat: recordStartBeat,
+                    project: project
+                )
+            }
             audioEngine.stop()
             stopTransportStateTimer()
             sendTransportState()
 
         case "transport_record", "audio.record":
+            // Find the first armed audio track for recording
+            if let project = currentProject,
+               let armedTrack = project.tracks.first(where: { $0.isArmed && $0.type == .audio }) {
+                let startBeat = audioEngine.currentBeat
+                let filename = "recording-\(Int(Date().timeIntervalSince1970)).wav"
+
+                if let bundleURL = project.fileURL {
+                    let audioDir = bundleURL.appendingPathComponent("audio", isDirectory: true)
+                    try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
+                    let fileURL = audioDir.appendingPathComponent(filename)
+                    audioEngine.startRecordingInput(trackID: armedTrack.id, outputURL: fileURL, startBeat: startBeat)
+                } else {
+                    let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+                    audioEngine.startRecordingInput(trackID: armedTrack.id, outputURL: tempURL, startBeat: startBeat)
+                }
+            }
             audioEngine.record()
             startTransportStateTimer()
             sendTransportState()
 
         case "transport_rewind":
             audioEngine.seekToBar(1)
+            midiPlayer.stopPlayback()
+            metronome.reset()
             sendTransportState()
 
         case "set_bpm", "audio.setBPM":
@@ -334,6 +450,128 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             // AudioEngine doesn't expose setMasterVolume directly;
             // volume can be set via the mainMixerNode externally if needed.
             break
+
+        // ── Metronome ──
+
+        case "set_metronome":
+            if let enabled = payload["enabled"] as? Bool {
+                metronome.isEnabled = enabled
+                sendEvent("metronome_state", data: ["enabled": enabled])
+            }
+
+        // ── Loop Region ──
+
+        case "set_loop_enabled":
+            if let enabled = payload["enabled"] as? Bool {
+                audioEngine.setLoopEnabled(enabled)
+                midiPlayer.loopRegion = enabled ?
+                    LoopRegion(startBeat: audioEngine.loopStartBeat, endBeat: audioEngine.loopEndBeat) : nil
+                sendTransportState()
+            }
+
+        case "set_loop_region":
+            if let startBar = payload["startBar"] as? Double,
+               let endBar = payload["endBar"] as? Double {
+                let startBeat = startBar * 4.0
+                let endBeat = endBar * 4.0
+                audioEngine.setLoopRegion(startBeat: startBeat, endBeat: endBeat)
+                if audioEngine.loopEnabled {
+                    midiPlayer.loopRegion = LoopRegion(startBeat: startBeat, endBeat: endBeat)
+                }
+                sendTransportState()
+            }
+
+        // ── Count-in ──
+
+        case "set_count_in":
+            if let enabled = payload["enabled"] as? Bool {
+                audioEngine.countInEnabled = enabled
+                sendEvent("count_in_state", data: ["enabled": enabled])
+            }
+
+        // ── Track Arming ──
+
+        case "arm_track":
+            if let trackIdStr = payload["trackId"] as? String,
+               let armed = payload["armed"] as? Bool,
+               let uuid = resolveTrackUUID(trackIdStr) {
+                if let track = currentProject?.tracks.first(where: { $0.id == uuid }) {
+                    track.isArmed = armed
+                }
+                sendTracksUpdated()
+            }
+
+        // ── Audio Input Devices ──
+
+        case "get_input_devices":
+            let devices = audioEngine.availableInputDevices()
+            let deviceList = devices.map { [
+                "uid": $0.uid,
+                "name": $0.name,
+                "channelCount": $0.channelCount,
+            ] as [String: Any] }
+            sendEvent("input_devices", data: ["devices": deviceList])
+
+        // ── Input Monitoring ──
+
+        case "set_monitor":
+            if let enabled = payload["enabled"] as? Bool {
+                audioEngine.setInputMonitoring(enabled)
+                sendEvent("monitor_state", data: ["enabled": enabled])
+            }
+
+        // ── Audio Clip Playback ──
+
+        case "schedule_clip_playback":
+            if let clipIdStr = payload["clipId"] as? String,
+               let trackIdStr = payload["trackId"] as? String,
+               let filePath = payload["filePath"] as? String,
+               let startBeat = payload["startBeat"] as? Double,
+               let clipUUID = UUID(uuidString: clipIdStr),
+               let trackUUID = resolveTrackUUID(trackIdStr) {
+                let offset = payload["offsetSeconds"] as? Double ?? 0.0
+                let gain = payload["gainDB"] as? Float ?? 0.0
+
+                // Resolve file path relative to project bundle
+                let fileURL: URL
+                if let bundleURL = currentProject?.fileURL {
+                    fileURL = bundleURL.appendingPathComponent(filePath)
+                } else {
+                    fileURL = URL(fileURLWithPath: filePath)
+                }
+
+                audioEngine.scheduleClip(
+                    clipID: clipUUID,
+                    fileURL: fileURL,
+                    trackID: trackUUID,
+                    startBeat: startBeat,
+                    offsetSeconds: offset,
+                    gainDB: gain
+                )
+            }
+
+        case "stop_clip_playback":
+            if let clipIdStr = payload["clipId"] as? String,
+               let clipUUID = UUID(uuidString: clipIdStr) {
+                audioEngine.stopClip(clipUUID)
+            }
+
+        // ── Quantize ──
+
+        case "set_quantize":
+            if let grid = payload["grid"] as? Double {
+                midiRecorder.quantizeGrid = grid
+            }
+
+        // ── MIDI Output Selection ──
+
+        case "set_midi_output":
+            if let index = payload["index"] as? Int,
+               index < midiManager.availableDestinations.count {
+                midiPlayer.midiOutputDestination = midiManager.availableDestinations[index]
+            } else {
+                midiPlayer.midiOutputDestination = nil
+            }
 
         // AI messages
         case "ai.request":
@@ -419,6 +657,28 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
                let uuid = resolveTrackUUID(trackId) {
                 applyEffectParameter(trackID: uuid, effectIndex: effectIndex, paramName: paramName, value: value)
             }
+
+        // ── Effects Chain Messages ──
+
+        case "add_effect":
+            handleAddEffect(payload)
+
+        case "remove_effect":
+            handleRemoveEffect(payload)
+
+        case "set_effect_param":
+            handleSetEffectParam(payload)
+
+        case "reorder_effects":
+            handleReorderEffects(payload)
+
+        case "bypass_effect":
+            handleBypassEffect(payload)
+
+        // ── Send Routing Messages ──
+
+        case "set_send_level":
+            handleSetSendLevel(payload)
 
         // Project messages
         case "project.save":
@@ -521,6 +781,85 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         case "ai_generate_patch":
             if let description = payload["description"] as? String {
                 await handleAIGeneratePatch(description: description)
+            }
+
+        // ── Track Management Messages ──
+
+        case "add_track":
+            handleAddTrack(payload)
+
+        case "delete_track":
+            handleDeleteTrack(payload)
+
+        case "rename_track":
+            handleRenameTrack(payload)
+
+        case "reorder_tracks":
+            handleReorderTracks(payload)
+
+        case "set_track_color":
+            handleSetTrackColor(payload)
+
+        // ── Piano Roll Note Editing Messages ──
+
+        case "note.add":
+            handleAddNote(payload)
+
+        case "note.move":
+            handleMoveNotes(payload)
+
+        case "note.resize":
+            handleResizeNote(payload)
+
+        case "note.delete":
+            handleDeleteNotes(payload)
+
+        case "note.setVelocity":
+            handleSetVelocity(payload)
+
+        case "note.paste":
+            handlePasteNotes(payload)
+
+        case "edit.undo":
+            handleNoteUndo()
+
+        case "edit.redo":
+            handleNoteRedo()
+
+        // ── Clip Management Messages ──
+
+        case "create_clip":
+            handleCreateClip(payload)
+
+        case "move_clip":
+            handleMoveClip(payload)
+
+        case "resize_clip":
+            handleResizeClip(payload)
+
+        case "delete_clips":
+            handleDeleteClips(payload)
+
+        case "duplicate_clip":
+            handleDuplicateClip(payload)
+
+        case "split_clip":
+            handleSplitClip(payload)
+
+        case "set_clip_loop":
+            handleSetClipLoop(payload)
+
+        case "edit_clip":
+            // UI-only action: JS side switches to Edit view. No backend state change needed.
+            break
+
+        // ── Transport Position ──
+
+        case "set_position":
+            if let beat = payload["beat"] as? Double {
+                let bar = Int(beat / 4.0) + 1
+                audioEngine.seekToBar(bar)
+                sendTransportState()
             }
 
         default:
@@ -778,6 +1117,93 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         sendEvent("instrument_zones", data: ["zones": zones])
     }
 
+    // MARK: - MIDI Playback / Recording
+
+    /// Start playback: load clips into MIDIPlayer and start the transport.
+    private func startPlayback() {
+        // Load all MIDI clips from the project into the player
+        if let project = currentProject {
+            for track in project.tracks where track.type == .midi {
+                midiPlayer.setClips(for: track.id, clips: track.clips)
+            }
+        }
+
+        // Sync loop region
+        if audioEngine.loopEnabled {
+            midiPlayer.loopRegion = LoopRegion(
+                startBeat: audioEngine.loopStartBeat,
+                endBeat: audioEngine.loopEndBeat
+            )
+        } else {
+            midiPlayer.loopRegion = nil
+        }
+
+        audioEngine.play()
+        midiPlayer.startPlayback(atBeat: audioEngine.currentBeat)
+    }
+
+    /// Finalize a recording session: create or merge the clip, notify JS.
+    private func finalizeRecording() {
+        guard midiRecorder.isRecording || !midiRecorder.overdubMode else { return }
+
+        guard let project = currentProject,
+              let trackID = midiRecorder.trackID,
+              let track = project.tracks.first(where: { $0.id == trackID }) else {
+            _ = midiRecorder.stopRecording(atBeat: audioEngine.currentBeat)
+            return
+        }
+
+        if midiRecorder.overdubMode {
+            // Find the overlapping clip and merge into it
+            let recordStartBar = audioEngine.currentBeat / 4.0
+            if let existingClip = track.clips.first(where: {
+                $0.type == .midi && $0.startBar <= recordStartBar && $0.endBar > recordStartBar
+            }) {
+                _ = midiRecorder.mergeIntoClip(existingClip, atBeat: audioEngine.currentBeat)
+            } else {
+                // No overlapping clip found; create a new one
+                if let clip = midiRecorder.stopRecording(atBeat: audioEngine.currentBeat) {
+                    track.addClip(clip)
+                }
+            }
+        } else {
+            if let clip = midiRecorder.stopRecording(atBeat: audioEngine.currentBeat) {
+                track.addClip(clip)
+            }
+        }
+
+        // Send updated track data to JS so clips appear immediately
+        sendTracksUpdated()
+        sendRecordedClipToJS(trackID: trackID)
+    }
+
+    /// Send the latest clip data for a track to JS for immediate piano roll display.
+    private func sendRecordedClipToJS(trackID: UUID) {
+        guard let project = currentProject,
+              let track = project.tracks.first(where: { $0.id == trackID }),
+              let latestClip = track.clips.last,
+              let midiEvents = latestClip.midiEvents else { return }
+
+        let notes = midiEvents.filter { $0.type == .noteOn }.map { event -> [String: Any] in
+            [
+                "pitch": Int(event.note),
+                "start": event.tick,
+                "duration": event.duration,
+                "velocity": Int(event.velocity),
+                "channel": Int(event.channel),
+            ]
+        }
+
+        sendEvent("clip_recorded", data: [
+            "trackId": trackID.uuidString,
+            "clipId": latestClip.id.uuidString,
+            "clipName": latestClip.name,
+            "startBar": latestClip.startBar,
+            "lengthBars": latestClip.lengthBars,
+            "notes": notes,
+        ])
+    }
+
     // MARK: - Transport State Broadcasting
 
     /// Send current transport state to JS.
@@ -797,6 +1223,11 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             "beat": beat,
             "timeMs": timeMs,
             "currentBeat": currentBeat,
+            "loopEnabled": audioEngine.loopEnabled,
+            "loopStartBar": audioEngine.loopStartBeat / 4.0,
+            "loopEndBar": audioEngine.loopEndBeat / 4.0,
+            "metronomeEnabled": metronome.isEnabled,
+            "countInEnabled": audioEngine.countInEnabled,
         ]
         sendEvent("transport_state", data: data)
     }
@@ -839,6 +1270,14 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
 
             // Per-track levels
             self.sendTrackLevels()
+
+            // Input levels (while recording or monitoring)
+            if self.audioEngine.isRecording || self.audioEngine.inputLevelL > 0.001 {
+                self.sendEvent("input_levels", data: [
+                    "left": self.audioEngine.inputLevelL,
+                    "right": self.audioEngine.inputLevelR,
+                ])
+            }
         }
         timer.resume()
         meterTimer = timer
@@ -856,6 +1295,534 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             data[uuid.uuidString] = ["left": level.left, "right": level.right]
         }
         sendEvent("track_levels", data: data)
+    }
+
+    // MARK: - Recording Completion
+
+    /// Handle the completion of an audio recording: create a clip and send waveform data.
+    private func handleRecordingComplete(
+        fileURL: URL,
+        durationSeconds: Double,
+        trackID: UUID,
+        startBeat: Double,
+        project: DAWProject
+    ) {
+        guard let track = project.tracks.first(where: { $0.id == trackID }) else { return }
+
+        // Calculate clip length in bars
+        let beatsPerSecond = audioEngine.bpm / 60.0
+        let durationBeats = durationSeconds * beatsPerSecond
+        let beatsPerBar = 4.0 // Assuming 4/4
+        let lengthBars = durationBeats / beatsPerBar
+        let startBar = startBeat / beatsPerBar
+
+        // Determine audio file reference (relative path if in project bundle)
+        let audioFileRef: String
+        if let bundleURL = project.fileURL, fileURL.path.hasPrefix(bundleURL.path) {
+            // Relative path within the project bundle
+            let relativePath = String(fileURL.path.dropFirst(bundleURL.path.count + 1))
+            audioFileRef = relativePath
+        } else {
+            // Absolute path (temp recording)
+            audioFileRef = fileURL.path
+        }
+
+        // Create a new audio clip on the armed track
+        let clip = track.addAudioClip(
+            name: "Recording \(track.clips.count + 1)",
+            startBar: startBar,
+            lengthBars: lengthBars,
+            audioFile: audioFileRef
+        )
+
+        // Generate waveform for the clip preview
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            if let waveform = AudioEngine.generateWaveform(from: fileURL, points: 500) {
+                let waveformData = waveform.map { Double($0) }
+                self.sendEvent("clip_waveform", data: [
+                    "clipId": clip.id.uuidString,
+                    "waveform": waveformData,
+                ])
+            }
+        }
+
+        // Send updated clip data to JS
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        if let clipData = try? encoder.encode(clip),
+           let clipJSON = try? JSONSerialization.jsonObject(with: clipData) as? [String: Any] {
+            sendEvent("recording_complete", data: [
+                "trackId": trackID.uuidString,
+                "clip": clipJSON,
+                "startBar": startBar,
+                "lengthBars": lengthBars,
+                "audioFile": audioFileRef,
+            ])
+        }
+
+        // Also send full tracks update
+        sendTracksUpdated()
+    }
+
+    // MARK: - Track Management Handlers
+
+    /// Add a new track to the project and audio engine, then notify JS.
+    private func handleAddTrack(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let typeStr = payload["type"] as? String else { return }
+
+        let name = payload["name"] as? String ?? "\(typeStr.capitalized) \(project.tracks.count + 1)"
+
+        let track: Track
+        switch typeStr {
+        case "audio":
+            track = project.addAudioTrack(name: name, color: .blue)
+        case "bus":
+            track = project.addBusTrack(name: name)
+        default:
+            track = project.addMIDITrack(name: name, color: .teal)
+        }
+
+        // Register in audio engine
+        let audioTrack = AudioTrack(
+            id: track.id,
+            name: track.name,
+            volume: track.linearGain,
+            pan: track.pan,
+            isMuted: track.isMuted,
+            isSoloed: track.isSoloed,
+            isBus: typeStr == "bus"
+        )
+        if typeStr == "bus" {
+            audioEngine.addBusTrack(audioTrack)
+        } else {
+            audioEngine.addTrack(audioTrack)
+        }
+
+        sendTracksUpdated()
+    }
+
+    /// Delete a track from the project and audio engine, then notify JS.
+    private func handleDeleteTrack(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let trackIdStr = payload["trackId"] as? String,
+              let uuid = resolveTrackUUID(trackIdStr) else { return }
+
+        // Find the track to remove from engine
+        if let track = project.tracks.first(where: { $0.id == uuid }) {
+            audioEngine.removeTrack(AudioTrack(id: track.id, name: track.name))
+        }
+        project.removeTrack(id: uuid)
+        sendTracksUpdated()
+    }
+
+    /// Rename a track and notify JS.
+    private func handleRenameTrack(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let trackIdStr = payload["trackId"] as? String,
+              let newName = payload["name"] as? String,
+              let uuid = resolveTrackUUID(trackIdStr) else { return }
+
+        if let track = project.tracks.first(where: { $0.id == uuid }) {
+            track.name = newName
+        }
+        sendTracksUpdated()
+    }
+
+    /// Reorder tracks based on an ordered array of track IDs from JS.
+    private func handleReorderTracks(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let trackIdsRaw = payload["trackIds"] as? [String] else { return }
+
+        let orderedUUIDs = trackIdsRaw.compactMap { UUID(uuidString: $0) }
+        guard orderedUUIDs.count == project.tracks.count else {
+            print("[Bridge] reorder_tracks: ID count mismatch (\(orderedUUIDs.count) vs \(project.tracks.count))")
+            return
+        }
+
+        var reordered: [Track] = []
+        for uuid in orderedUUIDs {
+            if let track = project.tracks.first(where: { $0.id == uuid }) {
+                reordered.append(track)
+            }
+        }
+        if reordered.count == project.tracks.count {
+            project.tracks = reordered
+        }
+        sendTracksUpdated()
+    }
+
+    /// Set a track's color and notify JS.
+    private func handleSetTrackColor(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let trackIdStr = payload["trackId"] as? String,
+              let colorStr = payload["color"] as? String,
+              let uuid = resolveTrackUUID(trackIdStr) else { return }
+
+        if let track = project.tracks.first(where: { $0.id == uuid }),
+           let color = TrackColor(rawValue: colorStr) {
+            track.color = color
+        }
+        sendTracksUpdated()
+    }
+
+    // MARK: - Clip Management Handlers
+
+    /// Create a new empty clip on a track.
+    /// Payload: { trackId: String, startBeat: Double, lengthBeats: Double, type: "midi"|"audio" }
+    private func handleCreateClip(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let trackIdStr = payload["trackId"] as? String,
+              let startBeat = payload["startBeat"] as? Double,
+              let lengthBeats = payload["lengthBeats"] as? Double,
+              let typeStr = payload["type"] as? String,
+              let uuid = resolveTrackUUID(trackIdStr) else { return }
+
+        guard let track = project.tracks.first(where: { $0.id == uuid }) else { return }
+
+        let startBar = startBeat / 4.0 + 1  // Convert beat to 1-indexed bar
+        let lengthBars = lengthBeats / 4.0
+        let clipType: ClipType = typeStr == "audio" ? .audio : .midi
+        let clipCount = track.clips.count + 1
+        let name = clipType == .midi ? "MIDI \(clipCount)" : "Audio \(clipCount)"
+        let clip = Clip(name: name, type: clipType, startBar: startBar, lengthBars: lengthBars)
+        track.addClip(clip)
+        sendTracksUpdated()
+    }
+
+    /// Move a clip to a new position and/or track.
+    /// Payload: { clipId: String, newTrackId: String, newStartBeat: Double }
+    private func handleMoveClip(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let clipIdStr = payload["clipId"] as? String,
+              let newTrackIdStr = payload["newTrackId"] as? String,
+              let newStartBeat = payload["newStartBeat"] as? Double,
+              let clipUUID = UUID(uuidString: clipIdStr),
+              let newTrackUUID = resolveTrackUUID(newTrackIdStr) else { return }
+
+        // Find and remove clip from its current track
+        var movedClip: Clip?
+        for track in project.tracks {
+            if let idx = track.clips.firstIndex(where: { $0.id == clipUUID }) {
+                movedClip = track.clips[idx]
+                track.clips.remove(at: idx)
+                break
+            }
+        }
+
+        guard let clip = movedClip,
+              let newTrack = project.tracks.first(where: { $0.id == newTrackUUID }) else { return }
+
+        clip.startBar = newStartBeat / 4.0 + 1
+        newTrack.addClip(clip)
+        sendTracksUpdated()
+    }
+
+    /// Resize a clip's duration.
+    /// Payload: { clipId: String, newLengthBeats: Double }
+    private func handleResizeClip(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let clipIdStr = payload["clipId"] as? String,
+              let newLengthBeats = payload["newLengthBeats"] as? Double,
+              let clipUUID = UUID(uuidString: clipIdStr) else { return }
+
+        for track in project.tracks {
+            if let clip = track.clips.first(where: { $0.id == clipUUID }) {
+                clip.lengthBars = max(0.25, newLengthBeats / 4.0)
+                break
+            }
+        }
+        sendTracksUpdated()
+    }
+
+    /// Delete one or more clips by ID.
+    /// Payload: { clipIds: [String] }
+    private func handleDeleteClips(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let clipIdStrs = payload["clipIds"] as? [String] else { return }
+
+        let clipUUIDs = Set(clipIdStrs.compactMap { UUID(uuidString: $0) })
+        guard !clipUUIDs.isEmpty else { return }
+
+        for track in project.tracks {
+            track.clips.removeAll { clipUUIDs.contains($0.id) }
+        }
+        sendTracksUpdated()
+    }
+
+    /// Duplicate a clip to a target position/track.
+    /// Payload: { clipId: String, targetTrackId: String, targetBeat: Double }
+    private func handleDuplicateClip(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let clipIdStr = payload["clipId"] as? String,
+              let targetTrackIdStr = payload["targetTrackId"] as? String,
+              let targetBeat = payload["targetBeat"] as? Double,
+              let clipUUID = UUID(uuidString: clipIdStr),
+              let targetTrackUUID = resolveTrackUUID(targetTrackIdStr) else { return }
+
+        // Find the source clip
+        var sourceClip: Clip?
+        for track in project.tracks {
+            if let clip = track.clips.first(where: { $0.id == clipUUID }) {
+                sourceClip = clip
+                break
+            }
+        }
+
+        guard let source = sourceClip,
+              let targetTrack = project.tracks.first(where: { $0.id == targetTrackUUID }) else { return }
+
+        // Create a duplicate
+        let dup = Clip(name: "\(source.name) copy", type: source.type, startBar: targetBeat / 4.0 + 1, lengthBars: source.lengthBars)
+        dup.color = source.color
+        dup.isLooped = source.isLooped
+        dup.loopLengthBars = source.loopLengthBars
+        dup.audioFile = source.audioFile
+        dup.audioOffset = source.audioOffset
+        dup.audioGain = source.audioGain
+
+        // Deep copy MIDI events if present
+        if let events = source.midiEvents {
+            dup.midiEvents = events.map {
+                MIDIEvent(tick: $0.tick, type: $0.type, note: $0.note, velocity: $0.velocity, duration: $0.duration, channel: $0.channel)
+            }
+        }
+
+        targetTrack.addClip(dup)
+        sendTracksUpdated()
+    }
+
+    /// Split a clip at a given beat position.
+    /// Payload: { clipId: String, splitBeat: Double }
+    private func handleSplitClip(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let clipIdStr = payload["clipId"] as? String,
+              let splitBeat = payload["splitBeat"] as? Double,
+              let clipUUID = UUID(uuidString: clipIdStr) else { return }
+
+        let splitBar = splitBeat / 4.0 + 1  // Convert beat to 1-indexed bar
+
+        for track in project.tracks {
+            if let clip = track.clips.first(where: { $0.id == clipUUID }) {
+                if let rightHalf = clip.split(atBar: splitBar) {
+                    track.addClip(rightHalf)
+                }
+                break
+            }
+        }
+        sendTracksUpdated()
+    }
+
+    /// Set the loop count for a clip.
+    /// Payload: { clipId: String, loopCount: Int }
+    private func handleSetClipLoop(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let clipIdStr = payload["clipId"] as? String,
+              let loopCount = payload["loopCount"] as? Int,
+              let clipUUID = UUID(uuidString: clipIdStr) else { return }
+
+        for track in project.tracks {
+            if let clip = track.clips.first(where: { $0.id == clipUUID }) {
+                if loopCount <= 1 {
+                    clip.isLooped = false
+                    clip.loopLengthBars = nil
+                } else {
+                    let contentLength = clip.contentLengthBars
+                    clip.isLooped = true
+                    clip.loopLengthBars = contentLength
+                    clip.lengthBars = contentLength * Double(loopCount)
+                }
+                break
+            }
+        }
+        sendTracksUpdated()
+    }
+
+    /// Encode the current track list and send to JS as a `tracks_updated` event.
+    private func sendTracksUpdated() {
+        guard let project = currentProject else { return }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        guard let data = try? encoder.encode(project.tracks),
+              let jsonString = String(data: data, encoding: .utf8) else {
+            print("[Bridge] Failed to encode tracks for tracks_updated")
+            return
+        }
+
+        let js = "if (window.__magicDAWReceive) { window.__magicDAWReceive('tracks_updated', { tracks: \(jsonString) }); }"
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript(js) { _, error in
+                if let error = error {
+                    print("[Bridge] JS event error for tracks_updated: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    // MARK: - Note Editing Handlers
+
+    private func findEditingClip(trackId: String?, clipId: String?) -> Clip? {
+        guard let project = currentProject else { return nil }
+        if let clipIdStr = clipId, let clipUUID = UUID(uuidString: clipIdStr) {
+            for track in project.tracks {
+                if let clip = track.clips.first(where: { $0.id == clipUUID && $0.type == .midi }) {
+                    return clip
+                }
+            }
+        }
+        if let trackIdStr = trackId, let trackUUID = resolveTrackUUID(trackIdStr),
+           let track = project.tracks.first(where: { $0.id == trackUUID }) {
+            return track.clips.first { $0.type == .midi }
+        }
+        for track in project.tracks {
+            if let clip = track.clips.first(where: { $0.type == .midi }) { return clip }
+        }
+        return nil
+    }
+
+    private func pushNoteUndoState(_ clip: Clip) {
+        noteUndoStack.append(clip.midiEvents ?? [])
+        if noteUndoStack.count > maxUndoEntries { noteUndoStack.removeFirst() }
+        noteRedoStack.removeAll()
+        editingClipId = clip.id
+    }
+
+    private func sendUpdatedNotes(_ clip: Clip) {
+        let events = clip.notes
+        let mapped = events.map { event -> [String: Any] in
+            ["id": "\(event.note)-\(event.tick)-\(event.duration)",
+             "pitch": Int(event.note), "start": event.tick,
+             "duration": event.duration, "velocity": Int(event.velocity),
+             "channel": Int(event.channel)]
+        }
+        sendEvent("notes_updated", data: ["notes": mapped])
+    }
+
+    private func handleAddNote(_ payload: [String: Any]) {
+        guard let pitch = payload["pitch"] as? Int,
+              let startBeat = payload["startBeat"] as? Double,
+              let duration = payload["duration"] as? Double else { return }
+        let velocity = payload["velocity"] as? Int ?? 100
+        guard let clip = findEditingClip(trackId: payload["trackId"] as? String, clipId: payload["clipId"] as? String) else {
+            print("[Bridge] No MIDI clip found for note editing"); return
+        }
+        pushNoteUndoState(clip)
+        clip.addNote(tick: startBeat, note: UInt8(pitch), velocity: UInt8(velocity), duration: duration, channel: 0)
+        if sampler.hasSamples {
+            sampler.noteOn(note: UInt8(pitch), velocity: UInt8(velocity))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.sampler.noteOff(note: UInt8(pitch))
+            }
+        }
+        sendUpdatedNotes(clip)
+    }
+
+    private func handleMoveNotes(_ payload: [String: Any]) {
+        guard let noteIds = payload["noteIds"] as? [String] else { return }
+        let deltaPitch = payload["deltaPitch"] as? Int ?? 0
+        let deltaBeats = payload["deltaBeats"] as? Double ?? 0.0
+        guard let clip = findEditingClip(trackId: payload["trackId"] as? String, clipId: payload["clipId"] as? String) else { return }
+        pushNoteUndoState(clip)
+        guard var events = clip.midiEvents else { return }
+        let noteIdSet = Set(noteIds)
+        for i in events.indices where events[i].type == .noteOn {
+            let eventId = "\(events[i].note)-\(events[i].tick)-\(events[i].duration)"
+            if noteIdSet.contains(eventId) {
+                let newPitch = Int(events[i].note) + deltaPitch
+                let newTick = events[i].tick + deltaBeats
+                guard newPitch >= 0, newPitch <= 127, newTick >= 0 else { continue }
+                events[i] = MIDIEvent(tick: newTick, type: .noteOn, note: UInt8(newPitch),
+                                       velocity: events[i].velocity, duration: events[i].duration, channel: events[i].channel)
+            }
+        }
+        clip.midiEvents = events.sorted()
+        sendUpdatedNotes(clip)
+    }
+
+    private func handleResizeNote(_ payload: [String: Any]) {
+        guard let noteId = payload["noteId"] as? String,
+              let newDuration = payload["newDuration"] as? Double else { return }
+        guard let clip = findEditingClip(trackId: payload["trackId"] as? String, clipId: payload["clipId"] as? String) else { return }
+        pushNoteUndoState(clip)
+        guard var events = clip.midiEvents else { return }
+        for i in events.indices where events[i].type == .noteOn {
+            if "\(events[i].note)-\(events[i].tick)-\(events[i].duration)" == noteId {
+                events[i] = MIDIEvent(tick: events[i].tick, type: .noteOn, note: events[i].note,
+                                       velocity: events[i].velocity, duration: max(0.0625, newDuration), channel: events[i].channel)
+                break
+            }
+        }
+        clip.midiEvents = events
+        sendUpdatedNotes(clip)
+    }
+
+    private func handleDeleteNotes(_ payload: [String: Any]) {
+        guard let noteIds = payload["noteIds"] as? [String] else { return }
+        guard let clip = findEditingClip(trackId: payload["trackId"] as? String, clipId: payload["clipId"] as? String) else { return }
+        pushNoteUndoState(clip)
+        let noteIdSet = Set(noteIds)
+        clip.midiEvents?.removeAll { event in
+            event.type == .noteOn && noteIdSet.contains("\(event.note)-\(event.tick)-\(event.duration)")
+        }
+        sendUpdatedNotes(clip)
+    }
+
+    private func handleSetVelocity(_ payload: [String: Any]) {
+        guard let noteId = payload["noteId"] as? String,
+              let velocity = payload["velocity"] as? Int else { return }
+        guard let clip = findEditingClip(trackId: payload["trackId"] as? String, clipId: payload["clipId"] as? String) else { return }
+        pushNoteUndoState(clip)
+        guard var events = clip.midiEvents else { return }
+        for i in events.indices where events[i].type == .noteOn {
+            if "\(events[i].note)-\(events[i].tick)-\(events[i].duration)" == noteId {
+                events[i] = MIDIEvent(tick: events[i].tick, type: .noteOn, note: events[i].note,
+                                       velocity: UInt8(max(1, min(127, velocity))), duration: events[i].duration, channel: events[i].channel)
+                break
+            }
+        }
+        clip.midiEvents = events
+        sendUpdatedNotes(clip)
+    }
+
+    private func handlePasteNotes(_ payload: [String: Any]) {
+        guard let notesArray = payload["notes"] as? [[String: Any]] else { return }
+        guard let clip = findEditingClip(trackId: payload["trackId"] as? String, clipId: payload["clipId"] as? String) else { return }
+        pushNoteUndoState(clip)
+        for noteData in notesArray {
+            guard let pitch = noteData["pitch"] as? Int,
+                  let start = noteData["start"] as? Double,
+                  let duration = noteData["duration"] as? Double else { continue }
+            let velocity = noteData["velocity"] as? Int ?? 100
+            let channel = noteData["channel"] as? Int ?? 0
+            clip.addNote(tick: start, note: UInt8(pitch), velocity: UInt8(velocity), duration: duration, channel: UInt8(channel))
+        }
+        sendUpdatedNotes(clip)
+    }
+
+    private func handleNoteUndo() {
+        guard let clipId = editingClipId, let project = currentProject, !noteUndoStack.isEmpty else { return }
+        var targetClip: Clip?
+        for track in project.tracks {
+            if let clip = track.clips.first(where: { $0.id == clipId }) { targetClip = clip; break }
+        }
+        guard let clip = targetClip else { return }
+        noteRedoStack.append(clip.midiEvents ?? [])
+        clip.midiEvents = noteUndoStack.removeLast()
+        sendUpdatedNotes(clip)
+    }
+
+    private func handleNoteRedo() {
+        guard let clipId = editingClipId, let project = currentProject, !noteRedoStack.isEmpty else { return }
+        var targetClip: Clip?
+        for track in project.tracks {
+            if let clip = track.clips.first(where: { $0.id == clipId }) { targetClip = clip; break }
+        }
+        guard let clip = targetClip else { return }
+        noteUndoStack.append(clip.midiEvents ?? [])
+        clip.midiEvents = noteRedoStack.removeLast()
+        sendUpdatedNotes(clip)
     }
 
     // MARK: - Track ID Resolution
@@ -899,6 +1866,99 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         params[paramName] = value
         track.effects[effectIndex].parameters = params
         print("[Bridge] Applied effect param: track=\(trackID) effect=\(effectSlot.effectType.rawValue) \(paramName)=\(value)")
+    }
+
+    // MARK: - Effects Chain Handlers
+
+    private func handleAddEffect(_ payload: [String: Any]) {
+        guard let trackIdStr = payload["trackId"] as? String,
+              let typeStr = payload["type"] as? String,
+              let uuid = resolveTrackUUID(trackIdStr),
+              let effectType = EffectType(rawValue: typeStr) else { return }
+        audioEngine.addEffect(to: uuid, type: effectType)
+        if let track = currentProject?.tracks.first(where: { $0.id == uuid }) {
+            track.insertEffect(effectType)
+        }
+        sendEffectsChainState(for: uuid)
+        sendTracksUpdated()
+    }
+
+    private func handleRemoveEffect(_ payload: [String: Any]) {
+        guard let trackIdStr = payload["trackId"] as? String,
+              let index = payload["index"] as? Int,
+              let uuid = resolveTrackUUID(trackIdStr) else { return }
+        audioEngine.removeEffect(from: uuid, at: index)
+        if let track = currentProject?.tracks.first(where: { $0.id == uuid }),
+           index >= 0 && index < track.effects.count {
+            track.removeEffect(id: track.effects[index].id)
+        }
+        sendEffectsChainState(for: uuid)
+        sendTracksUpdated()
+    }
+
+    private func handleSetEffectParam(_ payload: [String: Any]) {
+        guard let trackIdStr = payload["trackId"] as? String,
+              let index = payload["index"] as? Int,
+              let paramName = payload["param"] as? String,
+              let value = payload["value"] as? Double,
+              let uuid = resolveTrackUUID(trackIdStr) else { return }
+        audioEngine.setEffectParameter(trackID: uuid, effectIndex: index, paramName: paramName, value: value)
+        if let track = currentProject?.tracks.first(where: { $0.id == uuid }),
+           index >= 0 && index < track.effects.count {
+            track.effects[index].parameters[paramName] = value
+        }
+        sendEffectsChainState(for: uuid)
+    }
+
+    private func handleReorderEffects(_ payload: [String: Any]) {
+        guard let trackIdStr = payload["trackId"] as? String,
+              let from = payload["from"] as? Int,
+              let to = payload["to"] as? Int,
+              let uuid = resolveTrackUUID(trackIdStr) else { return }
+        audioEngine.reorderEffects(trackID: uuid, from: from, to: to)
+        if let track = currentProject?.tracks.first(where: { $0.id == uuid }) {
+            track.moveEffect(from: from, to: to)
+        }
+        sendEffectsChainState(for: uuid)
+        sendTracksUpdated()
+    }
+
+    private func handleBypassEffect(_ payload: [String: Any]) {
+        guard let trackIdStr = payload["trackId"] as? String,
+              let index = payload["index"] as? Int,
+              let bypassed = payload["bypassed"] as? Bool,
+              let uuid = resolveTrackUUID(trackIdStr) else { return }
+        audioEngine.bypassEffect(trackID: uuid, effectIndex: index, bypassed: bypassed)
+        if let track = currentProject?.tracks.first(where: { $0.id == uuid }),
+           index >= 0 && index < track.effects.count {
+            track.effects[index].isEnabled = !bypassed
+        }
+        sendEffectsChainState(for: uuid)
+    }
+
+    private func handleSetSendLevel(_ payload: [String: Any]) {
+        guard let trackIdStr = payload["trackId"] as? String,
+              let busIdStr = payload["busId"] as? String,
+              let level = payload["level"] as? Double,
+              let trackUUID = resolveTrackUUID(trackIdStr),
+              let busUUID = resolveTrackUUID(busIdStr) else { return }
+        audioEngine.setSendLevel(from: trackUUID, to: busUUID, level: Float(level))
+        if let track = currentProject?.tracks.first(where: { $0.id == trackUUID }) {
+            if let idx = track.sends.firstIndex(where: { $0.busTrackId == busUUID }) {
+                track.sends[idx].level = Float(level)
+            } else {
+                track.addSend(to: busUUID, level: Float(level))
+            }
+        }
+        sendTracksUpdated()
+    }
+
+    private func sendEffectsChainState(for trackID: UUID) {
+        let chainState = audioEngine.effectsChainState(for: trackID)
+        sendEvent("effects_chain_updated", data: [
+            "trackId": trackID.uuidString,
+            "effects": chainState,
+        ])
     }
 
     // MARK: - Plugin Builder Handlers
