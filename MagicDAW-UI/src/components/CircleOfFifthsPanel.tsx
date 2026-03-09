@@ -70,6 +70,10 @@ function useThrottledState<T>(initial: T, intervalMs: number): [T, (v: T) => voi
   return [state, setThrottled];
 }
 
+// ── Key selector constants ────────────────────────────────────────────────
+
+const ALL_KEYS = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F'];
+
 // ── Component ──────────────────────────────────────────────────────────────
 
 export const CircleOfFifthsPanel: React.FC = () => {
@@ -106,20 +110,9 @@ export const CircleOfFifthsPanel: React.FC = () => {
   const [pathfinderPaths] = useState<string[][]>([]);
   const [highlightedDegrees] = useState<number[]>([]);
 
-  // Subscribe to bridge events
+  // Subscribe to bridge events (chord detection only — key is user-defined)
   useEffect(() => {
     const unsubs: Array<() => void> = [];
-
-    unsubs.push(
-      onSwiftMessage(BridgeMessages.KEY_DETECTED, (payload: unknown) => {
-        const p = payload as KeyDetectedPayload;
-        if (p.key && p.confidence > 0.3) {
-          const tonic = p.tonic ?? p.key.replace(/m$/, '');
-          setActiveKey(tonic);
-          setActiveMode(p.mode === 'minor' || p.key.endsWith('m') ? 'minor' : 'major');
-        }
-      }),
-    );
 
     unsubs.push(
       onSwiftMessage(BridgeMessages.CHORD_DETECTED, (payload: unknown) => {
@@ -193,44 +186,116 @@ export const CircleOfFifthsPanel: React.FC = () => {
         />
       )}
 
-      {/* Composition selector */}
+      {/* ── Top bar: Key selector + Mode toggle + Composition selector ── */}
       <div
         style={{
           position: 'absolute',
           top: 8,
+          left: 8,
           right: 8,
           display: 'flex',
-          gap: 4,
+          alignItems: 'center',
+          gap: 6,
           zIndex: 10,
+          pointerEvents: 'none',
         }}
       >
-        {COMPOSITIONS.map((c, i) => (
-          <button
-            key={c.id}
-            onClick={() => setActiveComposition(i)}
-            style={{
-              padding: '4px 10px',
-              fontSize: 11,
-              fontFamily: "'SF Pro Display', system-ui",
-              background:
-                i === activeComposition
-                  ? 'rgba(103, 232, 249, 0.2)'
-                  : 'rgba(120, 200, 220, 0.06)',
-              border: `1px solid ${
-                i === activeComposition
-                  ? 'rgba(103, 232, 249, 0.4)'
-                  : 'rgba(120, 200, 220, 0.12)'
-              }`,
-              borderRadius: 6,
-              color: i === activeComposition ? '#67e8f9' : '#94a3b8',
-              cursor: 'pointer',
-              transition: 'all 0.2s ease',
-              backdropFilter: 'blur(8px)',
-            }}
-          >
-            {c.name}
-          </button>
-        ))}
+        {/* Key selector */}
+        <div style={{ display: 'flex', gap: 2, pointerEvents: 'auto' }}>
+          {ALL_KEYS.map((k) => (
+            <button
+              key={k}
+              onClick={() => setActiveKey(k)}
+              style={{
+                padding: '3px 7px',
+                fontSize: 11,
+                fontFamily: "'SF Mono', 'Fira Code', monospace",
+                fontWeight: k === activeKey ? 700 : 400,
+                background: k === activeKey
+                  ? 'rgba(103, 232, 249, 0.25)'
+                  : 'rgba(120, 200, 220, 0.04)',
+                border: `1px solid ${k === activeKey
+                  ? 'rgba(103, 232, 249, 0.5)'
+                  : 'rgba(120, 200, 220, 0.08)'}`,
+                borderRadius: 4,
+                color: k === activeKey ? '#67e8f9' : '#64748b',
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+                backdropFilter: 'blur(8px)',
+                minWidth: 28,
+                textAlign: 'center' as const,
+              }}
+            >
+              {k}
+            </button>
+          ))}
+        </div>
+
+        {/* Mode toggle */}
+        <div style={{ display: 'flex', gap: 2, pointerEvents: 'auto' }}>
+          {(['major', 'minor'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setActiveMode(m)}
+              style={{
+                padding: '3px 10px',
+                fontSize: 11,
+                fontFamily: "'SF Mono', 'Fira Code', monospace",
+                fontWeight: m === activeMode ? 700 : 400,
+                background: m === activeMode
+                  ? (m === 'minor' ? 'rgba(167, 139, 250, 0.25)' : 'rgba(103, 232, 249, 0.25)')
+                  : 'rgba(120, 200, 220, 0.04)',
+                border: `1px solid ${m === activeMode
+                  ? (m === 'minor' ? 'rgba(167, 139, 250, 0.5)' : 'rgba(103, 232, 249, 0.5)')
+                  : 'rgba(120, 200, 220, 0.08)'}`,
+                borderRadius: 4,
+                color: m === activeMode
+                  ? (m === 'minor' ? '#a78bfa' : '#67e8f9')
+                  : '#64748b',
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+                backdropFilter: 'blur(8px)',
+                textTransform: 'capitalize' as const,
+              }}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+
+        {/* Spacer */}
+        <div style={{ flex: 1 }} />
+
+        {/* Composition selector */}
+        <div style={{ display: 'flex', gap: 4, pointerEvents: 'auto' }}>
+          {COMPOSITIONS.map((c, i) => (
+            <button
+              key={c.id}
+              onClick={() => setActiveComposition(i)}
+              style={{
+                padding: '3px 10px',
+                fontSize: 11,
+                fontFamily: "'SF Pro Display', system-ui",
+                background:
+                  i === activeComposition
+                    ? 'rgba(103, 232, 249, 0.2)'
+                    : 'rgba(120, 200, 220, 0.06)',
+                border: `1px solid ${
+                  i === activeComposition
+                    ? 'rgba(103, 232, 249, 0.4)'
+                    : 'rgba(120, 200, 220, 0.12)'
+                }`,
+                borderRadius: 6,
+                color: i === activeComposition ? '#67e8f9' : '#94a3b8',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+                backdropFilter: 'blur(8px)',
+              }}
+            >
+              {c.name}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );

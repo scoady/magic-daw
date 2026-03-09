@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useCallback } from 'react';
 import {
   AbsoluteFill,
   useCurrentFrame,
@@ -54,6 +54,71 @@ const DEGREE_LABELS = ['I', 'ii', 'iii', 'IV', 'V', 'vi', 'vii\u00B0'];
 const ENHARMONIC: Record<string, string> = {
   'C#': 'Db', 'D#': 'Eb', 'G#': 'Ab', 'A#': 'Bb', 'Gb': 'F#',
   'Cb': 'B', 'Fb': 'E', 'B#': 'C', 'E#': 'F',
+};
+
+// ── Scale & Piano helpers ─────────────────────────────────────────────────
+
+const CHROMATIC = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const MAJOR_INTERVALS = [0, 2, 4, 5, 7, 9, 11]; // W W H W W W H
+const MINOR_INTERVALS = [0, 2, 3, 5, 7, 8, 10]; // W H W W H W W
+
+/** Is this chromatic index a black key? */
+const IS_BLACK = [false, true, false, true, false, false, true, false, true, false, true, false];
+
+/** Note display names — prefer sharps for some, flats for others depending on context */
+const NOTE_NAMES_SHARP = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const NOTE_NAMES_FLAT  = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+// Keys that conventionally use flats
+const FLAT_KEYS = new Set(['F', 'Bb', 'Eb', 'Ab', 'Db']);
+
+function getScaleNotes(root: string, mode: 'major' | 'minor'): Set<number> {
+  const norm = ENHARMONIC[root] ?? root;
+  const rootIdx = CHROMATIC.indexOf(norm);
+  if (rootIdx < 0) return new Set();
+  const intervals = mode === 'major' ? MAJOR_INTERVALS : MINOR_INTERVALS;
+  return new Set(intervals.map(i => (rootIdx + i) % 12));
+}
+
+/** Get the note name for display, respecting the key's accidental preference */
+function noteName(chromaticIdx: number, key: string): string {
+  const useFlats = FLAT_KEYS.has(key);
+  return (useFlats ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP)[chromaticIdx % 12];
+}
+
+/**
+ * Build piano keys from root to root (one octave of the scale).
+ * Returns chromatic indices spanning 13 semitones (root to root inclusive).
+ */
+function buildPianoRange(root: string): number[] {
+  const norm = ENHARMONIC[root] ?? root;
+  const rootIdx = CHROMATIC.indexOf(norm);
+  if (rootIdx < 0) return Array.from({ length: 13 }, (_, i) => i); // fallback C-C
+  // 13 chromatic keys: root to root+12 (inclusive — shows the octave)
+  return Array.from({ length: 13 }, (_, i) => (rootIdx + i) % 12);
+}
+
+// ── Branch tooltip data ───────────────────────────────────────────────────
+
+interface BranchTooltip {
+  roman: string;
+  description: string;
+  tension: string;  // "stable" | "mild tension" | "strong tension" | "chromatic"
+  genres: string;
+  voiceLeading: string;
+}
+
+const BRANCH_TOOLTIPS: Record<string, BranchTooltip> = {
+  'V':    { roman: 'V',    description: 'Dominant — strongest pull to resolve home', tension: 'strong tension → resolution', genres: 'All genres', voiceLeading: 'Leading tone → tonic' },
+  'IV':   { roman: 'IV',   description: 'Subdominant — warm, open, plagal cadence', tension: 'stable → gentle pull', genres: 'Pop, Rock, Gospel', voiceLeading: '4th resolves to 3rd' },
+  'ii':   { roman: 'ii',   description: 'Supertonic — pre-dominant, sets up V', tension: 'mild tension → V → I', genres: 'Jazz, Pop, Classical', voiceLeading: 'Stepwise to V' },
+  'vi':   { roman: 'vi',   description: 'Relative minor — deceptive, emotional shift', tension: 'surprise resolution', genres: 'Pop, R&B, Singer-songwriter', voiceLeading: 'Shared tones with I' },
+  'bVII': { roman: 'bVII', description: 'Subtonic — borrowed from Mixolydian mode', tension: 'modal color', genres: 'Rock, Blues, Celtic', voiceLeading: 'Parallel motion down' },
+  'bVI':  { roman: 'bVI',  description: 'Borrowed from parallel minor — epic, cinematic', tension: 'chromatic surprise', genres: 'Film scores, Metal, Pop', voiceLeading: 'Half-step to V' },
+  'iii':  { roman: 'iii',  description: 'Mediant — delicate, transitional color', tension: 'mild → ambiguous', genres: 'Classical, Art pop', voiceLeading: 'Shared tone with I' },
+  'bV':   { roman: 'bV',   description: 'Tritone substitution — jazz tension', tension: 'maximum tension', genres: 'Jazz, Neo-soul, Prog', voiceLeading: 'Chromatic approach' },
+  'vii°': { roman: 'vii°', description: 'Leading tone diminished — unstable, wants I', tension: 'strong tension', genres: 'Classical, Jazz', voiceLeading: 'Converging half-steps' },
+  'bIII': { roman: 'bIII', description: 'Chromatic mediant — bright, unexpected shift', tension: 'chromatic color', genres: 'Film, Prog rock, Pop', voiceLeading: 'Common tone modulation' },
+  'V/vi': { roman: 'V/vi', description: 'Secondary dominant — targets the vi chord', tension: 'applied tension → vi', genres: 'Jazz, Classical, Pop', voiceLeading: 'Creates temporary leading tone' },
 };
 
 // ── Utilities ──────────────────────────────────────────────────────────────
@@ -186,6 +251,14 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
 
   // Which ring + index does the detected chord belong to?
   const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
+
+  // Scale notes for piano overlay
+  const scaleNotes = useMemo(() => getScaleNotes(activeKey, activeMode), [activeKey, activeMode]);
+
+  // Hover state for branch tooltips
+  const [hoveredBranch, setHoveredBranch] = useState<string | null>(null);
+  const onBranchEnter = useCallback((roman: string) => setHoveredBranch(roman), []);
+  const onBranchLeave = useCallback(() => setHoveredBranch(null), []);
 
   const playedIndices = useMemo(
     () => new Set(activeNotes.map((n) => ((n % 12) * 7) % 12)),
@@ -1056,19 +1129,26 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
                 const dashLen = b.tier === 1 ? 8 : 5;
                 const gapLen = b.tier === 1 ? 4 : 5;
 
+                const isHovered = hoveredBranch === b.roman;
+                const hoverScale = isHovered ? 1.2 : 1;
+
                 return (
-                  <g key={`branch-${bi}`}>
+                  <g key={`branch-${bi}`}
+                    onMouseEnter={() => onBranchEnter(b.roman)}
+                    onMouseLeave={onBranchLeave}
+                    style={{ cursor: 'pointer' }}
+                  >
                     {/* Glow under branch line */}
                     {b.tier <= 2 && (
                       <path d={arcD} fill="none"
                         stroke={b.color} strokeWidth={b.width * 3}
-                        opacity={0.04} strokeLinecap="round"
+                        opacity={isHovered ? 0.12 : 0.04} strokeLinecap="round"
                       />
                     )}
                     {/* Branch line — animated dash flowing outward */}
                     <path d={arcD} fill="none"
-                      stroke={b.color} strokeWidth={b.width}
-                      opacity={b.tier === 1 ? 0.5 : b.tier === 2 ? 0.35 : 0.2}
+                      stroke={b.color} strokeWidth={b.width * (isHovered ? 1.5 : 1)}
+                      opacity={isHovered ? 0.8 : b.tier === 1 ? 0.5 : b.tier === 2 ? 0.35 : 0.2}
                       strokeDasharray={`${dashLen} ${gapLen}`}
                       strokeDashoffset={-frame * (b.tier === 1 ? 1.2 : 0.7)}
                       strokeLinecap="round"
@@ -1094,37 +1174,47 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
                       </g>
                     )}
 
+                    {/* Hover hit area — invisible larger circle for easier targeting */}
+                    <circle cx={tx} cy={ty} r={nodeR * 2}
+                      fill="transparent" stroke="none"
+                    />
+
                     {/* Target node — glass circle */}
-                    <circle cx={tx} cy={ty} r={nodeR + 6}
-                      fill={b.color} opacity={0.04 + 0.02 * Math.sin(frame * 0.05 + bi)}
+                    <circle cx={tx} cy={ty} r={(nodeR + 6) * hoverScale}
+                      fill={b.color} opacity={(isHovered ? 0.12 : 0.04) + 0.02 * Math.sin(frame * 0.05 + bi)}
                     />
-                    <circle cx={tx} cy={ty} r={nodeR}
+                    {isHovered && (
+                      <circle cx={tx} cy={ty} r={nodeR * hoverScale + 12}
+                        fill={b.color} opacity={0.06}
+                      />
+                    )}
+                    <circle cx={tx} cy={ty} r={nodeR * hoverScale}
                       fill={palette.bg} stroke={b.color}
-                      strokeWidth={b.tier === 1 ? 2 : 1.2}
-                      opacity={b.tier === 1 ? 0.9 : b.tier === 2 ? 0.7 : 0.5}
+                      strokeWidth={isHovered ? 2.5 : b.tier === 1 ? 2 : 1.2}
+                      opacity={isHovered ? 1 : b.tier === 1 ? 0.9 : b.tier === 2 ? 0.7 : 0.5}
                     />
-                    <circle cx={tx} cy={ty} r={nodeR - 3}
+                    <circle cx={tx} cy={ty} r={Math.max(0, nodeR * hoverScale - 3)}
                       fill={b.color}
-                      opacity={b.tier === 1 ? 0.15 : 0.08}
+                      opacity={isHovered ? 0.25 : b.tier === 1 ? 0.15 : 0.08}
                     />
 
                     {/* Chord name */}
                     <text x={tx} y={ty + 1}
                       textAnchor="middle" dominantBaseline="central"
-                      fill={palette.text}
-                      fontSize={b.tier === 1 ? 9 * scale : b.tier === 2 ? 7 * scale : 6 * scale}
-                      fontFamily="monospace" fontWeight={b.tier === 1 ? 700 : 500}
-                      opacity={b.tier === 1 ? 1 : b.tier === 2 ? 0.85 : 0.65}
+                      fill={isHovered ? '#ffffff' : palette.text}
+                      fontSize={(b.tier === 1 ? 9 * scale : b.tier === 2 ? 7 * scale : 6 * scale) * hoverScale}
+                      fontFamily="monospace" fontWeight={isHovered ? 800 : b.tier === 1 ? 700 : 500}
+                      opacity={isHovered ? 1 : b.tier === 1 ? 1 : b.tier === 2 ? 0.85 : 0.65}
                     >
                       {b.label}
                     </text>
 
                     {/* Roman numeral below node */}
-                    <text x={tx} y={ty + nodeR + 6 * scale}
+                    <text x={tx} y={ty + nodeR * hoverScale + 6 * scale}
                       textAnchor="middle"
                       fill={b.color}
-                      fontSize={5 * scale} fontFamily="monospace" fontWeight={600}
-                      opacity={b.tier === 1 ? 0.7 : 0.45}
+                      fontSize={5 * scale * hoverScale} fontFamily="monospace" fontWeight={600}
+                      opacity={isHovered ? 0.9 : b.tier === 1 ? 0.7 : 0.45}
                     >
                       {b.roman}
                     </text>
@@ -1151,7 +1241,296 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           );
         })()}
 
-        {/* Keyboard panels removed — app bottom bar handles chord suggestions */}
+        {/* ── Scale piano overlay — bottom-left, root-to-root ────── */}
+        {(() => {
+          const zp = zoom.zoomProgress;
+          const pianoOpacity = 1 - zp * 0.8;
+          if (pianoOpacity < 0.05) return null;
+
+          // Build the chromatic range from root to root (13 keys)
+          const range = buildPianoRange(activeKey);
+
+          // Count white keys in range to size the piano
+          const whiteCount = range.filter(n => !IS_BLACK[n]).length;
+          const pianoW = Math.min(W * 0.28, 380);
+          const whiteW = pianoW / whiteCount;
+          const whiteH = whiteW * 3; // realistic proportions
+          const blackW = whiteW * 0.62;
+          const blackH = whiteH * 0.6;
+          const pianoX = 24;
+          const pianoY = H - whiteH - 28;
+          const cornerR = whiteW * 0.12;
+
+          // Layout: assign x positions — white keys get sequential slots,
+          // black keys overlay between adjacent whites
+          const keyLayouts: Array<{
+            chromIdx: number; x: number; w: number; h: number;
+            isBlack: boolean; inScale: boolean; isRoot: boolean;
+            name: string; seqIdx: number;
+          }> = [];
+
+          let wIdx = 0;
+          for (let si = 0; si < range.length; si++) {
+            const n = range[si];
+            const inScale = scaleNotes.has(n);
+            const isRoot = n === range[0]; // first and last are root
+            const name = noteName(n, activeKey);
+
+            if (!IS_BLACK[n]) {
+              keyLayouts.push({
+                chromIdx: n,
+                x: pianoX + wIdx * whiteW,
+                w: whiteW,
+                h: whiteH,
+                isBlack: false,
+                inScale,
+                isRoot: isRoot || (si === range.length - 1), // octave root too
+                name,
+                seqIdx: si,
+              });
+              wIdx++;
+            } else {
+              // Black key sits on top of the boundary between previous and next white
+              const bx = pianoX + wIdx * whiteW - blackW / 2;
+              keyLayouts.push({
+                chromIdx: n,
+                x: bx,
+                w: blackW,
+                h: blackH,
+                isBlack: true,
+                inScale,
+                isRoot,
+                name,
+                seqIdx: si,
+              });
+            }
+          }
+
+          const whites = keyLayouts.filter(k => !k.isBlack);
+          const blacks = keyLayouts.filter(k => k.isBlack);
+          const neonColor = activeMode === 'minor' ? palette.purple : palette.cyan;
+          // Scale key fills — like the reference: light blue for white, saturated blue for black
+          const whiteScaleFill = 'rgba(170,210,240,0.88)';    // soft light blue
+          const whiteRootFill = 'rgba(130,200,235,0.95)';     // slightly stronger for root
+          const blackScaleFill = '#2a6090';                    // deep saturated blue (like ref)
+          const blackRootFill = '#3a85b8';                     // brighter blue for root
+          const whiteDimFill = 'rgba(200,205,215,0.18)';      // very dim grey
+          const blackDimFill = 'rgba(15,18,25,0.85)';         // dark, nearly invisible
+
+          return (
+            <g opacity={pianoOpacity}>
+              {/* Neon glow filter for scale keys */}
+              <defs>
+                <filter id="piano-neon" x="-30%" y="-30%" width="160%" height="160%">
+                  <feGaussianBlur stdDeviation="5" result="blur" />
+                  <feMerge>
+                    <feMergeNode in="blur" />
+                    <feMergeNode in="SourceGraphic" />
+                  </feMerge>
+                </filter>
+                <filter id="piano-neon-sm" x="-20%" y="-20%" width="140%" height="140%">
+                  <feGaussianBlur stdDeviation="3" result="blur" />
+                  <feMerge>
+                    <feMergeNode in="blur" />
+                    <feMergeNode in="SourceGraphic" />
+                  </feMerge>
+                </filter>
+              </defs>
+
+              {/* Glass backdrop */}
+              <rect
+                x={pianoX - 8} y={pianoY - 22}
+                width={pianoW + 16} height={whiteH + 34}
+                rx={6}
+                fill="rgba(8,14,24,0.7)"
+                stroke={palette.glassBorder}
+                strokeWidth={0.5}
+              />
+              {/* Label */}
+              <text
+                x={pianoX + pianoW / 2} y={pianoY - 8}
+                textAnchor="middle"
+                fill={neonColor}
+                fontSize={9}
+                fontFamily="monospace"
+                fontWeight={600}
+                opacity={0.6}
+              >
+                {activeKey} {activeMode}
+              </text>
+
+              {/* ── White keys ── */}
+              {whites.map((k) => {
+                const pulse = k.isRoot ? 0.06 * Math.sin(frame * 0.06) : 0;
+                return (
+                  <g key={`pw-${k.seqIdx}`}>
+                    {/* Neon glow behind scale keys */}
+                    {k.inScale && (
+                      <rect
+                        x={k.x + 1} y={pianoY}
+                        width={k.w - 2} height={k.h}
+                        rx={cornerR}
+                        fill={neonColor}
+                        opacity={k.isRoot ? 0.25 + pulse : 0.1}
+                        filter="url(#piano-neon)"
+                      />
+                    )}
+                    {/* Key body */}
+                    <rect
+                      x={k.x + 0.8} y={pianoY}
+                      width={k.w - 1.6} height={k.h}
+                      rx={cornerR}
+                      fill={k.inScale
+                        ? (k.isRoot ? whiteRootFill : whiteScaleFill)
+                        : whiteDimFill}
+                      stroke={k.inScale
+                        ? `${neonColor}88`
+                        : 'rgba(80,90,110,0.15)'}
+                      strokeWidth={k.inScale ? 1 : 0.4}
+                    />
+                    {/* Note name at bottom of key */}
+                    <text
+                      x={k.x + k.w / 2} y={pianoY + k.h - 6}
+                      textAnchor="middle"
+                      fill={k.inScale ? 'rgba(15,25,40,0.75)' : 'rgba(100,116,139,0.2)'}
+                      fontSize={k.isRoot ? 12 : 10}
+                      fontFamily="monospace"
+                      fontWeight={k.isRoot ? 800 : 500}
+                    >
+                      {k.name}
+                    </text>
+                  </g>
+                );
+              })}
+
+              {/* ── Black keys (rendered on top) ── */}
+              {blacks.map((k) => {
+                const pulse = k.isRoot ? 0.08 * Math.sin(frame * 0.06) : 0;
+                return (
+                  <g key={`pb-${k.seqIdx}`}>
+                    {/* Neon glow behind in-scale black keys */}
+                    {k.inScale && (
+                      <rect
+                        x={k.x - 1} y={pianoY - 1}
+                        width={k.w + 2} height={k.h + 2}
+                        rx={cornerR * 0.8}
+                        fill={neonColor}
+                        opacity={k.isRoot ? 0.3 + pulse : 0.18}
+                        filter="url(#piano-neon-sm)"
+                      />
+                    )}
+                    {/* Key body */}
+                    <rect
+                      x={k.x} y={pianoY}
+                      width={k.w} height={k.h}
+                      rx={cornerR * 0.8}
+                      fill={k.inScale
+                        ? (k.isRoot ? blackRootFill : blackScaleFill)
+                        : blackDimFill}
+                      stroke={k.inScale
+                        ? `${neonColor}66`
+                        : 'rgba(40,50,65,0.3)'}
+                      strokeWidth={k.inScale ? 0.8 : 0.3}
+                    />
+                    {/* Note name on in-scale black key */}
+                    {k.inScale && (
+                      <text
+                        x={k.x + k.w / 2} y={pianoY + k.h - 5}
+                        textAnchor="middle"
+                        fill="rgba(220,235,255,0.9)"
+                        fontSize={8}
+                        fontFamily="monospace"
+                        fontWeight={700}
+                      >
+                        {k.name}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+
+              {/* Subtle neon accent line under the piano */}
+              <line
+                x1={pianoX} y1={pianoY + whiteH + 2}
+                x2={pianoX + pianoW} y2={pianoY + whiteH + 2}
+                stroke={neonColor}
+                strokeWidth={0.8}
+                opacity={0.12 + 0.04 * Math.sin(frame * 0.04)}
+              />
+            </g>
+          );
+        })()}
+
+        {/* ── Branch hover tooltip ──────────────────────────────────── */}
+        {hoveredBranch && BRANCH_TOOLTIPS[hoveredBranch] && zoom.primaryPlayedIdx >= 0 && (() => {
+          const tip = BRANCH_TOOLTIPS[hoveredBranch];
+          const pi = zoom.primaryPlayedIdx;
+          const [px, py] = polarToXY(CX, CY, OUTER_R, nodeAngle(pi));
+          // Position tooltip to the right of the played node
+          const tipX = px + 35 * scale;
+          const tipY = py - 50 * scale;
+          const tipW = 160 * scale;
+          const tipH = 62 * scale;
+          const fs = 5.5 * scale;
+          const lh = 7.5 * scale;
+
+          return (
+            <g>
+              {/* Backdrop */}
+              <rect
+                x={tipX} y={tipY}
+                width={tipW} height={tipH}
+                rx={4}
+                fill="rgba(8,14,24,0.92)"
+                stroke={palette.glassBorder}
+                strokeWidth={0.5}
+              />
+              {/* Accent bar */}
+              <rect
+                x={tipX} y={tipY}
+                width={2.5} height={tipH}
+                rx={1}
+                fill={palette.cyan}
+                opacity={0.6}
+              />
+              {/* Roman numeral header */}
+              <text x={tipX + 8} y={tipY + lh + 2}
+                fill={palette.cyan} fontSize={fs * 1.3}
+                fontFamily="monospace" fontWeight={800}
+              >
+                {tip.roman}
+              </text>
+              {/* Description */}
+              <text x={tipX + 8} y={tipY + lh * 2 + 3}
+                fill={palette.text} fontSize={fs}
+                fontFamily="monospace" fontWeight={400} opacity={0.85}
+              >
+                {tip.description}
+              </text>
+              {/* Tension */}
+              <text x={tipX + 8} y={tipY + lh * 3 + 4}
+                fill={palette.gold} fontSize={fs * 0.9}
+                fontFamily="monospace" opacity={0.7}
+              >
+                {tip.tension}
+              </text>
+              {/* Voice leading */}
+              <text x={tipX + 8} y={tipY + lh * 4 + 5}
+                fill={palette.purple} fontSize={fs * 0.9}
+                fontFamily="monospace" opacity={0.6}
+              >
+                {tip.voiceLeading}
+              </text>
+              {/* Genres */}
+              <text x={tipX + 8} y={tipY + lh * 5 + 6}
+                fill={palette.textDim} fontSize={fs * 0.85}
+                fontFamily="monospace" opacity={0.45}
+              >
+                {tip.genres}
+              </text>
+            </g>
+          );
+        })()}
       </svg>
     </AbsoluteFill>
   );
