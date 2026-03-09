@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Sparkles, Check, Send, Loader2 } from 'lucide-react';
 import { GlassPanel } from './GlassPanel';
+import { SongMatchPanel } from './SongMatchPanel';
 import { aurora, mockChordSuggestions, mockProgression } from '../mockData';
 import { onSwiftMessage, sendToSwift, BridgeMessages } from '../bridge';
 import type { ChordSuggestion } from '../types/daw';
@@ -269,6 +270,14 @@ export const AIPanel: React.FC = () => {
             </GlassPanel>
           ))}
         </div>
+      </div>
+
+      {/* Divider */}
+      <div style={{ width: 1, background: 'var(--border)' }} />
+
+      {/* Song Matches */}
+      <div className="flex flex-col" style={{ minWidth: 180, maxWidth: 240 }}>
+        <SongMatchPanel />
       </div>
 
       {/* Divider */}

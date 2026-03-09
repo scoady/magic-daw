@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   Sparkles,
   Play,
@@ -15,18 +15,20 @@ import {
   CheckCircle,
   Loader,
 } from 'lucide-react';
+import { Player } from '@remotion/player';
 import {
   aurora,
   mockPluginNodes,
   mockPluginConnections,
-  seededRandom,
   hexToRgba,
 } from '../mockData';
 import { sendToSwift, onSwiftMessage, BridgeMessages } from '../bridge';
 import type { PluginNode, PluginConnection } from '../types/daw';
+import { LiveNodeGraph } from '../compositions/LiveNodeGraph';
 
-const NODE_WIDTH = 180;
-const NODE_HEIGHT_BASE = 70;
+const NODE_WIDTH = 200;
+const NODE_HEIGHT_BASE = 80;
+const PARAM_ROW_H = 22;
 
 const NODE_TYPE_COLORS: Record<string, string> = {
   oscillator: aurora.cyan,
@@ -101,17 +103,8 @@ function categoryForNodeType(nodeType: string): string {
   return 'math';
 }
 
-function getNodeCenter(node: PluginNode, _port: string, side: 'input' | 'output'): [number, number] {
-  const paramKeys = Object.keys(node.params);
-  const nodeH = NODE_HEIGHT_BASE + paramKeys.length * 20;
-  const x = side === 'output' ? node.x + NODE_WIDTH : node.x;
-  const y = node.y + nodeH / 2;
-  return [x, y];
-}
-
-function bezierPath(x1: number, y1: number, x2: number, y2: number): string {
-  const dx = Math.abs(x2 - x1) * 0.5;
-  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+function nodeHeight(node: PluginNode): number {
+  return NODE_HEIGHT_BASE + Object.keys(node.params).length * PARAM_ROW_H;
 }
 
 let nextNodeCounter = 100;
@@ -129,13 +122,13 @@ interface ExportState {
 export const PluginView: React.FC = () => {
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
-  const [frame, setFrame] = useState(0);
   const [nodes, setNodes] = useState<PluginNode[]>(mockPluginNodes);
   const [connections, setConnections] = useState<PluginConnection[]>(mockPluginConnections);
   const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [previewLevels, setPreviewLevels] = useState({ left: 0, right: 0 });
   const [exportState, setExportState] = useState<ExportState>({ status: 'idle', message: '' });
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   // Connection drawing state
   const [connectingFrom, setConnectingFrom] = useState<{ nodeId: string; port: string } | null>(null);
@@ -145,10 +138,8 @@ export const PluginView: React.FC = () => {
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
   const dragOffset = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
 
-  useEffect(() => {
-    const interval = setInterval(() => setFrame((f) => f + 1), 50);
-    return () => clearInterval(interval);
-  }, []);
+  // Canvas container ref for coordinate translation
+  const canvasRef = useRef<HTMLDivElement>(null);
 
   // Subscribe to Swift events
   useEffect(() => {
@@ -206,7 +197,6 @@ export const PluginView: React.FC = () => {
         defaults,
         label,
       });
-      // Optimistic update: add node locally with empty params (Swift will send back full params)
       const cat = categoryForNodeType(nodeType) as PluginNode['type'];
       setNodes((prev) => [
         ...prev,
@@ -221,7 +211,8 @@ export const PluginView: React.FC = () => {
     sendToSwift(BridgeMessages.REMOVE_NODE, { nodeId });
     setNodes((prev) => prev.filter((n) => n.id !== nodeId));
     setConnections((prev) => prev.filter((c) => c.from.nodeId !== nodeId && c.to.nodeId !== nodeId));
-  }, []);
+    if (selectedNodeId === nodeId) setSelectedNodeId(null);
+  }, [selectedNodeId]);
 
   // Handle connecting two ports
   const handleConnect = useCallback(
@@ -252,38 +243,95 @@ export const PluginView: React.FC = () => {
     [],
   );
 
-  // Handle node dragging
-  const handleNodeMouseDown = useCallback(
-    (e: React.MouseEvent, nodeId: string, nodeX: number, nodeY: number) => {
-      e.stopPropagation();
-      setDraggingNodeId(nodeId);
-      const svgRect = (e.currentTarget as SVGElement).closest('svg')?.getBoundingClientRect();
-      if (svgRect) {
-        dragOffset.current = { dx: e.clientX - svgRect.left - nodeX, dy: e.clientY - svgRect.top - nodeY };
+  // Translate screen coords to SVG viewBox coords (1200x700)
+  const screenToSVG = useCallback((clientX: number, clientY: number): { x: number; y: number } => {
+    const el = canvasRef.current;
+    if (!el) return { x: clientX, y: clientY };
+    const rect = el.getBoundingClientRect();
+    const sx = 1200 / rect.width;
+    const sy = 700 / rect.height;
+    return {
+      x: (clientX - rect.left) * sx,
+      y: (clientY - rect.top) * sy,
+    };
+  }, []);
+
+  // Handle node dragging on overlay
+  const handleOverlayMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      const pos = screenToSVG(e.clientX, e.clientY);
+
+      // Check if clicking on a port first (for connection drawing)
+      for (const node of nodes) {
+        const h = nodeHeight(node);
+
+        // Output ports
+        for (const port of node.outputs) {
+          const px = node.x + NODE_WIDTH;
+          const py = node.y + h / 2;
+          if (Math.hypot(pos.x - px, pos.y - py) < 12) {
+            e.stopPropagation();
+            setConnectingFrom({ nodeId: node.id, port });
+            return;
+          }
+        }
+
+        // Input ports
+        for (const port of node.inputs) {
+          const px = node.x;
+          const py = node.y + h / 2;
+          if (Math.hypot(pos.x - px, pos.y - py) < 12) {
+            e.stopPropagation();
+            if (connectingFrom && connectingFrom.nodeId !== node.id) {
+              handleConnect(connectingFrom.nodeId, connectingFrom.port, node.id, port);
+              setConnectingFrom(null);
+            }
+            return;
+          }
+        }
       }
+
+      // Check if clicking on a node body (for dragging / selection)
+      for (const node of [...nodes].reverse()) {
+        const h = nodeHeight(node);
+        if (
+          pos.x >= node.x &&
+          pos.x <= node.x + NODE_WIDTH &&
+          pos.y >= node.y &&
+          pos.y <= node.y + h
+        ) {
+          e.stopPropagation();
+          setSelectedNodeId(node.id);
+          setDraggingNodeId(node.id);
+          dragOffset.current = { dx: pos.x - node.x, dy: pos.y - node.y };
+          return;
+        }
+      }
+
+      // Click on empty space -- deselect and cancel connection
+      setSelectedNodeId(null);
+      setConnectingFrom(null);
     },
-    [],
+    [nodes, connectingFrom, handleConnect, screenToSVG],
   );
 
-  const handleCanvasMouseMove = useCallback(
-    (e: React.MouseEvent<SVGSVGElement>) => {
-      const svgRect = e.currentTarget.getBoundingClientRect();
-      const mx = e.clientX - svgRect.left;
-      const my = e.clientY - svgRect.top;
-      setMousePos({ x: mx, y: my });
+  const handleOverlayMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      const pos = screenToSVG(e.clientX, e.clientY);
+      setMousePos(pos);
 
       if (draggingNodeId) {
-        const newX = mx - dragOffset.current.dx;
-        const newY = my - dragOffset.current.dy;
+        const newX = pos.x - dragOffset.current.dx;
+        const newY = pos.y - dragOffset.current.dy;
         setNodes((prev) =>
           prev.map((n) => (n.id === draggingNodeId ? { ...n, x: newX, y: newY } : n)),
         );
       }
     },
-    [draggingNodeId],
+    [draggingNodeId, screenToSVG],
   );
 
-  const handleCanvasMouseUp = useCallback(() => {
+  const handleOverlayMouseUp = useCallback(() => {
     if (draggingNodeId) {
       const node = nodes.find((n) => n.id === draggingNodeId);
       if (node) {
@@ -291,30 +339,30 @@ export const PluginView: React.FC = () => {
       }
       setDraggingNodeId(null);
     }
-    if (connectingFrom) {
-      setConnectingFrom(null);
-    }
-  }, [draggingNodeId, connectingFrom, nodes]);
+  }, [draggingNodeId, nodes]);
 
-  // Handle output port click (start connection)
-  const handleOutputPortClick = useCallback(
-    (e: React.MouseEvent, nodeId: string, port: string) => {
+  // Handle slider interaction on overlay
+  const handleSliderMouseDown = useCallback(
+    (e: React.MouseEvent, nodeId: string, param: string, currentVal: number, min: number, max: number) => {
       e.stopPropagation();
-      setConnectingFrom({ nodeId, port });
-    },
-    [],
-  );
+      const startX = e.clientX;
 
-  // Handle input port click (complete connection)
-  const handleInputPortClick = useCallback(
-    (e: React.MouseEvent, nodeId: string, port: string) => {
-      e.stopPropagation();
-      if (connectingFrom && connectingFrom.nodeId !== nodeId) {
-        handleConnect(connectingFrom.nodeId, connectingFrom.port, nodeId, port);
-        setConnectingFrom(null);
-      }
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const dx = moveEvent.clientX - startX;
+        const ratio = dx / 100;
+        const newVal = Math.max(min, Math.min(max, currentVal + ratio * (max - min)));
+        handleParamChange(nodeId, param, newVal);
+      };
+
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+      };
+
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
     },
-    [connectingFrom, handleConnect],
+    [handleParamChange],
   );
 
   // Handle preview toggle
@@ -341,57 +389,29 @@ export const PluginView: React.FC = () => {
     sendToSwift(BridgeMessages.AI_GENERATE_PATCH, { description: aiPrompt.trim() });
   }, [aiPrompt]);
 
-  // Handle slider interaction
-  const handleSliderMouseDown = useCallback(
-    (e: React.MouseEvent, nodeId: string, param: string, currentVal: number, min: number, max: number) => {
-      e.stopPropagation();
-      const startX = e.clientX;
+  // Remotion Player input props
+  const inputProps = useMemo(() => ({
+    nodes,
+    connections,
+    selectedNodeId,
+    previewLevelL: previewLevels.left,
+    previewLevelR: previewLevels.right,
+    isPreviewPlaying: isPreviewing,
+    validationErrors: validationErrors.map((e) => e.message),
+  }), [nodes, connections, selectedNodeId, previewLevels, isPreviewing, validationErrors]);
 
-      const onMouseMove = (moveEvent: MouseEvent) => {
-        const dx = moveEvent.clientX - startX;
-        const ratio = dx / 80; // 80px = slider width
-        const newVal = Math.max(min, Math.min(max, currentVal + ratio * (max - min)));
-        handleParamChange(nodeId, param, newVal);
-      };
-
-      const onMouseUp = () => {
-        document.removeEventListener('mousemove', onMouseMove);
-        document.removeEventListener('mouseup', onMouseUp);
-      };
-
-      document.addEventListener('mousemove', onMouseMove);
-      document.addEventListener('mouseup', onMouseUp);
-    },
-    [handleParamChange],
-  );
-
-  // Compute connection paths
-  const connectionPaths = useMemo(() => {
-    return connections.map((conn) => {
-      const fromNode = nodes.find((n) => n.id === conn.from.nodeId);
-      const toNode = nodes.find((n) => n.id === conn.to.nodeId);
-      if (!fromNode || !toNode) return null;
-
-      const [x1, y1] = getNodeCenter(fromNode, conn.from.port, 'output');
-      const [x2, y2] = getNodeCenter(toNode, conn.to.port, 'input');
-
-      return { ...conn, x1, y1, x2, y2 };
-    }).filter(Boolean) as (PluginConnection & { x1: number; y1: number; x2: number; y2: number })[];
-  }, [connections, nodes]);
-
-  // Waveform preview data
-  const waveform = useMemo(() => {
-    const rng = seededRandom(42);
-    return Array.from({ length: 200 }, (_, i) => {
-      const t = i / 200;
-      return Math.sin(t * Math.PI * 8) * 0.6 +
-        Math.sin(t * Math.PI * 15) * 0.2 +
-        (rng() - 0.5) * 0.1;
-    });
-  }, []);
-
-  const canvasWidth = 1100;
-  const canvasHeight = 600;
+  // Interactive overlay: connection-drawing bezier preview
+  const connectingFromNode = connectingFrom ? nodes.find((n) => n.id === connectingFrom.nodeId) : null;
+  const connectingBezier = useMemo(() => {
+    if (!connectingFromNode || !connectingFrom) return null;
+    const h = nodeHeight(connectingFromNode);
+    const x1 = connectingFromNode.x + NODE_WIDTH;
+    const y1 = connectingFromNode.y + h / 2;
+    const x2 = mousePos.x;
+    const y2 = mousePos.y;
+    const dx = Math.abs(x2 - x1) * 0.5;
+    return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  }, [connectingFromNode, connectingFrom, mousePos]);
 
   return (
     <div className="flex h-full">
@@ -494,6 +514,26 @@ export const PluginView: React.FC = () => {
 
           <div style={{ width: 1, height: 20, background: 'var(--border)' }} />
 
+          {/* Preview toggle */}
+          <button
+            className="glass-button flex items-center justify-center"
+            style={{
+              width: 32,
+              height: 28,
+              background: isPreviewing ? 'rgba(248,113,113,0.15)' : 'rgba(52,211,153,0.15)',
+              borderColor: isPreviewing ? 'rgba(248,113,113,0.3)' : 'rgba(52,211,153,0.3)',
+            }}
+            onClick={handlePreviewToggle}
+          >
+            {isPreviewing ? (
+              <Square size={10} style={{ color: '#f87171' }} />
+            ) : (
+              <Play size={12} style={{ color: aurora.green }} />
+            )}
+          </button>
+
+          <div style={{ width: 1, height: 20, background: 'var(--border)' }} />
+
           {/* Validation indicators */}
           {validationErrors.length > 0 && (
             <div className="flex items-center gap-1" title={validationErrors.map((e) => e.message).join('\n')}>
@@ -558,371 +598,121 @@ export const PluginView: React.FC = () => {
           </div>
         )}
 
-        {/* Node graph canvas */}
-        <div className="flex-1 overflow-auto relative">
-          <svg
-            width={canvasWidth}
-            height={canvasHeight}
-            onMouseMove={handleCanvasMouseMove}
-            onMouseUp={handleCanvasMouseUp}
-            style={{ cursor: draggingNodeId ? 'grabbing' : connectingFrom ? 'crosshair' : 'default' }}
+        {/* Remotion Player + Interactive Overlay */}
+        <div
+          ref={canvasRef}
+          className="flex-1 relative"
+          style={{ overflow: 'hidden', background: '#080e18' }}
+        >
+          {/* Remotion Player -- cinematic node graph visualization */}
+          <Player
+            component={LiveNodeGraph}
+            inputProps={inputProps}
+            durationInFrames={9000}
+            fps={30}
+            compositionWidth={1200}
+            compositionHeight={700}
+            loop
+            autoPlay
+            controls={false}
+            style={{
+              width: '100%',
+              height: '100%',
+            }}
+          />
+
+          {/* Transparent interactive overlay for mouse events */}
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              cursor: draggingNodeId ? 'grabbing' : connectingFrom ? 'crosshair' : 'default',
+            }}
+            onMouseDown={handleOverlayMouseDown}
+            onMouseMove={handleOverlayMouseMove}
+            onMouseUp={handleOverlayMouseUp}
           >
-            <defs>
-              {/* Aurora gradient for connections */}
-              {connectionPaths.map((conn) => (
-                <linearGradient
-                  key={`grad-${conn.id}`}
-                  id={`conn-grad-${conn.id}`}
-                  x1="0%" y1="0%" x2="100%" y2="0%"
-                >
-                  <stop offset="0%" stopColor={aurora.teal} />
-                  <stop offset="50%" stopColor={aurora.cyan} />
-                  <stop offset="100%" stopColor={aurora.purple} />
-                </linearGradient>
-              ))}
-              <filter id="connection-glow">
-                <feGaussianBlur stdDeviation="3" result="blur" />
-                <feMerge>
-                  <feMergeNode in="blur" />
-                  <feMergeNode in="SourceGraphic" />
-                </feMerge>
-              </filter>
-            </defs>
-
-            {/* Grid dots */}
-            {Array.from({ length: Math.ceil(canvasWidth / 30) }, (_, i) =>
-              Array.from({ length: Math.ceil(canvasHeight / 30) }, (_, j) => (
-                <circle
-                  key={`dot-${i}-${j}`}
-                  cx={i * 30}
-                  cy={j * 30}
-                  r={0.5}
-                  fill="rgba(120,200,220,0.08)"
-                />
-              )),
-            )}
-
-            {/* Connections */}
-            {connectionPaths.map((conn) => {
-              const dashOffset = frame * 2;
-              return (
-                <g key={conn.id}>
-                  {/* Glow */}
-                  <path
-                    d={bezierPath(conn.x1, conn.y1, conn.x2, conn.y2)}
-                    fill="none"
-                    stroke={`url(#conn-grad-${conn.id})`}
-                    strokeWidth={3}
-                    opacity={0.15}
-                    filter="url(#connection-glow)"
-                  />
-                  {/* Main line */}
-                  <path
-                    d={bezierPath(conn.x1, conn.y1, conn.x2, conn.y2)}
-                    fill="none"
-                    stroke={`url(#conn-grad-${conn.id})`}
-                    strokeWidth={1.5}
-                    opacity={0.6}
-                  />
-                  {/* Animated data flow dots */}
-                  <path
-                    d={bezierPath(conn.x1, conn.y1, conn.x2, conn.y2)}
-                    fill="none"
-                    stroke={aurora.cyan}
-                    strokeWidth={2}
-                    strokeDasharray="4 20"
-                    strokeDashoffset={-dashOffset}
-                    opacity={0.4}
-                  />
-                </g>
-              );
-            })}
-
-            {/* Active connection line (being drawn) */}
-            {connectingFrom && (() => {
-              const fromNode = nodes.find((n) => n.id === connectingFrom.nodeId);
-              if (!fromNode) return null;
-              const [x1, y1] = getNodeCenter(fromNode, connectingFrom.port, 'output');
-              return (
+            {/* Connection-drawing preview line (SVG overlay) */}
+            {connectingBezier && (
+              <svg
+                style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
+                viewBox="0 0 1200 700"
+                preserveAspectRatio="none"
+              >
                 <path
-                  d={bezierPath(x1, y1, mousePos.x, mousePos.y)}
+                  d={connectingBezier}
                   fill="none"
                   stroke={aurora.cyan}
-                  strokeWidth={1.5}
-                  strokeDasharray="6 4"
+                  strokeWidth={2}
+                  strokeDasharray="8 5"
                   opacity={0.6}
                 />
-              );
-            })()}
-
-            {/* Nodes */}
-            {nodes.map((node) => {
-              const color = NODE_TYPE_COLORS[node.type] ?? aurora.cyan;
-              const paramKeys = Object.keys(node.params);
-              const nodeH = NODE_HEIGHT_BASE + paramKeys.length * 20;
-
-              return (
-                <g key={node.id}>
-                  {/* Node shadow */}
-                  <rect
-                    x={node.x + 2}
-                    y={node.y + 2}
-                    width={NODE_WIDTH}
-                    height={nodeH}
-                    rx={8}
-                    fill="rgba(0,0,0,0.3)"
-                  />
-                  {/* Node body */}
-                  <rect
-                    x={node.x}
-                    y={node.y}
-                    width={NODE_WIDTH}
-                    height={nodeH}
-                    rx={8}
-                    fill="rgba(120,200,220,0.06)"
-                    stroke={hexToRgba(color, 0.3)}
-                    strokeWidth={1}
-                    style={{ cursor: 'grab' }}
-                    onMouseDown={(e) => handleNodeMouseDown(e, node.id, node.x, node.y)}
-                  />
-                  {/* Header */}
-                  <rect
-                    x={node.x}
-                    y={node.y}
-                    width={NODE_WIDTH}
-                    height={24}
-                    rx={8}
-                    fill={hexToRgba(color, 0.12)}
-                    style={{ cursor: 'grab' }}
-                    onMouseDown={(e) => handleNodeMouseDown(e, node.id, node.x, node.y)}
-                  />
-                  <rect
-                    x={node.x}
-                    y={node.y + 16}
-                    width={NODE_WIDTH}
-                    height={8}
-                    fill={hexToRgba(color, 0.12)}
-                    style={{ cursor: 'grab', pointerEvents: 'none' }}
-                  />
-
-                  {/* Type icon placeholder */}
-                  <circle
-                    cx={node.x + 14}
-                    cy={node.y + 12}
-                    r={6}
-                    fill={hexToRgba(color, 0.3)}
-                  />
-                  {/* Name */}
-                  <text
-                    x={node.x + 26}
-                    y={node.y + 16}
-                    fill={color}
-                    fontSize={10}
-                    fontWeight={600}
-                    fontFamily="var(--font-mono)"
-                    style={{ pointerEvents: 'none' }}
-                  >
-                    {node.name}
-                  </text>
-
-                  {/* Delete button */}
-                  {node.type !== 'output' && (
-                    <g
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => handleRemoveNode(node.id)}
-                    >
-                      <circle cx={node.x + NODE_WIDTH - 12} cy={node.y + 12} r={7} fill="rgba(248,113,113,0.15)" />
-                      <text
-                        x={node.x + NODE_WIDTH - 12}
-                        y={node.y + 16}
-                        fill="#f87171"
-                        fontSize={10}
-                        textAnchor="middle"
-                        style={{ pointerEvents: 'none' }}
-                      >
-                        x
-                      </text>
-                    </g>
-                  )}
-
-                  {/* Parameters */}
-                  {paramKeys.map((param, pi) => {
-                    const val = node.params[param];
-                    const y = node.y + 30 + pi * 20;
-                    // Determine min/max heuristics for slider
-                    const isLargeRange = val > 1 || param === 'frequency' || param === 'cutoff';
-                    const min = 0;
-                    const max = isLargeRange ? 20000 : 1;
-                    const sliderFill = Math.min(80, (typeof val === 'number' ? Math.min(1, val > 1 ? val / 20000 : val) : 0.5) * 80);
-
-                    return (
-                      <g key={param}>
-                        <text
-                          x={node.x + 10}
-                          y={y + 10}
-                          fill="var(--text-muted)"
-                          fontSize={7}
-                          fontFamily="var(--font-mono)"
-                          style={{ pointerEvents: 'none' }}
-                        >
-                          {param}
-                        </text>
-                        {/* Mini slider track */}
-                        <rect
-                          x={node.x + 70}
-                          y={y + 5}
-                          width={80}
-                          height={6}
-                          rx={3}
-                          fill="rgba(0,0,0,0.3)"
-                          style={{ cursor: 'ew-resize' }}
-                          onMouseDown={(e) => handleSliderMouseDown(e, node.id, param, val, min, max)}
-                        />
-                        <rect
-                          x={node.x + 70}
-                          y={y + 5}
-                          width={sliderFill}
-                          height={6}
-                          rx={3}
-                          fill={hexToRgba(color, 0.5)}
-                          style={{ pointerEvents: 'none' }}
-                        />
-                        <text
-                          x={node.x + 155}
-                          y={y + 10}
-                          fill="var(--text-dim)"
-                          fontSize={7}
-                          fontFamily="var(--font-mono)"
-                          textAnchor="end"
-                          style={{ pointerEvents: 'none' }}
-                        >
-                          {typeof val === 'number'
-                            ? val >= 1000
-                              ? `${(val / 1000).toFixed(1)}k`
-                              : val >= 1
-                                ? val.toFixed(0)
-                                : val.toFixed(2)
-                            : val}
-                        </text>
-                      </g>
-                    );
-                  })}
-
-                  {/* Input ports */}
-                  {node.inputs.map((port) => (
-                    <g key={`in-${port}`}>
-                      <circle
-                        cx={node.x}
-                        cy={node.y + nodeH / 2}
-                        r={5}
-                        fill={connectingFrom ? hexToRgba(aurora.cyan, 0.3) : 'var(--bg)'}
-                        stroke={hexToRgba(color, 0.5)}
-                        strokeWidth={1.5}
-                        style={{ cursor: 'crosshair' }}
-                        onClick={(e) => handleInputPortClick(e, node.id, port)}
-                      />
-                    </g>
-                  ))}
-
-                  {/* Output ports */}
-                  {node.outputs.map((port) => (
-                    <g key={`out-${port}`}>
-                      <circle
-                        cx={node.x + NODE_WIDTH}
-                        cy={node.y + nodeH / 2}
-                        r={5}
-                        fill={hexToRgba(color, 0.3)}
-                        stroke={hexToRgba(color, 0.6)}
-                        strokeWidth={1.5}
-                        style={{ cursor: 'crosshair' }}
-                        onClick={(e) => handleOutputPortClick(e, node.id, port)}
-                      />
-                    </g>
-                  ))}
-                </g>
-              );
-            })}
-          </svg>
-        </div>
-
-        {/* Preview section */}
-        <div
-          className="flex items-center gap-3 px-3 py-2 shrink-0"
-          style={{ borderTop: '1px solid var(--border)', height: 60 }}
-        >
-          <button
-            className="glass-button flex items-center justify-center"
-            style={{
-              width: 32,
-              height: 28,
-              background: isPreviewing ? 'rgba(248,113,113,0.15)' : 'rgba(52,211,153,0.15)',
-              borderColor: isPreviewing ? 'rgba(248,113,113,0.3)' : 'rgba(52,211,153,0.3)',
-            }}
-            onClick={handlePreviewToggle}
-          >
-            {isPreviewing ? (
-              <Square size={10} style={{ color: '#f87171' }} />
-            ) : (
-              <Play size={12} style={{ color: aurora.green }} />
+              </svg>
             )}
-          </button>
 
-          {/* Waveform preview */}
-          <svg width={300} height={40} className="flex-1" style={{ maxWidth: 300 }}>
-            <rect x={0} y={0} width={300} height={40} rx={4}
-              fill="rgba(0,0,0,0.2)" stroke="var(--border)" strokeWidth={0.5} />
-            <polyline
-              points={waveform
-                .map((v, i) => `${(i / waveform.length) * 300},${20 + v * 16}`)
-                .join(' ')}
-              fill="none"
-              stroke={aurora.teal}
-              strokeWidth={1}
-              opacity={0.7}
-            />
-          </svg>
+            {/* Invisible hit targets for sliders on nodes */}
+            {nodes.map((node) => {
+              const h = nodeHeight(node);
+              const paramKeys = Object.keys(node.params);
+              const el = canvasRef.current;
+              if (!el) return null;
+              const rect = el.getBoundingClientRect();
+              const sx = rect.width / 1200;
+              const sy = rect.height / 700;
 
-          {/* Level meters */}
-          <svg width={60} height={40}>
-            <rect x={0} y={0} width={60} height={40} rx={4}
-              fill="rgba(0,0,0,0.2)" stroke="var(--border)" strokeWidth={0.5} />
-            {/* Left channel */}
-            <rect x={10} y={38 - previewLevels.left * 34} width={14} height={previewLevels.left * 34}
-              rx={2} fill={aurora.teal} opacity={0.7} />
-            {/* Right channel */}
-            <rect x={36} y={38 - previewLevels.right * 34} width={14} height={previewLevels.right * 34}
-              rx={2} fill={aurora.cyan} opacity={0.7} />
-            <text x={17} y={38} fill="var(--text-muted)" fontSize={6} textAnchor="middle">L</text>
-            <text x={43} y={38} fill="var(--text-muted)" fontSize={6} textAnchor="middle">R</text>
-          </svg>
+              return paramKeys.map((param, pi) => {
+                const val = node.params[param];
+                const isLargeRange = val > 1 || param === 'frequency' || param === 'cutoff';
+                const min = 0;
+                const max = isLargeRange ? 20000 : 1;
+                const py = node.y + 34 + pi * PARAM_ROW_H;
 
-          {/* Spectrum mini */}
-          <svg width={150} height={40}>
-            <rect x={0} y={0} width={150} height={40} rx={4}
-              fill="rgba(0,0,0,0.2)" stroke="var(--border)" strokeWidth={0.5} />
-            {Array.from({ length: 24 }, (_, i) => {
-              const h = isPreviewing
-                ? (Math.sin(frame * 0.15 + i * 0.4) * 0.5 + 0.5) * 30
-                : (Math.sin(frame * 0.1 + i * 0.3) * 0.5 + 0.5) * 30;
-              const color = i < 8 ? aurora.teal : i < 16 ? aurora.purple : aurora.pink;
+                return (
+                  <div
+                    key={`slider-${node.id}-${param}`}
+                    style={{
+                      position: 'absolute',
+                      left: (node.x + 80) * sx,
+                      top: (py + 3) * sy,
+                      width: 90 * sx,
+                      height: 10 * sy,
+                      cursor: 'ew-resize',
+                    }}
+                    onMouseDown={(e) => handleSliderMouseDown(e, node.id, param, val, min, max)}
+                  />
+                );
+              });
+            })}
+
+            {/* Delete button hit targets */}
+            {nodes.map((node) => {
+              if (node.type === 'output') return null;
+              const el = canvasRef.current;
+              if (!el) return null;
+              const rect = el.getBoundingClientRect();
+              const sx = rect.width / 1200;
+              const sy = rect.height / 700;
+
               return (
-                <rect
-                  key={i}
-                  x={2 + i * 6}
-                  y={38 - h}
-                  width={4}
-                  height={h}
-                  rx={1}
-                  fill={color}
-                  opacity={isPreviewing ? 0.8 : 0.6}
+                <div
+                  key={`del-${node.id}`}
+                  style={{
+                    position: 'absolute',
+                    left: (node.x + NODE_WIDTH - 20) * sx,
+                    top: (node.y + 4) * sy,
+                    width: 16 * sx,
+                    height: 16 * sy,
+                    cursor: 'pointer',
+                    borderRadius: '50%',
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRemoveNode(node.id);
+                  }}
                 />
               );
             })}
-          </svg>
-
-          <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-            {isPreviewing ? 'Previewing...' : 'A4 (440Hz)'}
-          </span>
+          </div>
         </div>
       </div>
     </div>

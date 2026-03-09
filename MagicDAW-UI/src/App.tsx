@@ -11,6 +11,7 @@ import { EditView } from './views/EditView';
 import { MixView } from './views/MixView';
 import { InstrumentView } from './views/InstrumentView';
 import { PluginView } from './views/PluginView';
+import { ChordVisualizerPanel } from './components/ChordVisualizerPanel';
 
 const VIEW_TABS: { id: ViewId; label: string }[] = [
   { id: 'arrange', label: 'Arrange' },
@@ -18,6 +19,7 @@ const VIEW_TABS: { id: ViewId; label: string }[] = [
   { id: 'mix', label: 'Mix' },
   { id: 'instruments', label: 'Instruments' },
   { id: 'plugins', label: 'Plugins' },
+  { id: 'visualizer', label: 'Visualizer' },
 ];
 
 const App: React.FC = () => {
@@ -357,6 +359,8 @@ const App: React.FC = () => {
         return <InstrumentView />;
       case 'plugins':
         return <PluginView />;
+      case 'visualizer':
+        return <ChordVisualizerPanel />;
     }
   };
 
@@ -416,7 +420,7 @@ const App: React.FC = () => {
         {/* Main area: TrackList sidebar + View content */}
         <div className="flex flex-1 min-h-0">
           {/* Track list sidebar (visible in arrange/edit/mix views) */}
-          {(activeView === 'arrange' || activeView === 'edit' || activeView === 'mix') && (
+          {activeView !== 'instruments' && activeView !== 'plugins' && activeView !== 'visualizer' && (
             <TrackList
               tracks={dawState.tracks}
               selectedTrackId={dawState.selectedTrackId}

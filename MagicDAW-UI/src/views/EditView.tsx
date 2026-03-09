@@ -1,65 +1,218 @@
-import React, { useState, useMemo } from 'react';
-import { MousePointer, Pencil, Eraser } from 'lucide-react';
-import { aurora, mockPianoRollNotes, hexToRgba } from '../mockData';
-import type { MidiNote } from '../types/daw';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { Player } from '@remotion/player';
+import { MousePointer, Pencil, Eraser, ZoomIn, ZoomOut } from 'lucide-react';
+import { LivePianoRoll } from '../compositions/LivePianoRoll';
+import type { LivePianoRollProps } from '../compositions/LivePianoRoll';
+import { aurora, mockPianoRollNotes } from '../mockData';
+import { sendToSwift, onSwiftMessage, BridgeMessages } from '../bridge';
 import type { ActiveMidiNote } from '../bridge';
+import type { MidiNote } from '../types/daw';
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+type Tool = 'select' | 'draw' | 'erase';
+
+const DEFAULT_OCTAVE_RANGE: [number, number] = [2, 6];
+const DEFAULT_VISIBLE_BARS = 4;
+const DEFAULT_BPM = 92;
+const DEFAULT_BEATS_PER_BAR = 4;
+
+// ── Props ─────────────────────────────────────────────────────────────────────
 
 interface EditViewProps {
   trackColor?: string;
   liveActiveNotes?: ActiveMidiNote[];
+  bpm?: number;
+  beatsPerBar?: number;
+  isPlaying?: boolean;
+  playheadBeat?: number;
+  keySignature?: { key: string; scale: string };
+  notes?: MidiNote[];
 }
 
-const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const OCTAVE_LOW = 3;
-const OCTAVE_HIGH = 6;
-const TOTAL_KEYS = (OCTAVE_HIGH - OCTAVE_LOW + 1) * 12;
-const KEY_HEIGHT = 14;
-const PIANO_WIDTH = 48;
-const BEATS = 8;
-const VELOCITY_LANE_HEIGHT = 60;
+// ── Component ─────────────────────────────────────────────────────────────────
 
-type Tool = 'select' | 'draw' | 'erase';
-
-function isBlackKey(noteIndex: number): boolean {
-  return [1, 3, 6, 8, 10].includes(noteIndex % 12);
-}
-
-function noteToName(midi: number): string {
-  const note = midi % 12;
-  const octave = Math.floor(midi / 12) - 1;
-  return `${NOTE_NAMES[note]}${octave}`;
-}
-
-function velocityColor(v: number): string {
-  if (v >= 110) return aurora.pink;
-  if (v >= 90) return aurora.cyan;
-  if (v >= 70) return aurora.green;
-  return aurora.teal;
-}
-
-export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan, liveActiveNotes = [] }) => {
+export const EditView: React.FC<EditViewProps> = ({
+  trackColor: _trackColor = aurora.cyan,
+  liveActiveNotes = [],
+  bpm = DEFAULT_BPM,
+  beatsPerBar = DEFAULT_BEATS_PER_BAR,
+  isPlaying = false,
+  playheadBeat = 0,
+  keySignature = { key: 'Em', scale: 'natural minor' },
+  notes: externalNotes,
+}) => {
   const [tool, setTool] = useState<Tool>('select');
-  const [hoveredNote, setHoveredNote] = useState<number | null>(null);
+  const [visibleBars, setVisibleBars] = useState(DEFAULT_VISIBLE_BARS);
+  const [scrollOffsetBeats, setScrollOffsetBeats] = useState(0);
+  const [localNotes, setLocalNotes] = useState<MidiNote[]>(
+    externalNotes ?? mockPianoRollNotes,
+  );
+  const [chordName, setChordName] = useState<string | undefined>('Em9');
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  // Map MIDI notes to grid coordinates
-  const gridHeight = TOTAL_KEYS * KEY_HEIGHT;
-  const midiMin = OCTAVE_LOW * 12 + 12; // C3 = MIDI 48
-  const midiMax = (OCTAVE_HIGH + 1) * 12 + 12; // C7 = MIDI 96
-
-  const notes = useMemo(() => {
-    return mockPianoRollNotes.filter(
-      (n) => n.pitch >= midiMin && n.pitch < midiMax,
-    );
-  }, [midiMin, midiMax]);
-
-  // Build a set of currently active (held) MIDI note pitches for keyboard highlighting
-  const activePitchSet = useMemo(() => {
-    const set = new Set<number>();
-    for (const n of liveActiveNotes) {
-      set.add(n.note);
+  // Sync external notes when they change
+  useEffect(() => {
+    if (externalNotes) {
+      setLocalNotes(externalNotes);
     }
-    return set;
-  }, [liveActiveNotes]);
+  }, [externalNotes]);
+
+  // Listen for chord detection from Swift
+  useEffect(() => {
+    const unsub = onSwiftMessage(BridgeMessages.CHORD_DETECTED, (payload: unknown) => {
+      const data = payload as { chord: string };
+      setChordName(data.chord || undefined);
+    });
+    return unsub;
+  }, []);
+
+  // Active MIDI pitches array
+  const activePitches = useMemo(
+    () => liveActiveNotes.map((n) => n.note),
+    [liveActiveNotes],
+  );
+
+  // Build input props for the Remotion Player
+  const inputProps: LivePianoRollProps = useMemo(
+    () => ({
+      notes: localNotes,
+      activeNotes: activePitches,
+      playheadBeat,
+      isPlaying,
+      bpm,
+      beatsPerBar,
+      visibleBars,
+      scrollOffsetBeats,
+      octaveRange: DEFAULT_OCTAVE_RANGE,
+      selectedTool: tool,
+      keySignature: {
+        root: keySignature.key,
+        mode: keySignature.scale,
+      },
+      chordName,
+    }),
+    [
+      localNotes,
+      activePitches,
+      playheadBeat,
+      isPlaying,
+      bpm,
+      beatsPerBar,
+      visibleBars,
+      scrollOffsetBeats,
+      tool,
+      keySignature,
+      chordName,
+    ],
+  );
+
+  // ── Scroll / Zoom handlers ──────────────────────────────────────────────────
+
+  const totalBeats = visibleBars * beatsPerBar;
+
+  const handleZoomIn = useCallback(() => {
+    setVisibleBars((v) => Math.max(1, v - 1));
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    setVisibleBars((v) => Math.min(16, v + 1));
+  }, []);
+
+  const handleScrollLeft = useCallback(() => {
+    setScrollOffsetBeats((s) => Math.max(0, s - beatsPerBar));
+  }, [beatsPerBar]);
+
+  const handleScrollRight = useCallback(() => {
+    setScrollOffsetBeats((s) => s + beatsPerBar);
+  }, [beatsPerBar]);
+
+  // Mouse wheel horizontal scroll
+  const handleWheel = useCallback(
+    (e: React.WheelEvent) => {
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        setScrollOffsetBeats((s) => Math.max(0, s + e.deltaX * 0.05));
+      } else if (e.metaKey || e.ctrlKey) {
+        // Cmd/Ctrl + scroll = zoom
+        if (e.deltaY < 0) {
+          setVisibleBars((v) => Math.max(1, v - 1));
+        } else {
+          setVisibleBars((v) => Math.min(16, v + 1));
+        }
+      }
+    },
+    [],
+  );
+
+  // ── Note editing via click ──────────────────────────────────────────────────
+
+  const handleCanvasClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (tool === 'select') return;
+
+      const container = containerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const relX = (e.clientX - rect.left) / rect.width;
+      const relY = (e.clientY - rect.top) / rect.height;
+
+      // Map to grid coordinates
+      const pianoWidthFrac = 52 / 1000; // matches SVG viewBox
+      const velLaneFrac = 0.15;
+      if (relX < pianoWidthFrac || relY > 1 - velLaneFrac) return;
+
+      const gridX = (relX - pianoWidthFrac) / (1 - pianoWidthFrac - 0.004);
+      const gridY = relY / (1 - velLaneFrac);
+
+      const octLow = DEFAULT_OCTAVE_RANGE[0];
+      const octHigh = DEFAULT_OCTAVE_RANGE[1];
+      const totalKeys = (octHigh - octLow + 1) * 12;
+      const midiMin = octLow * 12 + 12;
+
+      const clickBeat = scrollOffsetBeats + gridX * totalBeats;
+      const keyIdx = Math.floor(gridY * totalKeys);
+      const noteIdx = totalKeys - 1 - keyIdx;
+      const midiPitch = midiMin + noteIdx;
+
+      if (midiPitch < 0 || midiPitch > 127) return;
+
+      // Quantize to nearest 16th
+      const quantize = 0.25;
+      const quantizedBeat =
+        Math.round(clickBeat / quantize) * quantize;
+
+      if (tool === 'draw') {
+        const newNote: MidiNote = {
+          pitch: midiPitch,
+          start: quantizedBeat,
+          duration: quantize,
+          velocity: 100,
+          channel: 0,
+        };
+        setLocalNotes((prev) => [...prev, newNote]);
+        // Notify Swift
+        sendToSwift(BridgeMessages.MIDI_NOTE_ON, {
+          note: midiPitch,
+          velocity: 100,
+          channel: 0,
+        });
+      } else if (tool === 'erase') {
+        setLocalNotes((prev) =>
+          prev.filter(
+            (n) =>
+              !(
+                n.pitch === midiPitch &&
+                n.start <= quantizedBeat &&
+                n.start + n.duration > quantizedBeat
+              ),
+          ),
+        );
+      }
+    },
+    [tool, scrollOffsetBeats, totalBeats],
+  );
+
+  // ── Tool buttons ────────────────────────────────────────────────────────────
 
   const tools: { id: Tool; icon: React.ReactNode; label: string }[] = [
     { id: 'select', icon: <MousePointer size={12} />, label: 'Select' },
@@ -89,6 +242,44 @@ export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan, li
 
         <div className="flex-1" />
 
+        {/* Scroll controls */}
+        <button
+          className="glass-button px-1.5 py-0.5"
+          onClick={handleScrollLeft}
+          title="Scroll left"
+        >
+          <span style={{ fontSize: 9 }}>&larr;</span>
+        </button>
+        <button
+          className="glass-button px-1.5 py-0.5"
+          onClick={handleScrollRight}
+          title="Scroll right"
+        >
+          <span style={{ fontSize: 9 }}>&rarr;</span>
+        </button>
+
+        <span style={{ fontSize: 8, color: 'var(--text-muted)', margin: '0 4px' }}>|</span>
+
+        {/* Zoom controls */}
+        <button
+          className="glass-button px-1.5 py-0.5"
+          onClick={handleZoomIn}
+          title="Zoom in"
+        >
+          <ZoomIn size={10} />
+        </button>
+        <button
+          className="glass-button px-1.5 py-0.5"
+          onClick={handleZoomOut}
+          title="Zoom out"
+        >
+          <ZoomOut size={10} />
+        </button>
+
+        <span style={{ fontSize: 8, color: 'var(--text-muted)', margin: '0 4px' }}>
+          {visibleBars} bar{visibleBars !== 1 ? 's' : ''}
+        </span>
+        <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>|</span>
         <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
           Quantize: 1/16
         </span>
@@ -98,304 +289,36 @@ export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan, li
         </span>
       </div>
 
-      {/* Piano Roll */}
-      <div className="flex-1 overflow-auto flex">
-        <svg
-          width={PIANO_WIDTH + BEATS * 100 + 20}
-          height={gridHeight + VELOCITY_LANE_HEIGHT + 10}
-        >
-          <defs>
-            <filter id="note-glow" x="-50%" y="-50%" width="200%" height="200%">
-              <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
-              <feMerge>
-                <feMergeNode in="blur" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-            <filter id="live-note-glow" x="-100%" y="-100%" width="300%" height="300%">
-              <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="blur" />
-              <feMerge>
-                <feMergeNode in="blur" />
-                <feMergeNode in="blur" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-          </defs>
-
-          {/* Piano keyboard */}
-          {Array.from({ length: TOTAL_KEYS }, (_, i) => {
-            const noteIdx = TOTAL_KEYS - 1 - i;
-            const midiNote = midiMin + noteIdx;
-            const y = i * KEY_HEIGHT;
-            const black = isBlackKey(noteIdx);
-            const isC = noteIdx % 12 === 0;
-            const isActive = activePitchSet.has(midiNote);
-
-            return (
-              <g key={`key-${i}`}>
-                <rect
-                  x={0}
-                  y={y}
-                  width={black ? 32 : PIANO_WIDTH}
-                  height={KEY_HEIGHT - 0.5}
-                  fill={
-                    isActive
-                      ? aurora.cyan
-                      : black
-                        ? 'rgba(10,15,25,0.85)'
-                        : 'rgba(200,220,230,0.08)'
-                  }
-                  stroke="var(--border)"
-                  strokeWidth={0.3}
-                  rx={1}
-                  opacity={isActive ? 0.9 : 1}
-                  filter={isActive ? 'url(#live-note-glow)' : undefined}
-                />
-                {!black && (
-                  <text
-                    x={PIANO_WIDTH - 4}
-                    y={y + KEY_HEIGHT * 0.7}
-                    textAnchor="end"
-                    fill={isActive ? '#ffffff' : 'var(--text-muted)'}
-                    fontSize={7}
-                    fontFamily="var(--font-mono)"
-                    opacity={isActive ? 1 : isC ? 0.8 : 0.4}
-                  >
-                    {noteToName(midiNote)}
-                  </text>
-                )}
-              </g>
-            );
-          })}
-
-          {/* Grid area */}
-          {/* Horizontal lines */}
-          {Array.from({ length: TOTAL_KEYS }, (_, i) => (
-            <line
-              key={`hg-${i}`}
-              x1={PIANO_WIDTH}
-              y1={i * KEY_HEIGHT}
-              x2={PIANO_WIDTH + BEATS * 100}
-              y2={i * KEY_HEIGHT}
-              stroke={
-                isBlackKey(TOTAL_KEYS - 1 - i)
-                  ? 'rgba(120,200,220,0.03)'
-                  : 'rgba(120,200,220,0.06)'
-              }
-              strokeWidth={0.3}
-            />
-          ))}
-
-          {/* Alternating row shading for black keys */}
-          {Array.from({ length: TOTAL_KEYS }, (_, i) => {
-            const noteIdx = TOTAL_KEYS - 1 - i;
-            if (!isBlackKey(noteIdx)) return null;
-            return (
-              <rect
-                key={`shade-${i}`}
-                x={PIANO_WIDTH}
-                y={i * KEY_HEIGHT}
-                width={BEATS * 100}
-                height={KEY_HEIGHT}
-                fill="rgba(0,0,0,0.15)"
-              />
-            );
-          })}
-
-          {/* Live MIDI input — row highlights for active notes */}
-          {liveActiveNotes.map((activeNote) => {
-            if (activeNote.note < midiMin || activeNote.note >= midiMax) return null;
-            const rowIdx = TOTAL_KEYS - 1 - (activeNote.note - midiMin);
-            const y = rowIdx * KEY_HEIGHT;
-            return (
-              <rect
-                key={`live-row-${activeNote.note}`}
-                x={PIANO_WIDTH}
-                y={y}
-                width={BEATS * 100}
-                height={KEY_HEIGHT}
-                fill={aurora.cyan}
-                opacity={0.12}
-              />
-            );
-          })}
-
-          {/* Vertical beat lines */}
-          {Array.from({ length: BEATS + 1 }, (_, i) => (
-            <line
-              key={`vb-${i}`}
-              x1={PIANO_WIDTH + i * 100}
-              y1={0}
-              x2={PIANO_WIDTH + i * 100}
-              y2={gridHeight}
-              stroke={
-                i % 4 === 0
-                  ? 'rgba(120,200,220,0.2)'
-                  : 'rgba(120,200,220,0.08)'
-              }
-              strokeWidth={i % 4 === 0 ? 0.8 : 0.4}
-            />
-          ))}
-
-          {/* Sub-beat lines (16ths) */}
-          {Array.from({ length: BEATS * 4 }, (_, i) => {
-            if (i % 4 === 0) return null;
-            const x = PIANO_WIDTH + (i / 4) * 100;
-            return (
-              <line
-                key={`sb-${i}`}
-                x1={x} y1={0}
-                x2={x} y2={gridHeight}
-                stroke="rgba(120,200,220,0.03)"
-                strokeWidth={0.3}
-              />
-            );
-          })}
-
-          {/* MIDI Notes */}
-          {notes.map((note, ni) => {
-            const rowIdx = TOTAL_KEYS - 1 - (note.pitch - midiMin);
-            if (rowIdx < 0 || rowIdx >= TOTAL_KEYS) return null;
-
-            const noteY = rowIdx * KEY_HEIGHT + 1;
-            const noteX = PIANO_WIDTH + note.start * (100);
-            const noteW = note.duration * 100 - 2;
-            const noteH = KEY_HEIGHT - 2;
-            const color = velocityColor(note.velocity);
-            const opacity = 0.5 + (note.velocity / 127) * 0.5;
-
-            return (
-              <g
-                key={`note-${ni}`}
-                opacity={opacity}
-                onMouseEnter={() => setHoveredNote(ni)}
-                onMouseLeave={() => setHoveredNote(null)}
-                style={{ cursor: tool === 'erase' ? 'crosshair' : 'pointer' }}
-              >
-                {/* Note glow */}
-                {hoveredNote === ni && (
-                  <rect
-                    x={noteX - 1}
-                    y={noteY - 1}
-                    width={noteW + 2}
-                    height={noteH + 2}
-                    rx={3}
-                    fill={color}
-                    opacity={0.2}
-                    filter="url(#note-glow)"
-                  />
-                )}
-                {/* Note body */}
-                <rect
-                  x={noteX}
-                  y={noteY}
-                  width={noteW}
-                  height={noteH}
-                  rx={2}
-                  fill={color}
-                  opacity={0.85}
-                />
-                {/* Left edge highlight */}
-                <rect
-                  x={noteX}
-                  y={noteY}
-                  width={2.5}
-                  height={noteH}
-                  rx={1}
-                  fill="#ffffff"
-                  opacity={0.4}
-                />
-              </g>
-            );
-          })}
-
-          {/* Live MIDI input — glowing note indicators at the left edge of the grid */}
-          {liveActiveNotes.map((activeNote) => {
-            if (activeNote.note < midiMin || activeNote.note >= midiMax) return null;
-            const rowIdx = TOTAL_KEYS - 1 - (activeNote.note - midiMin);
-            const y = rowIdx * KEY_HEIGHT + 1;
-            const h = KEY_HEIGHT - 2;
-            const velNorm = activeNote.velocity / 127;
-            const liveColor = velocityColor(activeNote.velocity);
-
-            return (
-              <g key={`live-${activeNote.note}`}>
-                {/* Outer glow */}
-                <rect
-                  x={PIANO_WIDTH}
-                  y={y - 2}
-                  width={24}
-                  height={h + 4}
-                  rx={4}
-                  fill={liveColor}
-                  opacity={0.3 * velNorm}
-                  filter="url(#live-note-glow)"
-                />
-                {/* Inner solid indicator */}
-                <rect
-                  x={PIANO_WIDTH + 1}
-                  y={y}
-                  width={16}
-                  height={h}
-                  rx={3}
-                  fill={liveColor}
-                  opacity={0.7 + 0.3 * velNorm}
-                />
-                {/* Bright left edge */}
-                <rect
-                  x={PIANO_WIDTH + 1}
-                  y={y}
-                  width={3}
-                  height={h}
-                  rx={1}
-                  fill="#ffffff"
-                  opacity={0.6}
-                />
-              </g>
-            );
-          })}
-
-          {/* Velocity lane separator */}
-          <line
-            x1={PIANO_WIDTH}
-            y1={gridHeight + 4}
-            x2={PIANO_WIDTH + BEATS * 100}
-            y2={gridHeight + 4}
-            stroke="var(--border)"
-            strokeWidth={0.5}
-          />
-
-          {/* Velocity bars */}
-          {notes.map((note, ni) => {
-            const x = PIANO_WIDTH + note.start * 100;
-            const barH = (note.velocity / 127) * VELOCITY_LANE_HEIGHT * 0.85;
-            const color = velocityColor(note.velocity);
-
-            return (
-              <rect
-                key={`vel-${ni}`}
-                x={x + 1}
-                y={gridHeight + 8 + VELOCITY_LANE_HEIGHT - barH}
-                width={6}
-                height={barH}
-                rx={1}
-                fill={color}
-                opacity={0.7}
-              />
-            );
-          })}
-
-          {/* Velocity label */}
-          <text
-            x={4}
-            y={gridHeight + 16}
-            fill="var(--text-muted)"
-            fontSize={7}
-            fontFamily="var(--font-mono)"
-          >
-            VEL
-          </text>
-        </svg>
+      {/* Remotion Piano Roll */}
+      <div
+        ref={containerRef}
+        className="flex-1 min-h-0 relative"
+        onClick={handleCanvasClick}
+        onWheel={handleWheel}
+        style={{
+          cursor:
+            tool === 'draw'
+              ? 'crosshair'
+              : tool === 'erase'
+                ? 'not-allowed'
+                : 'default',
+        }}
+      >
+        <Player
+          component={LivePianoRoll}
+          inputProps={inputProps}
+          compositionWidth={1000}
+          compositionHeight={600}
+          fps={30}
+          durationInFrames={9000}
+          loop
+          autoPlay
+          controls={false}
+          style={{
+            width: '100%',
+            height: '100%',
+          }}
+        />
       </div>
     </div>
   );

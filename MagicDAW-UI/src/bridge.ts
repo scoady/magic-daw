@@ -185,6 +185,7 @@ export const BridgeMessages = {
   PLUGIN_EXPORT_PROGRESS: 'plugin_export_progress',
   PLUGIN_EXPORT_RESULT: 'plugin_export_result',
   PLUGIN_AI_RESULT: 'plugin_ai_result',
+  SONG_MATCHES: 'song_matches',
 
   // Swift -> JS (Instrument)
   INSTRUMENT_LOADED: 'instrument_loaded',

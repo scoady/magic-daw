@@ -174,6 +174,25 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             }
             self.sendEvent("chord_suggestions", data: ["suggestions": mapped])
         }
+
+        // When song matches are found for the current progression, send to JS
+        midiRouter.onSongMatches = { [weak self] matches in
+            guard let self else { return }
+            let mapped = matches.map { match -> [String: Any] in
+                [
+                    "title": match.song.title,
+                    "artist": match.song.artist,
+                    "year": match.song.year ?? 0,
+                    "genre": match.song.genre,
+                    "progression": match.song.progression,
+                    "section": match.song.section ?? "",
+                    "confidence": match.confidence,
+                    "matchedChords": match.matchedChords,
+                    "matchType": match.matchType.rawValue,
+                ]
+            }
+            self.sendEvent("song_matches", data: ["matches": mapped])
+        }
     }
 
     // MARK: - MIDI Auto-Connect

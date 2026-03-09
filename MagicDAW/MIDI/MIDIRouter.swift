@@ -22,6 +22,9 @@ class MIDIRouter {
     /// Callback when harmony suggestions are ready.
     var onChordSuggestions: (([ChordSuggestion]) -> Void)?
 
+    /// Callback when song matches are found for the current progression.
+    var onSongMatches: (([SongMatch]) -> Void)?
+
     // Real-time key detection via Krumhansl-Schmuckler sliding window
     let keyDetector = RealtimeKeyDetector(windowDuration: 8.0)
 
@@ -30,6 +33,10 @@ class MIDIRouter {
 
     // Note history for key detection (timestamps)
     private var noteOnTimes: [UInt8: TimeInterval] = [:]
+
+    // Chord history for song matching (keeps last N detected chords)
+    private var chordHistory: [MusicChord] = []
+    private let maxChordHistory = 12
 
     // Debounce timer for chord detection (notes arrive sequentially even when played together)
     private var chordDetectionTimer: DispatchSourceTimer?
@@ -155,6 +162,17 @@ class MIDIRouter {
             // Request AI chord suggestions (debounced)
             if let analyzed = analyzed {
                 self.requestChordSuggestions(currentChord: analyzed, key: detectedKey)
+
+                // Song matching: add to history and search for matches
+                self.addToChordHistory(analyzed)
+                if let key = detectedKey {
+                    let matches = SongMatcher.match(
+                        chords: self.chordHistory,
+                        key: key,
+                        maxResults: 5
+                    )
+                    self.onSongMatches?(matches)
+                }
             }
         }
         timer.resume()
@@ -191,6 +209,20 @@ class MIDIRouter {
             DispatchQueue.main.async {
                 callback?(suggestions)
             }
+        }
+    }
+
+    // MARK: - Chord History for Song Matching
+
+    /// Add a detected chord to the history buffer, avoiding duplicates of the same chord
+    /// back-to-back (e.g., holding a chord shouldn't add it repeatedly).
+    private func addToChordHistory(_ chord: MusicChord) {
+        // Skip if same as last chord
+        if let last = chordHistory.last, last == chord { return }
+        chordHistory.append(chord)
+        // Trim to max size
+        if chordHistory.count > maxChordHistory {
+            chordHistory.removeFirst(chordHistory.count - maxChordHistory)
         }
     }
 

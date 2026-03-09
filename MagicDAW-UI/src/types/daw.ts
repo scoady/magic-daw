@@ -58,6 +58,18 @@ export interface ChordSuggestion {
   quality: string;
 }
 
+export interface SongMatch {
+  title: string;
+  artist: string;
+  year: number;
+  genre: string;
+  progression: string[];
+  section: string;
+  confidence: number;
+  matchedChords: number;
+  matchType: 'exact' | 'partial' | 'rotated';
+}
+
 export interface PluginNode {
   id: string;
   type: 'oscillator' | 'filter' | 'envelope' | 'lfo' | 'effect' | 'math' | 'output';
@@ -92,7 +104,7 @@ export interface DAWState {
   projectDirty: boolean;
 }
 
-export type ViewId = 'arrange' | 'edit' | 'mix' | 'instruments' | 'plugins';
+export type ViewId = 'arrange' | 'edit' | 'mix' | 'instruments' | 'plugins' | 'visualizer';
 
 // ── Project data from Swift (matches DAWProject Codable output) ──────────
 
