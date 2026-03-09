@@ -7,7 +7,7 @@ import {
   useVideoConfig,
 } from 'remotion';
 import { DiatonicChordsPanel, AdjacentChordsPanel } from './MiniKeyboard';
-import { useCircleZoom } from './useCircleZoom';
+import { useCircleZoom, chordToRingIndex } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -122,6 +122,8 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
     frame, fps,
     zoomFraction: 0.5,
   });
+
+  const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
 
   const primaryPlayedIdx = useMemo(() => {
     if (playedIndices.size === 0) return -1;
@@ -330,12 +332,15 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
       (ring === 'major' && key === activeKey && activeMode === 'major') ||
       (ring === 'minor' && key === activeFullKey && activeMode === 'minor');
     const isDetected = detectedChord !== null && key === detectedChord;
+    const isDetectedMinor = ring === 'minor' && detectedRing.ring === 'minor' && detectedRing.index === index;
+    const isDetectedDim = ring === 'dim' && detectedRing.ring === 'dim' && detectedRing.index === index;
+    const isRingDetected = isDetected || isDetectedMinor || isDetectedDim;
     const isHighlighted = highlightedDegrees.includes(index);
     const isPlayed = ring === 'major' && playedIndices.has(index);
 
     // Harmonic mass — size
     const baseSize = ring === 'major' ? 22 : ring === 'minor' ? 17 : 12;
-    const massScale = isActive ? 1.6 : isDetected ? 1.3 : isPlayed ? 1.25 : interpolate(dist, [0, 6], [1.15, 0.85]);
+    const massScale = isActive ? 1.6 : isRingDetected ? 1.3 : isPlayed ? 1.25 : interpolate(dist, [0, 6], [1.15, 0.85]);
     const nodeR = baseSize * massScale;
 
     // Color
@@ -349,6 +354,16 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
       fillColor = '#0a2520';
       textColor = palette.accent;
       glowOp = 0.35 + 0.1 * Math.sin(frame * 0.04);
+    } else if (isDetectedMinor) {
+      strokeColor = palette.accent;
+      fillColor = '#0a2520';
+      textColor = palette.accent;
+      glowOp = 0.3 + 0.08 * Math.sin(frame * 0.05);
+    } else if (isDetectedDim) {
+      strokeColor = palette.danger;
+      fillColor = '#1a0a0a';
+      textColor = palette.danger;
+      glowOp = 0.3 + 0.08 * Math.sin(frame * 0.05);
     } else if (isDetected) {
       strokeColor = palette.primary;
       fillColor = '#0c1629';
@@ -369,7 +384,7 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
     }
 
     const tensionColor = dist >= 5 ? palette.danger : undefined;
-    if (tensionColor && !isActive && !isDetected) {
+    if (tensionColor && !isActive && !isRingDetected) {
       strokeColor = tensionColor;
       textColor = tensionColor;
     }
@@ -380,7 +395,7 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
       <g key={`node-${ring}-${index}`}>
         {glowOp > 0 && (
           <circle cx={pos.x} cy={pos.y} r={nodeR + 8}
-            fill={isActive ? palette.accent : palette.primary}
+            fill={isActive ? palette.accent : isDetectedMinor ? palette.accent : isDetectedDim ? palette.danger : palette.primary}
             opacity={glowOp} filter="url(#glow)" />
         )}
         <circle

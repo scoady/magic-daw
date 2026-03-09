@@ -7,7 +7,7 @@ import {
   useVideoConfig,
 } from 'remotion';
 import { DiatonicChordsPanel, AdjacentChordsPanel } from './MiniKeyboard';
-import { useCircleZoom } from './useCircleZoom';
+import { useCircleZoom, chordToRingIndex } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -315,6 +315,8 @@ export const CircleOfFifths4: React.FC<CircleOfFifthsProps> = ({
     if (playedIndices.size === 0) return -1;
     return playedIndices.values().next().value!;
   }, [playedIndices]);
+
+  const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
 
   const chordRoot = useMemo(() => extractRoot(detectedChord ?? ''), [detectedChord]);
   const chordIdx = useMemo(() => keyIndex(detectedChord ?? ''), [detectedChord]);
@@ -841,12 +843,14 @@ export const CircleOfFifths4: React.FC<CircleOfFifthsProps> = ({
       {MINOR_KEYS.map((key, i) => {
         const [x, y] = middleNodes[i];
         const active = activeMode === 'minor' && isKeyActive(i);
-        return renderOrnateNode(x, y, key, 'minor', i, active, false, false, false);
+        const isDetectedMinor = detectedRing.ring === 'minor' && detectedRing.index === i;
+        return renderOrnateNode(x, y, key, 'minor', i, active, isDetectedMinor, false, false);
       })}
       {/* Inner ring — Diminished */}
       {DIM_KEYS.map((key, i) => {
         const [x, y] = innerNodes[i];
-        return renderOrnateNode(x, y, key, 'dim', i, false, false, false, false);
+        const isDetectedDim = detectedRing.ring === 'dim' && detectedRing.index === i;
+        return renderOrnateNode(x, y, key, 'dim', i, false, isDetectedDim, false, false);
       })}
     </g>
   );

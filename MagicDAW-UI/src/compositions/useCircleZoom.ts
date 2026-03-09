@@ -1,6 +1,61 @@
 import { useMemo, useRef } from 'react';
 import { spring, interpolate } from 'remotion';
 
+// ── Shared circle-of-fifths key arrays ──────────────────────────────────────
+
+export const FIFTHS_MAJOR = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F'];
+export const FIFTHS_MINOR = ['Am', 'Em', 'Bm', 'F#m', 'C#m', 'G#m', 'Ebm', 'Bbm', 'Fm', 'Cm', 'Gm', 'Dm'];
+export const FIFTHS_DIM = ['Bdim', 'F#dim', 'C#dim', 'G#dim', 'D#dim', 'A#dim', 'Fdim', 'Cdim', 'Gdim', 'Ddim', 'Adim', 'Edim'];
+
+const ENHARMONIC_MAP: Record<string, string> = {
+  'C#': 'Db', 'D#': 'Eb', 'G#': 'Ab', 'A#': 'Bb', 'Gb': 'F#',
+  'Cb': 'B', 'Fb': 'E', 'B#': 'C', 'E#': 'F',
+};
+
+function normalizeNoteForRing(n: string): string {
+  return ENHARMONIC_MAP[n] ?? n;
+}
+
+export interface DetectedRing {
+  ring: 'major' | 'minor' | 'dim' | null;
+  index: number;
+}
+
+/** Parse a detected chord name (e.g. "Am", "Bdim", "C", "F#m7") and return
+ *  which ring it belongs to and its circle-of-fifths index. */
+export function chordToRingIndex(chord: string | null): DetectedRing {
+  if (!chord) return { ring: null, index: -1 };
+  const base = chord.replace(/(maj7|m7|7|9|11|13|sus[24]|aug|\?)$/i, '');
+
+  // Diminished
+  if (base.endsWith('dim') || chord.includes('dim')) {
+    const root = base.replace(/dim$/, '');
+    const norm = normalizeNoteForRing(root);
+    const idx = FIFTHS_DIM.findIndex((k) => {
+      const kr = k.replace(/dim$/, '');
+      return kr === norm || kr === root;
+    });
+    return { ring: idx >= 0 ? 'dim' : null, index: idx };
+  }
+
+  // Minor
+  if (base.endsWith('m')) {
+    const root = base.slice(0, -1);
+    const norm = normalizeNoteForRing(root);
+    const idx = FIFTHS_MINOR.findIndex((k) => {
+      const kr = k.replace(/m$/, '');
+      return kr === norm || kr === root;
+    });
+    return { ring: idx >= 0 ? 'minor' : null, index: idx };
+  }
+
+  // Major
+  const m = base.match(/^([A-G][#b]?)/);
+  const root = m ? normalizeNoteForRing(m[1]) : '';
+  const idx = FIFTHS_MAJOR.indexOf(root);
+  return { ring: idx >= 0 ? 'major' : null, index: idx };
+}
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface ZoomTarget {

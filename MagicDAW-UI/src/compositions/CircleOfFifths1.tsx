@@ -7,7 +7,7 @@ import {
   useVideoConfig,
 } from 'remotion';
 import { DiatonicChordsPanel, AdjacentChordsPanel } from './MiniKeyboard';
-import { useCircleZoom } from './useCircleZoom';
+import { useCircleZoom, chordToRingIndex } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -85,6 +85,7 @@ function keyIndexOnCircle(key: string): number {
   const idx = MAJOR_KEYS.indexOf(root);
   return idx >= 0 ? idx : -1;
 }
+
 
 function fifthsDistance(a: number, b: number): number {
   if (a < 0 || b < 0) return 12;
@@ -178,6 +179,9 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
   const { fps } = useVideoConfig();
 
   const activeIdx = useMemo(() => keyIndexOnCircle(activeKey), [activeKey]);
+
+  // Which ring + index does the detected chord belong to?
+  const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
 
   const playedIndices = useMemo(
     () => new Set(activeNotes.map((n) => ((n % 12) * 7) % 12)),
@@ -482,22 +486,30 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           const angle = nodeAngle(i);
           const [x, y] = polarToXY(CX, CY, INNER_R, angle);
           const isHighlighted = highlightedDegrees.includes(7) && i === activeIdx;
-          const r = isHighlighted ? 8 : 6;
-          const opacity = isHighlighted ? 0.7 : 0.2;
+          const isDetectedDim = detectedRing.ring === 'dim' && detectedRing.index === i;
+          const r = isDetectedDim ? 10 : isHighlighted ? 8 : 6;
+          const opacity = isDetectedDim ? 0.85 : isHighlighted ? 0.7 : 0.2;
 
           return (
             <g key={`dim-${i}`}>
+              {isDetectedDim && (
+                <>
+                  <circle cx={x} cy={y} r={r + 12} fill={palette.gold} opacity={0.06} />
+                  <circle cx={x} cy={y} r={r + 7} fill={palette.gold} opacity={0.12} />
+                </>
+              )}
               <circle
                 cx={x} cy={y} r={r}
-                fill={palette.textDim}
+                fill={isDetectedDim ? palette.gold : palette.textDim}
                 opacity={opacity}
               />
               <text
                 x={x} y={y + r + 12}
                 textAnchor="middle"
-                fill={palette.textDim}
-                fontSize={8}
-                opacity={opacity * 0.8}
+                fill={isDetectedDim ? palette.gold : palette.textDim}
+                fontSize={isDetectedDim ? 10 : 8}
+                fontWeight={isDetectedDim ? 700 : 400}
+                opacity={isDetectedDim ? 0.9 : opacity * 0.8}
                 fontFamily="monospace"
               >
                 {key}
@@ -534,8 +546,10 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           const x = bx + gx;
           const y = by + gy;
           const isRelativeMinor = i === activeIdx;
-          const nodeR = isRelativeMinor ? 18 : 14;
-          const glowOpacity = isRelativeMinor
+          const isDetectedMinor = detectedRing.ring === 'minor' && detectedRing.index === i;
+          const isHighlightedMinor = isRelativeMinor || isDetectedMinor;
+          const nodeR = isHighlightedMinor ? 18 : 14;
+          const glowOpacity = isHighlightedMinor
             ? 0.4 + 0.15 * Math.sin(frame * 0.06)
             : interpolate(dist, [0, 6], [0.25, 0.08], { extrapolateRight: 'clamp' });
 
@@ -546,11 +560,11 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
                 cx={x} cy={y} r={nodeR + 6}
                 fill="none"
                 stroke={palette.purple}
-                strokeWidth={0.5}
-                opacity={glowOpacity * 0.4}
+                strokeWidth={isDetectedMinor ? 1.5 : 0.5}
+                opacity={isDetectedMinor ? 0.7 : glowOpacity * 0.4}
               />
               {/* Glow — layered opacity circles instead of blur filter */}
-              {isRelativeMinor && (
+              {isHighlightedMinor && (
                 <>
                   <circle
                     cx={x} cy={y} r={nodeR + 22}
@@ -568,25 +582,25 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
               <circle
                 cx={x} cy={y} r={nodeR}
                 fill={palette.bg}
-                stroke={palette.purple}
-                strokeWidth={isRelativeMinor ? 2 : 1}
-                opacity={glowOpacity + 0.3}
+                stroke={isDetectedMinor ? palette.pink : palette.purple}
+                strokeWidth={isHighlightedMinor ? 2 : 1}
+                opacity={isDetectedMinor ? 0.9 : glowOpacity + 0.3}
               />
               {/* Inner fill */}
               <circle
                 cx={x} cy={y} r={nodeR - 3}
-                fill={palette.purple}
-                opacity={glowOpacity * 0.3}
+                fill={isDetectedMinor ? palette.pink : palette.purple}
+                opacity={isDetectedMinor ? 0.35 : glowOpacity * 0.3}
               />
               {/* Label */}
               <text
                 x={x} y={y + 4}
                 textAnchor="middle"
-                fill={palette.text}
-                fontSize={11}
+                fill={isDetectedMinor ? palette.pink : palette.text}
+                fontSize={isDetectedMinor ? 13 : 11}
                 fontFamily="monospace"
-                fontWeight={isRelativeMinor ? 700 : 400}
-                opacity={interpolate(dist, [0, 6], [1, 0.4], { extrapolateRight: 'clamp' })}
+                fontWeight={isHighlightedMinor ? 700 : 400}
+                opacity={isDetectedMinor ? 1 : interpolate(dist, [0, 6], [1, 0.4], { extrapolateRight: 'clamp' })}
               >
                 {key}
               </text>

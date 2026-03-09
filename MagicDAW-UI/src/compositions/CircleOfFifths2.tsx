@@ -7,7 +7,7 @@ import {
   useVideoConfig,
 } from 'remotion';
 import { DiatonicChordsPanel, AdjacentChordsPanel } from './MiniKeyboard';
-import { useCircleZoom } from './useCircleZoom';
+import { useCircleZoom, chordToRingIndex } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -133,6 +133,8 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
     () => new Set(activeNotes.map((n) => ((n % 12) * 7) % 12)),
     [activeNotes],
   );
+
+  const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
 
   // ── Zoom into played node's quadrant
   const zoom = useCircleZoom({
@@ -703,29 +705,86 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
   const renderMiddleRing = () =>
     MINOR_KEYS.map((key, i) => {
       const [x, y] = middlePositions[i];
+      const isDetectedMinor = detectedRing.ring === 'minor' && detectedRing.index === i;
       const isActive =
-        activeMode === 'minor' && activeMinorIdx === i;
-      const isHighlighted = highlightedDegrees.includes(i);
-      return renderNode(
-        x, y, key, NODE_R_MIDDLE,
-        isActive, isHighlighted,
-        aurora.purple,
-        `middle-${i}`,
-        false,
+        (activeMode === 'minor' && activeMinorIdx === i) || isDetectedMinor;
+      const isHighlighted = highlightedDegrees.includes(i) || isDetectedMinor;
+      const nodeRadius = isDetectedMinor ? NODE_R_MIDDLE + 4 : NODE_R_MIDDLE;
+      const ringColor = isDetectedMinor ? aurora.pink : aurora.purple;
+      return (
+        <g key={`middle-${i}`}>
+          {isDetectedMinor && (
+            <>
+              {/* Pulsing glow behind detected minor node */}
+              <circle
+                cx={x} cy={y}
+                r={nodeRadius + 16 + breathe * 8}
+                fill={aurora.pink}
+                opacity={0.08 + breathe * 0.06}
+              />
+              <circle
+                cx={x} cy={y}
+                r={nodeRadius + 10 + breathe * 4}
+                fill={aurora.pink}
+                opacity={0.12 + breathe * 0.08}
+              />
+            </>
+          )}
+          {renderNode(
+            x, y, key, nodeRadius,
+            isActive, isHighlighted,
+            ringColor,
+            `middle-node-${i}`,
+            false,
+          )}
+        </g>
       );
     });
 
   const renderInnerRing = () =>
     DIM_KEYS.map((key, i) => {
       const [x, y] = innerPositions[i];
-      const isActive = false; // dim keys don't have an active mode
-      const isHighlighted = highlightedDegrees.includes(i);
-      return renderNode(
-        x, y, key, NODE_R_INNER,
-        isActive, isHighlighted,
-        aurora.pink,
-        `inner-${i}`,
-        false,
+      const isDetectedDim = detectedRing.ring === 'dim' && detectedRing.index === i;
+      const isActive = isDetectedDim;
+      const isHighlighted = highlightedDegrees.includes(i) || isDetectedDim;
+      const nodeRadius = isDetectedDim ? NODE_R_INNER + 4 : NODE_R_INNER;
+      const ringColor = isDetectedDim ? aurora.gold : aurora.pink;
+      return (
+        <g key={`inner-${i}`}>
+          {isDetectedDim && (
+            <>
+              {/* Outer glow halo for detected dim node */}
+              <circle
+                cx={x} cy={y}
+                r={nodeRadius + 18 + breathe * 10}
+                fill={aurora.gold}
+                opacity={0.06 + breathe * 0.04}
+              />
+              <circle
+                cx={x} cy={y}
+                r={nodeRadius + 12 + breathe * 6}
+                fill={aurora.gold}
+                opacity={0.1 + breathe * 0.08}
+              />
+              {/* Inner accent ring */}
+              <circle
+                cx={x} cy={y}
+                r={nodeRadius + 6}
+                fill="none"
+                stroke={aurora.gold}
+                strokeWidth={1.5}
+                opacity={0.5 + breathe * 0.3}
+              />
+            </>
+          )}
+          {renderNode(
+            x, y, key, nodeRadius,
+            isActive, isHighlighted,
+            ringColor,
+            `inner-node-${i}`,
+            false,
+          )}
+        </g>
       );
     });
 

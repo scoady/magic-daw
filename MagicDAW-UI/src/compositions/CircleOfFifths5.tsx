@@ -7,7 +7,7 @@ import {
   useVideoConfig,
 } from 'remotion';
 import { DiatonicChordsPanel, AdjacentChordsPanel } from './MiniKeyboard';
-import { useCircleZoom } from './useCircleZoom';
+import { useCircleZoom, chordToRingIndex } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -129,6 +129,8 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
     frame, fps,
     zoomFraction: 0.45,  // tighter zoom for minimalist aesthetic
   });
+
+  const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
 
   const primaryPlayedIdx = useMemo(() => {
     if (playedIndices.size === 0) return -1;
@@ -399,21 +401,23 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
         {MINORS.map((label, i) => {
           const p = ringPos(i, MIDDLE_R);
           const active = isActive('minor', i);
-          const op = nodeOpacity('minor', i);
-          const r = active ? 5 : 2.5;
+          const isDetectedMinor = detectedRing.ring === 'minor' && detectedRing.index === i;
+          const op = isDetectedMinor ? 0.95 : nodeOpacity('minor', i);
+          const r = active ? 5 : isDetectedMinor ? 4 : 2.5;
           return (
             <g key={`min-${i}`} opacity={op}>
               <circle
                 cx={p.x} cy={p.y} r={r}
-                fill={active ? palette.accent : palette.light}
+                fill={active ? palette.accent : isDetectedMinor ? palette.accentDim : palette.light}
+                filter={isDetectedMinor ? 'url(#gw-glow-soft)' : undefined}
               />
               <text
-                x={p.x} y={p.y - (active ? 16 : 10)}
+                x={p.x} y={p.y - (active ? 16 : isDetectedMinor ? 12 : 10)}
                 textAnchor="middle"
-                fill={active ? palette.accent : palette.light}
-                fontSize={active ? 18 : 10}
+                fill={active ? palette.accent : isDetectedMinor ? palette.accentDim : palette.light}
+                fontSize={active ? 18 : isDetectedMinor ? 12 : 10}
                 fontFamily="monospace"
-                fontWeight={active ? 700 : 400}
+                fontWeight={active ? 700 : isDetectedMinor ? 600 : 400}
               >
                 {label}
               </text>
@@ -424,18 +428,23 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
         {/* ── Nodes: Inner ring (Diminished) ─────────────────────────── */}
         {DIMINISHED.map((label, i) => {
           const p = ringPos(i, INNER_R);
-          const op = nodeOpacity('dim', i);
-          const r = 2;
+          const isDetectedDim = detectedRing.ring === 'dim' && detectedRing.index === i;
+          const op = isDetectedDim ? 0.9 : nodeOpacity('dim', i);
+          const r = isDetectedDim ? 3.5 : 2;
           return (
             <g key={`dim-${i}`} opacity={op}>
-              <circle cx={p.x} cy={p.y} r={r} fill={palette.light} />
+              <circle
+                cx={p.x} cy={p.y} r={r}
+                fill={isDetectedDim ? palette.accentDim : palette.light}
+                filter={isDetectedDim ? 'url(#gw-glow-soft)' : undefined}
+              />
               <text
-                x={p.x} y={p.y - 8}
+                x={p.x} y={p.y - (isDetectedDim ? 10 : 8)}
                 textAnchor="middle"
-                fill={palette.light}
-                fontSize={8}
+                fill={isDetectedDim ? palette.accentDim : palette.light}
+                fontSize={isDetectedDim ? 10 : 8}
                 fontFamily="monospace"
-                fontWeight={400}
+                fontWeight={isDetectedDim ? 600 : 400}
               >
                 {label}
               </text>
