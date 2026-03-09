@@ -2,9 +2,11 @@ import React, { useState, useMemo } from 'react';
 import { MousePointer, Pencil, Eraser } from 'lucide-react';
 import { aurora, mockPianoRollNotes, hexToRgba } from '../mockData';
 import type { MidiNote } from '../types/daw';
+import type { ActiveMidiNote } from '../bridge';
 
 interface EditViewProps {
   trackColor?: string;
+  liveActiveNotes?: ActiveMidiNote[];
 }
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -35,7 +37,7 @@ function velocityColor(v: number): string {
   return aurora.teal;
 }
 
-export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan }) => {
+export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan, liveActiveNotes = [] }) => {
   const [tool, setTool] = useState<Tool>('select');
   const [hoveredNote, setHoveredNote] = useState<number | null>(null);
 
@@ -49,6 +51,15 @@ export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan }) 
       (n) => n.pitch >= midiMin && n.pitch < midiMax,
     );
   }, [midiMin, midiMax]);
+
+  // Build a set of currently active (held) MIDI note pitches for keyboard highlighting
+  const activePitchSet = useMemo(() => {
+    const set = new Set<number>();
+    for (const n of liveActiveNotes) {
+      set.add(n.note);
+    }
+    return set;
+  }, [liveActiveNotes]);
 
   const tools: { id: Tool; icon: React.ReactNode; label: string }[] = [
     { id: 'select', icon: <MousePointer size={12} />, label: 'Select' },
@@ -101,6 +112,14 @@ export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan }) 
                 <feMergeNode in="SourceGraphic" />
               </feMerge>
             </filter>
+            <filter id="live-note-glow" x="-100%" y="-100%" width="300%" height="300%">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
           </defs>
 
           {/* Piano keyboard */}
@@ -110,6 +129,7 @@ export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan }) 
             const y = i * KEY_HEIGHT;
             const black = isBlackKey(noteIdx);
             const isC = noteIdx % 12 === 0;
+            const isActive = activePitchSet.has(midiNote);
 
             return (
               <g key={`key-${i}`}>
@@ -118,20 +138,28 @@ export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan }) 
                   y={y}
                   width={black ? 32 : PIANO_WIDTH}
                   height={KEY_HEIGHT - 0.5}
-                  fill={black ? 'rgba(10,15,25,0.85)' : 'rgba(200,220,230,0.08)'}
+                  fill={
+                    isActive
+                      ? aurora.cyan
+                      : black
+                        ? 'rgba(10,15,25,0.85)'
+                        : 'rgba(200,220,230,0.08)'
+                  }
                   stroke="var(--border)"
                   strokeWidth={0.3}
                   rx={1}
+                  opacity={isActive ? 0.9 : 1}
+                  filter={isActive ? 'url(#live-note-glow)' : undefined}
                 />
                 {!black && (
                   <text
                     x={PIANO_WIDTH - 4}
                     y={y + KEY_HEIGHT * 0.7}
                     textAnchor="end"
-                    fill="var(--text-muted)"
+                    fill={isActive ? '#ffffff' : 'var(--text-muted)'}
                     fontSize={7}
                     fontFamily="var(--font-mono)"
-                    opacity={isC ? 0.8 : 0.4}
+                    opacity={isActive ? 1 : isC ? 0.8 : 0.4}
                   >
                     {noteToName(midiNote)}
                   </text>
@@ -170,6 +198,24 @@ export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan }) 
                 width={BEATS * 100}
                 height={KEY_HEIGHT}
                 fill="rgba(0,0,0,0.15)"
+              />
+            );
+          })}
+
+          {/* Live MIDI input — row highlights for active notes */}
+          {liveActiveNotes.map((activeNote) => {
+            if (activeNote.note < midiMin || activeNote.note >= midiMax) return null;
+            const rowIdx = TOTAL_KEYS - 1 - (activeNote.note - midiMin);
+            const y = rowIdx * KEY_HEIGHT;
+            return (
+              <rect
+                key={`live-row-${activeNote.note}`}
+                x={PIANO_WIDTH}
+                y={y}
+                width={BEATS * 100}
+                height={KEY_HEIGHT}
+                fill={aurora.cyan}
+                opacity={0.12}
               />
             );
           })}
@@ -258,6 +304,52 @@ export const EditView: React.FC<EditViewProps> = ({ trackColor = aurora.cyan }) 
                   rx={1}
                   fill="#ffffff"
                   opacity={0.4}
+                />
+              </g>
+            );
+          })}
+
+          {/* Live MIDI input — glowing note indicators at the left edge of the grid */}
+          {liveActiveNotes.map((activeNote) => {
+            if (activeNote.note < midiMin || activeNote.note >= midiMax) return null;
+            const rowIdx = TOTAL_KEYS - 1 - (activeNote.note - midiMin);
+            const y = rowIdx * KEY_HEIGHT + 1;
+            const h = KEY_HEIGHT - 2;
+            const velNorm = activeNote.velocity / 127;
+            const liveColor = velocityColor(activeNote.velocity);
+
+            return (
+              <g key={`live-${activeNote.note}`}>
+                {/* Outer glow */}
+                <rect
+                  x={PIANO_WIDTH}
+                  y={y - 2}
+                  width={24}
+                  height={h + 4}
+                  rx={4}
+                  fill={liveColor}
+                  opacity={0.3 * velNorm}
+                  filter="url(#live-note-glow)"
+                />
+                {/* Inner solid indicator */}
+                <rect
+                  x={PIANO_WIDTH + 1}
+                  y={y}
+                  width={16}
+                  height={h}
+                  rx={3}
+                  fill={liveColor}
+                  opacity={0.7 + 0.3 * velNorm}
+                />
+                {/* Bright left edge */}
+                <rect
+                  x={PIANO_WIDTH + 1}
+                  y={y}
+                  width={3}
+                  height={h}
+                  rx={1}
+                  fill="#ffffff"
+                  opacity={0.6}
                 />
               </g>
             );

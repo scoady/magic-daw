@@ -4,11 +4,24 @@ import Observation
 
 @Observable
 class AudioEngine {
-    private let engine = AVAudioEngine()
+    @ObservationIgnored private(set) var avEngine = AVAudioEngine()
     private let mainMixer: AVAudioMixerNode
     private var isRunning = false
     private var transportTimer: DispatchSourceTimer?
     private var trackMixers: [UUID: AVAudioMixerNode] = [:]
+    private var trackMeterTaps: Set<UUID> = []
+
+    /// Per-track RMS levels, keyed by track ID. Updated via meter taps.
+    var trackLevels: [UUID: (left: Float, right: Float)] = [:]
+
+    /// Track IDs which are currently soloed. When non-empty, only soloed tracks produce audio.
+    private var soloedTrackIDs: Set<UUID> = []
+
+    /// Stores per-track intended volume so we can restore after unmute/unsolo.
+    private var trackVolumes: [UUID: Float] = [:]
+
+    /// Stores per-track mute state.
+    private var trackMuteStates: [UUID: Bool] = [:]
 
     // State
     var bpm: Double = 120.0
@@ -19,22 +32,22 @@ class AudioEngine {
     var masterLevelR: Float = 0.0
 
     init() {
-        mainMixer = engine.mainMixerNode
+        mainMixer = avEngine.mainMixerNode
     }
 
     // MARK: - Setup
 
     func setup() throws {
-        let output = engine.outputNode
+        let output = avEngine.outputNode
         let format = output.inputFormat(forBus: 0)
 
         // Ensure main mixer is connected to output with the correct format
-        engine.connect(mainMixer, to: output, format: format)
+        avEngine.connect(mainMixer, to: output, format: format)
 
         installMeterTap()
 
-        engine.prepare()
-        try engine.start()
+        avEngine.prepare()
+        try avEngine.start()
         isRunning = true
     }
 
@@ -80,7 +93,6 @@ class AudioEngine {
         let intervalNs = UInt64(1_000_000_000 / 240)
         timer.schedule(deadline: .now(), repeating: .nanoseconds(Int(intervalNs)))
 
-        let beatsPerSecondRef = bpm / 60.0
         var lastTime = CACurrentMediaTime()
 
         timer.setEventHandler { [weak self] in
@@ -145,27 +157,143 @@ class AudioEngine {
         }
     }
 
+    /// Install a meter tap on a per-track mixer node to capture RMS levels.
+    private func installTrackMeterTap(for trackID: UUID, on mixer: AVAudioMixerNode) {
+        guard !trackMeterTaps.contains(trackID) else { return }
+
+        let format = mixer.outputFormat(forBus: 0)
+        let channelCount = Int(format.channelCount)
+        guard format.sampleRate > 0 else { return }
+
+        mixer.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            guard let self else { return }
+
+            let frameLength = Int(buffer.frameLength)
+            guard frameLength > 0 else { return }
+
+            var rmsL: Float = 0.0
+            var rmsR: Float = 0.0
+
+            if let channelData = buffer.floatChannelData {
+                var sumSquared: Float = 0.0
+                vDSP_measqv(channelData[0], 1, &sumSquared, vDSP_Length(frameLength))
+                rmsL = sqrtf(sumSquared)
+
+                if channelCount >= 2 {
+                    var sumSquaredR: Float = 0.0
+                    vDSP_measqv(channelData[1], 1, &sumSquaredR, vDSP_Length(frameLength))
+                    rmsR = sqrtf(sumSquaredR)
+                } else {
+                    rmsR = rmsL
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.trackLevels[trackID] = (left: rmsL, right: rmsR)
+            }
+        }
+        trackMeterTaps.insert(trackID)
+    }
+
+    /// Remove a per-track meter tap.
+    private func removeTrackMeterTap(for trackID: UUID, on mixer: AVAudioMixerNode) {
+        guard trackMeterTaps.contains(trackID) else { return }
+        mixer.removeTap(onBus: 0)
+        trackMeterTaps.remove(trackID)
+        trackLevels.removeValue(forKey: trackID)
+    }
+
     // MARK: - Track Management
 
     func addTrack(_ track: AudioTrack) {
         let trackMixer = AVAudioMixerNode()
-        engine.attach(trackMixer)
+        avEngine.attach(trackMixer)
 
         let format = mainMixer.outputFormat(forBus: 0)
-        engine.connect(trackMixer, to: mainMixer, format: format)
+        avEngine.connect(trackMixer, to: mainMixer, format: format)
+
+        // Store and apply initial mixer state
+        trackVolumes[track.id] = track.volume
+        trackMuteStates[track.id] = track.isMuted
+        trackMixer.outputVolume = track.isMuted ? 0.0 : track.volume
+        trackMixer.pan = track.pan
 
         trackMixers[track.id] = trackMixer
+        installTrackMeterTap(for: track.id, on: trackMixer)
+
+        if track.isSoloed {
+            soloedTrackIDs.insert(track.id)
+            applySoloState()
+        }
     }
 
     func removeTrack(_ track: AudioTrack) {
         guard let trackMixer = trackMixers.removeValue(forKey: track.id) else { return }
-        engine.disconnectNodeOutput(trackMixer)
-        engine.detach(trackMixer)
+        removeTrackMeterTap(for: track.id, on: trackMixer)
+        avEngine.disconnectNodeOutput(trackMixer)
+        avEngine.detach(trackMixer)
+        soloedTrackIDs.remove(track.id)
+        trackVolumes.removeValue(forKey: track.id)
+        trackMuteStates.removeValue(forKey: track.id)
     }
 
     /// Returns the mixer node for a given track, used by Sampler/EffectsChain to connect.
     func mixerNode(for trackID: UUID) -> AVAudioMixerNode? {
         trackMixers[trackID]
+    }
+
+    // MARK: - Track Mixer Control
+
+    /// Set the volume (linear 0-1) for a track's mixer node.
+    func setTrackVolume(_ trackID: UUID, volume: Float) {
+        trackVolumes[trackID] = volume
+        applyEffectiveVolume(trackID)
+    }
+
+    /// Set the pan (-1 L to +1 R) for a track's mixer node.
+    func setTrackPan(_ trackID: UUID, pan: Float) {
+        guard let mixer = trackMixers[trackID] else { return }
+        mixer.pan = max(-1.0, min(1.0, pan))
+    }
+
+    /// Mute or unmute a track.
+    func setTrackMute(_ trackID: UUID, muted: Bool) {
+        trackMuteStates[trackID] = muted
+        applyEffectiveVolume(trackID)
+    }
+
+    /// Solo or unsolo a track.
+    func setTrackSolo(_ trackID: UUID, soloed: Bool) {
+        if soloed {
+            soloedTrackIDs.insert(trackID)
+        } else {
+            soloedTrackIDs.remove(trackID)
+        }
+        applySoloState()
+    }
+
+    /// Compute and apply the effective output volume for a track,
+    /// accounting for mute state, solo state, and intended volume.
+    private func applyEffectiveVolume(_ trackID: UUID) {
+        guard let mixer = trackMixers[trackID] else { return }
+        let isMuted = trackMuteStates[trackID] ?? false
+        let intendedVolume = trackVolumes[trackID] ?? 1.0
+
+        if isMuted {
+            mixer.outputVolume = 0.0
+        } else if !soloedTrackIDs.isEmpty && !soloedTrackIDs.contains(trackID) {
+            // Another track is soloed and this one is not
+            mixer.outputVolume = 0.0
+        } else {
+            mixer.outputVolume = intendedVolume
+        }
+    }
+
+    /// Recompute effective volume for all tracks based on solo selections.
+    private func applySoloState() {
+        for id in trackMixers.keys {
+            applyEffectiveVolume(id)
+        }
     }
 
     // MARK: - Cleanup
@@ -175,16 +303,21 @@ class AudioEngine {
         mainMixer.removeTap(onBus: 0)
 
         if isRunning {
-            engine.stop()
+            avEngine.stop()
             isRunning = false
         }
 
-        // Detach all track mixers
-        for (_, mixer) in trackMixers {
-            engine.disconnectNodeOutput(mixer)
-            engine.detach(mixer)
+        // Remove track meter taps and detach all track mixers
+        for (id, mixer) in trackMixers {
+            removeTrackMeterTap(for: id, on: mixer)
+            avEngine.disconnectNodeOutput(mixer)
+            avEngine.detach(mixer)
         }
         trackMixers.removeAll()
+        soloedTrackIDs.removeAll()
+        trackVolumes.removeAll()
+        trackMuteStates.removeAll()
+        trackLevels.removeAll()
 
         isPlaying = false
         isRecording = false

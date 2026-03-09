@@ -7,6 +7,12 @@ import { aurora, seededRandom, hexToRgba } from '../mockData';
 
 interface MixViewProps {
   tracks: Track[];
+  trackLevels?: Record<string, { left: number; right: number }>;
+  onVolumeChange?: (trackId: string, volume: number) => void;
+  onPanChange?: (trackId: string, pan: number) => void;
+  onMuteToggle?: (trackId: string) => void;
+  onSoloToggle?: (trackId: string) => void;
+  onEffectChange?: (trackId: string, effectIndex: number, paramName: string, value: number) => void;
 }
 
 interface ChannelEQ {
@@ -42,7 +48,15 @@ function generateEqFill(w: number, h: number, points: number[]): string {
   return `${generateEqPath(w, h, points)} L ${w} ${h} L 0 ${h} Z`;
 }
 
-export const MixView: React.FC<MixViewProps> = ({ tracks }) => {
+export const MixView: React.FC<MixViewProps> = ({
+  tracks,
+  trackLevels,
+  onVolumeChange,
+  onPanChange,
+  onMuteToggle,
+  onSoloToggle,
+  onEffectChange,
+}) => {
   const [frame, setFrame] = useState(0);
 
   // Animate levels
@@ -63,12 +77,17 @@ export const MixView: React.FC<MixViewProps> = ({ tracks }) => {
         {tracks.map((track, i) => {
           const rng = seededRandom(i * 31 + frame);
           const eq = CHANNEL_EQS[track.id] || CHANNEL_EQS.fx;
-          const vuL = Math.max(0, Math.min(1,
-            Math.sin(frame * 0.15 + i * 1.5) * 0.2 + track.volume * 0.8,
-          ));
-          const vuR = Math.max(0, Math.min(1,
-            Math.sin(frame * 0.15 + i * 1.5 + 0.8) * 0.2 + track.volume * 0.75,
-          ));
+          const realLevels = trackLevels?.[track.id];
+          const vuL = realLevels
+            ? realLevels.left
+            : Math.max(0, Math.min(1,
+                Math.sin(frame * 0.15 + i * 1.5) * 0.2 + track.volume * 0.8,
+              ));
+          const vuR = realLevels
+            ? realLevels.right
+            : Math.max(0, Math.min(1,
+                Math.sin(frame * 0.15 + i * 1.5 + 0.8) * 0.2 + track.volume * 0.75,
+              ));
 
           return (
             <div
@@ -138,6 +157,7 @@ export const MixView: React.FC<MixViewProps> = ({ tracks }) => {
               {/* Pan knob */}
               <Knob
                 value={track.pan}
+                onChange={(val) => onPanChange?.(track.id, val)}
                 min={-1}
                 max={1}
                 size={32}
@@ -156,6 +176,7 @@ export const MixView: React.FC<MixViewProps> = ({ tracks }) => {
               <div className="flex gap-1.5 items-end flex-1">
                 <Fader
                   value={track.volume}
+                  onChange={(val) => onVolumeChange?.(track.id, val)}
                   height={140}
                   width={24}
                   color={track.color}
@@ -193,6 +214,7 @@ export const MixView: React.FC<MixViewProps> = ({ tracks }) => {
                     color: track.muted ? '#ef4444' : 'var(--text-muted)',
                     cursor: 'pointer',
                   }}
+                  onClick={() => onMuteToggle?.(track.id)}
                 >
                   M
                 </button>
@@ -212,6 +234,7 @@ export const MixView: React.FC<MixViewProps> = ({ tracks }) => {
                     color: track.soloed ? aurora.gold : 'var(--text-muted)',
                     cursor: 'pointer',
                   }}
+                  onClick={() => onSoloToggle?.(track.id)}
                 >
                   S
                 </button>

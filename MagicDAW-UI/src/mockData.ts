@@ -163,6 +163,9 @@ export const mockDAWState: DAWState = {
   midiInputActive: true,
   masterLevelL: 0.72,
   masterLevelR: 0.68,
+  projectName: 'Untitled',
+  projectSaved: false,
+  projectDirty: false,
 };
 
 // ── Mock Chord Suggestions ─────────────────────────────────────────────────
@@ -306,6 +309,26 @@ export const mockPianoRollNotes = [
   { pitch: 52, start: 4.0, duration: 1.8, velocity: 72, channel: 0 }, // E3
   { pitch: 55, start: 6.0, duration: 1.5, velocity: 65, channel: 0 }, // G3
 ];
+
+// ── Swift TrackColor → hex mapping ────────────────────────────────────────
+
+/** Maps Swift TrackColor raw values to hex colors matching the aurora palette */
+const trackColorMap: Record<string, string> = {
+  teal: aurora.teal,
+  green: aurora.green,
+  cyan: aurora.cyan,
+  purple: aurora.purple,
+  pink: aurora.pink,
+  gold: aurora.gold,
+  orange: aurora.orange,
+  red: '#F44336',
+  blue: '#2196F3',
+  indigo: '#3F51B5',
+};
+
+export function trackColorToHex(swiftColor: string): string {
+  return trackColorMap[swiftColor] ?? aurora.cyan;
+}
 
 // ── Seeded Random ──────────────────────────────────────────────────────────
 

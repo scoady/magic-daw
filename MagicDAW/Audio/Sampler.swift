@@ -148,6 +148,61 @@ class Sampler {
         }
     }
 
+    // MARK: - Waveform Data
+
+    /// Downsample the audio buffer for a given root note to approximately `points` values.
+    /// Returns an array of normalized floats (-1...1) suitable for waveform visualization.
+    func waveformData(for rootNote: UInt8, points: Int = 500) -> [Float]? {
+        guard let buffer = sampleBuffers[rootNote],
+              let channelData = buffer.floatChannelData else { return nil }
+
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return nil }
+
+        let stride = max(1, frameCount / points)
+        var result: [Float] = []
+        result.reserveCapacity(points)
+
+        for i in Swift.stride(from: 0, to: frameCount, by: stride) {
+            let end = min(i + stride, frameCount)
+            var maxVal: Float = 0
+            var minVal: Float = 0
+            // Find peak in this chunk (channel 0)
+            for j in i..<end {
+                let sample = channelData[0][j]
+                if sample > maxVal { maxVal = sample }
+                if sample < minVal { minVal = sample }
+            }
+            // Use the value with the larger absolute magnitude
+            let val = abs(maxVal) > abs(minVal) ? maxVal : minVal
+            result.append(val)
+        }
+
+        return result
+    }
+
+    /// Return info about all loaded sample zones: [(rootNote, mappedLow, mappedHigh)]
+    func loadedZones() -> [(rootNote: UInt8, lowNote: UInt8, highNote: UInt8)] {
+        // Group by root note to reconstruct zones
+        var zones: [UInt8: (low: UInt8, high: UInt8)] = [:]
+        for (mappedNote, rootNote) in sampleRootNotes {
+            if let existing = zones[rootNote] {
+                zones[rootNote] = (min(existing.low, mappedNote), max(existing.high, mappedNote))
+            } else {
+                zones[rootNote] = (mappedNote, mappedNote)
+            }
+        }
+        return zones.map { (rootNote: $0.key, lowNote: $0.value.low, highNote: $0.value.high) }
+            .sorted { $0.lowNote < $1.lowNote }
+    }
+
+    /// Whether any samples are loaded
+    var hasSamples: Bool {
+        !sampleBuffers.isEmpty
+    }
+
+    // MARK: - Private
+
     private func loadBuffer(from url: URL) throws -> AVAudioPCMBuffer {
         let file = try AVAudioFile(forReading: url)
         let format = file.processingFormat

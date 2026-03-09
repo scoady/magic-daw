@@ -84,6 +84,67 @@ export interface DAWState {
   midiInputActive: boolean;
   masterLevelL: number;
   masterLevelR: number;
+  /** Name of the current project (matches DAWProject.name on Swift side) */
+  projectName: string;
+  /** Whether the project has been saved to disk (has a fileURL) */
+  projectSaved: boolean;
+  /** Whether the in-memory state has unsaved changes */
+  projectDirty: boolean;
 }
 
 export type ViewId = 'arrange' | 'edit' | 'mix' | 'instruments' | 'plugins';
+
+// ── Project data from Swift (matches DAWProject Codable output) ──────────
+
+/** Shape of the JSON object sent from Swift when a project is loaded/created */
+export interface ProjectData {
+  name: string;
+  bpm: number;
+  timeSignature: { numerator: number; denominator: number };
+  key?: string;
+  keyScale?: string;
+  tracks: SwiftTrack[];
+  markers: SwiftMarker[];
+  createdAt: string;
+  modifiedAt: string;
+}
+
+/** Track shape from Swift's Codable encoding */
+export interface SwiftTrack {
+  id: string;
+  name: string;
+  type: 'midi' | 'audio' | 'bus' | 'master';
+  color: string;  // TrackColor raw value e.g. "teal"
+  clips: SwiftClip[];
+  volume: number;
+  pan: number;
+  isMuted: boolean;
+  isSoloed: boolean;
+  isArmed: boolean;
+  height: number;
+  effects: unknown[];
+  sends: unknown[];
+  instrument?: unknown;
+  outputBusId?: string;
+}
+
+/** Clip shape from Swift's Codable encoding */
+export interface SwiftClip {
+  id: string;
+  name: string;
+  type: 'midi' | 'audio';
+  startBar: number;
+  lengthBars: number;
+  color?: string;
+  midiEvents?: unknown[];
+  audioFile?: string;
+  isLooped: boolean;
+  loopLengthBars?: number;
+}
+
+export interface SwiftMarker {
+  id: string;
+  name: string;
+  bar: number;
+  color: string;
+}

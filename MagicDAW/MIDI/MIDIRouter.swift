@@ -13,9 +13,30 @@ class MIDIRouter {
     var onNotesChanged: ((Set<UInt8>) -> Void)?
     var onChordDetected: ((MIDIChord?) -> Void)?
 
+    /// Callback when ChordAnalyzer detects a chord (richer than MIDIChord).
+    var onAnalyzedChord: ((MusicChord?) -> Void)?
+
+    /// Callback when the real-time key detector updates.
+    var onKeyDetected: ((MusicalKey?) -> Void)?
+
+    /// Callback when harmony suggestions are ready.
+    var onChordSuggestions: (([ChordSuggestion]) -> Void)?
+
+    // Real-time key detection via Krumhansl-Schmuckler sliding window
+    let keyDetector = RealtimeKeyDetector(windowDuration: 8.0)
+
+    // AI harmony service (set externally after init)
+    var harmonyService: HarmonyService?
+
+    // Note history for key detection (timestamps)
+    private var noteOnTimes: [UInt8: TimeInterval] = [:]
+
     // Debounce timer for chord detection (notes arrive sequentially even when played together)
     private var chordDetectionTimer: DispatchSourceTimer?
     private let chordDetectionDelay: TimeInterval = 0.05 // 50ms window
+
+    // Debounce for AI suggestion requests
+    private var suggestionTask: Task<Void, Never>?
 
     init(midiManager: MIDIManager, audioEngine: AudioEngine) {
         self.midiManager = midiManager
@@ -44,12 +65,33 @@ class MIDIRouter {
 
     private func handleNoteOn(note: UInt8, velocity: UInt8, channel: UInt8) {
         activeNotes.insert(note)
+        noteOnTimes[note] = ProcessInfo.processInfo.systemUptime
         sampler?.noteOn(note: note, velocity: velocity)
+
+        // Feed the real-time key detector
+        keyDetector.update(
+            note: note,
+            velocity: velocity,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            duration: 0.25 // estimate; updated on note-off
+        )
+
         onNotesChanged?(activeNotes)
         scheduleChordDetection()
     }
 
     private func handleNoteOff(note: UInt8, channel: UInt8) {
+        // Update key detector with actual duration
+        if let onTime = noteOnTimes.removeValue(forKey: note) {
+            let duration = ProcessInfo.processInfo.systemUptime - onTime
+            keyDetector.update(
+                note: note,
+                velocity: 64,
+                timestamp: onTime,
+                duration: duration
+            )
+        }
+
         activeNotes.remove(note)
         sampler?.noteOff(note: note)
         onNotesChanged?(activeNotes)
@@ -73,8 +115,10 @@ class MIDIRouter {
         case 120, 123: // All sound off / All notes off
             sampler?.allNotesOff()
             activeNotes.removeAll()
+            noteOnTimes.removeAll()
             onNotesChanged?(activeNotes)
             onChordDetected?(nil)
+            onAnalyzedChord?(nil)
         default:
             break
         }
@@ -85,7 +129,7 @@ class MIDIRouter {
         // Could apply to sampler pitch offset
     }
 
-    // MARK: - MusicChord Detection
+    // MARK: - Chord Detection
 
     private func scheduleChordDetection() {
         chordDetectionTimer?.cancel()
@@ -94,19 +138,72 @@ class MIDIRouter {
         timer.schedule(deadline: .now() + chordDetectionDelay)
         timer.setEventHandler { [weak self] in
             guard let self else { return }
-            let chord = MIDIChord.detect(from: self.activeNotes)
-            self.onChordDetected?(chord)
+
+            // Legacy MIDIChord detection (kept for backward compat)
+            let midiChord = MIDIChord.detect(from: self.activeNotes)
+            self.onChordDetected?(midiChord)
+
+            // Rich chord analysis via ChordAnalyzer
+            let noteArray = Array(self.activeNotes)
+            let detectedKey = self.keyDetector.currentKey
+            let analyzed = ChordAnalyzer.analyze(midiNotes: noteArray, in: detectedKey)
+            self.onAnalyzedChord?(analyzed)
+
+            // Emit current key estimate
+            self.onKeyDetected?(detectedKey)
+
+            // Request AI chord suggestions (debounced)
+            if let analyzed = analyzed {
+                self.requestChordSuggestions(currentChord: analyzed, key: detectedKey)
+            }
         }
         timer.resume()
         chordDetectionTimer = timer
+    }
+
+    /// Request next-chord suggestions from HarmonyService (AI with algorithmic fallback).
+    /// Debounced: cancels any in-flight request when a new chord is detected.
+    private func requestChordSuggestions(currentChord: MusicChord, key: MusicalKey?) {
+        suggestionTask?.cancel()
+
+        let service = self.harmonyService
+        let effectiveKey = key ?? MusicalKey(tonic: .C, mode: ScaleType.major, confidence: 0.0)
+        let callback = self.onChordSuggestions
+
+        suggestionTask = Task {
+            guard let service = service else {
+                // No harmony service — use algorithmic fallback directly
+                let fallback = AIHarmonyFallback()
+                let suggestions = fallback.suggestNextChord(currentChord: currentChord, key: effectiveKey)
+                guard !Task.isCancelled else { return }
+                DispatchQueue.main.async {
+                    callback?(suggestions)
+                }
+                return
+            }
+
+            let suggestions = await service.suggestNextChord(
+                currentChord: currentChord,
+                key: effectiveKey,
+                style: nil
+            )
+            guard !Task.isCancelled else { return }
+            DispatchQueue.main.async {
+                callback?(suggestions)
+            }
+        }
     }
 
     /// Release all active notes and reset state.
     func panic() {
         sampler?.allNotesOff()
         activeNotes.removeAll()
+        noteOnTimes.removeAll()
+        suggestionTask?.cancel()
         onNotesChanged?(activeNotes)
         onChordDetected?(nil)
+        onAnalyzedChord?(nil)
+        onKeyDetected?(keyDetector.currentKey)
     }
 }
 

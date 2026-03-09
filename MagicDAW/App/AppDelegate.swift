@@ -1,9 +1,13 @@
 import Cocoa
 import SwiftUI
+import UniformTypeIdentifiers
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var midiManager: MIDIManager?
     private var audioEngine: AudioEngine?
+
+    /// Reference to the recent projects submenu so it can be rebuilt dynamically.
+    private var recentProjectsMenu: NSMenu?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
@@ -37,6 +41,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "New Project", action: #selector(newProject), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "Open...", action: #selector(openProject), keyEquivalent: "o")
+
+        // Recent Projects submenu
+        let recentMenu = NSMenu(title: "Open Recent")
+        let recentMenuItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
+        recentMenuItem.submenu = recentMenu
+        self.recentProjectsMenu = recentMenu
+        fileMenu.addItem(recentMenuItem)
+        rebuildRecentProjectsMenu()
+
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Save", action: #selector(saveProject), keyEquivalent: "s")
         fileMenu.addItem(withTitle: "Save As...", action: #selector(saveProjectAs), keyEquivalent: "S")
@@ -91,6 +104,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.mainMenu = mainMenu
     }
 
+    // MARK: - Recent Projects Menu
+
+    private func rebuildRecentProjectsMenu() {
+        guard let menu = recentProjectsMenu else { return }
+        menu.removeAllItems()
+
+        let recentURLs = ProjectManager.shared.recentProjects()
+
+        if recentURLs.isEmpty {
+            let emptyItem = NSMenuItem(title: "No Recent Projects", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            menu.addItem(emptyItem)
+        } else {
+            for url in recentURLs {
+                let name = url.deletingPathExtension().lastPathComponent
+                let item = NSMenuItem(title: name, action: #selector(openRecentProject(_:)), keyEquivalent: "")
+                item.representedObject = url
+                item.toolTip = url.path
+                menu.addItem(item)
+            }
+        }
+
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Clear Recent Projects", action: #selector(clearRecentProjects), keyEquivalent: "")
+    }
+
     // MARK: - Menu Actions
 
     @objc private func showPreferences() {
@@ -103,14 +142,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openProject() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "magicdaw")].compactMap { $0 }
-        panel.canChooseDirectories = false
+        let magicdawType = UTType(filenameExtension: "magicdaw") ?? .data
+        panel.allowedContentTypes = [magicdawType]
+        panel.canChooseDirectories = true  // .magicdaw bundles are directories
+        panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
-        panel.begin { response in
+        panel.begin { [weak self] response in
             if response == .OK, let url = panel.url {
                 NotificationCenter.default.post(name: .openProject, object: url)
+                self?.rebuildRecentProjectsMenu()
             }
         }
+    }
+
+    @objc private func openRecentProject(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NotificationCenter.default.post(name: .openRecentProject, object: url)
+    }
+
+    @objc private func clearRecentProjects() {
+        ProjectManager.shared.clearRecent()
+        rebuildRecentProjectsMenu()
     }
 
     @objc private func saveProject() {
@@ -119,10 +171,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func saveProjectAs() {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "magicdaw")].compactMap { $0 }
-        panel.begin { response in
+        let magicdawType = UTType(filenameExtension: "magicdaw") ?? .data
+        panel.allowedContentTypes = [magicdawType]
+        panel.begin { [weak self] response in
             if response == .OK, let url = panel.url {
                 NotificationCenter.default.post(name: .saveProjectAs, object: url)
+                self?.rebuildRecentProjectsMenu()
             }
         }
     }
@@ -169,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension Notification.Name {
     static let newProject = Notification.Name("com.magicdaw.newProject")
     static let openProject = Notification.Name("com.magicdaw.openProject")
+    static let openRecentProject = Notification.Name("com.magicdaw.openRecentProject")
     static let saveProject = Notification.Name("com.magicdaw.saveProject")
     static let saveProjectAs = Notification.Name("com.magicdaw.saveProjectAs")
     static let exportAudio = Notification.Name("com.magicdaw.exportAudio")

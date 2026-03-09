@@ -1,11 +1,156 @@
-import React, { useState } from 'react';
-import { Sparkles, Check, Send } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Sparkles, Check, Send, Loader2 } from 'lucide-react';
 import { GlassPanel } from './GlassPanel';
 import { aurora, mockChordSuggestions, mockProgression } from '../mockData';
+import { onSwiftMessage, sendToSwift, BridgeMessages } from '../bridge';
+import type { ChordSuggestion } from '../types/daw';
+
+// ── Types for Swift bridge events ───────────────────────────────────────────
+
+interface ChordDetectedPayload {
+  chord: string | null;
+  root?: string;
+  quality?: string;
+  qualityName?: string;
+  notes?: number[];
+}
+
+interface KeyDetectedPayload {
+  key: string | null;
+  tonic?: string;
+  mode?: string;
+  confidence: number;
+}
+
+interface ChordSuggestionsPayload {
+  suggestions: Array<{
+    chord: string;
+    probability: number;
+    quality: string;
+    explanation: string;
+    source: string;
+  }>;
+}
+
+interface AIChatResultPayload {
+  result?: string;
+  error?: string;
+  model?: string;
+  latencyMs?: number;
+  requestId?: string;
+}
+
+// ── Component ───────────────────────────────────────────────────────────────
 
 export const AIPanel: React.FC = () => {
   const [query, setQuery] = useState('');
-  const currentChord = 'Em9';
+  const [aiResponse, setAiResponse] = useState<string | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+
+  // Live state from Swift bridge (falls back to mock data when no bridge)
+  const [currentChord, setCurrentChord] = useState<string | null>(null);
+  const [chordQuality, setChordQuality] = useState<string>('');
+  const [detectedKey, setDetectedKey] = useState<{ key: string; confidence: number } | null>(null);
+  const [suggestions, setSuggestions] = useState<ChordSuggestion[]>(mockChordSuggestions);
+  const [progression, setProgression] = useState<string[]>(mockProgression);
+
+  const requestIdRef = useRef(0);
+
+  // Subscribe to Swift bridge events
+  useEffect(() => {
+    const unsubs: Array<() => void> = [];
+
+    // Chord detection from MIDIRouter -> ChordAnalyzer
+    unsubs.push(
+      onSwiftMessage(BridgeMessages.CHORD_DETECTED, (payload: unknown) => {
+        const p = payload as ChordDetectedPayload;
+        if (p.chord) {
+          setCurrentChord(p.chord);
+          setChordQuality(p.qualityName ?? '');
+          // Add to progression history (keep last 7)
+          setProgression((prev) => {
+            const next = [...prev, p.chord!];
+            return next.slice(-7);
+          });
+        } else {
+          // No chord (all notes released)
+          // Keep displaying last chord
+        }
+      }),
+    );
+
+    // Key detection from MIDIRouter -> RealtimeKeyDetector
+    unsubs.push(
+      onSwiftMessage(BridgeMessages.KEY_DETECTED, (payload: unknown) => {
+        const p = payload as KeyDetectedPayload;
+        if (p.key && p.confidence > 0) {
+          setDetectedKey({ key: p.key as string, confidence: p.confidence });
+        }
+      }),
+    );
+
+    // Chord suggestions from HarmonyService (AI + algorithmic fallback)
+    unsubs.push(
+      onSwiftMessage(BridgeMessages.CHORD_SUGGESTIONS, (payload: unknown) => {
+        const p = payload as ChordSuggestionsPayload;
+        if (p.suggestions && p.suggestions.length > 0) {
+          setSuggestions(
+            p.suggestions.map((s) => ({
+              chord: s.chord,
+              probability: s.probability,
+              quality: s.quality,
+            })),
+          );
+        }
+      }),
+    );
+
+    // AI chat response (natural language)
+    unsubs.push(
+      onSwiftMessage(BridgeMessages.AI_CHAT_RESULT, (payload: unknown) => {
+        const p = payload as AIChatResultPayload;
+        setAiLoading(false);
+        if (p.error) {
+          setAiResponse(`Error: ${p.error}`);
+        } else if (p.result) {
+          setAiResponse(p.result);
+        }
+      }),
+    );
+
+    return () => unsubs.forEach((fn) => fn());
+  }, []);
+
+  // Send natural language query to Ollama via AIRouter
+  const handleSendQuery = useCallback(() => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+
+    const id = String(++requestIdRef.current);
+    setAiLoading(true);
+    setAiResponse(null);
+
+    sendToSwift(BridgeMessages.AI_REQUEST, {
+      prompt: trimmed,
+      requestId: id,
+    });
+
+    setQuery('');
+  }, [query]);
+
+  // Handle Enter key in input
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        handleSendQuery();
+      }
+    },
+    [handleSendQuery],
+  );
+
+  // Display chord name or fallback
+  const displayChord = currentChord ?? 'Em9';
+  const displayQuality = chordQuality || 'minor ninth';
 
   return (
     <div className="flex gap-3 h-full">
@@ -23,22 +168,35 @@ export const AIPanel: React.FC = () => {
           }}
           className="text-glow-cyan"
         >
-          {currentChord}
+          {displayChord}
         </span>
-        <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>minor ninth</span>
+        <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>{displayQuality}</span>
+
+        {/* Detected key */}
+        {detectedKey && (
+          <span
+            style={{
+              fontSize: 7,
+              color: detectedKey.confidence > 0.5 ? aurora.teal : 'var(--text-muted)',
+              marginTop: 2,
+            }}
+          >
+            Key: {detectedKey.key} ({Math.round(detectedKey.confidence * 100)}%)
+          </span>
+        )}
 
         {/* Mini progression */}
         <div className="flex gap-1 mt-1 flex-wrap justify-center">
-          {mockProgression.map((chord, i) => (
+          {progression.map((chord, i) => (
             <span
               key={i}
               className="glass-panel px-1.5 py-0.5"
               style={{
                 fontSize: 7,
                 borderRadius: 8,
-                color: chord === currentChord ? aurora.cyan : 'var(--text-dim)',
-                borderColor: chord === currentChord ? 'rgba(103, 232, 249, 0.3)' : 'var(--border)',
-                background: chord === currentChord ? 'rgba(103, 232, 249, 0.1)' : 'var(--surface)',
+                color: chord === displayChord ? aurora.cyan : 'var(--text-dim)',
+                borderColor: chord === displayChord ? 'rgba(103, 232, 249, 0.3)' : 'var(--border)',
+                background: chord === displayChord ? 'rgba(103, 232, 249, 0.1)' : 'var(--surface)',
               }}
             >
               {chord}
@@ -63,7 +221,7 @@ export const AIPanel: React.FC = () => {
           Suggested Next
         </span>
         <div className="flex flex-wrap gap-1.5">
-          {mockChordSuggestions.map((suggestion, i) => (
+          {suggestions.map((suggestion, i) => (
             <GlassPanel
               key={i}
               className="flex items-center gap-2 px-2.5 py-1.5 cursor-pointer glass-panel-hover"
@@ -134,6 +292,7 @@ export const AIPanel: React.FC = () => {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
             placeholder="Suggest a jazz chord progression..."
             className="flex-1 rounded px-2 py-1"
             style={{
@@ -144,20 +303,43 @@ export const AIPanel: React.FC = () => {
               fontFamily: 'var(--font-mono)',
               outline: 'none',
             }}
+            disabled={aiLoading}
           />
           <button
             className="glass-button flex items-center justify-center"
             style={{ width: 28, height: 24, borderRadius: 4 }}
+            onClick={handleSendQuery}
+            disabled={aiLoading || !query.trim()}
           >
-            <Send size={10} />
+            {aiLoading ? <Loader2 size={10} className="animate-spin" /> : <Send size={10} />}
           </button>
         </div>
 
-        {/* Scale suggestions */}
+        {/* AI Response */}
+        {aiResponse && (
+          <div
+            className="glass-panel px-2 py-1.5"
+            style={{
+              fontSize: 8,
+              color: aiResponse.startsWith('Error:') ? aurora.pink : 'var(--text)',
+              borderRadius: 6,
+              maxHeight: 60,
+              overflowY: 'auto',
+              lineHeight: 1.4,
+            }}
+          >
+            {aiResponse}
+          </div>
+        )}
+
+        {/* Scale suggestions based on detected key */}
         <div className="flex flex-col gap-1">
           <span style={{ fontSize: 7, color: 'var(--text-muted)' }}>Scales</span>
           <div className="flex gap-1 flex-wrap">
-            {['E Dorian', 'G Major', 'E Blues', 'E Phrygian'].map((scale) => (
+            {(detectedKey
+              ? [detectedKey.key, `${detectedKey.key.split(' ')[0]} Pentatonic`, `${detectedKey.key.split(' ')[0]} Blues`]
+              : ['E Dorian', 'G Major', 'E Blues', 'E Phrygian']
+            ).map((scale) => (
               <span
                 key={scale}
                 className="glass-panel px-2 py-0.5 cursor-pointer glass-panel-hover"
