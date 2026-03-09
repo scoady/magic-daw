@@ -158,8 +158,14 @@ export function useCircleZoom(opts: {
 
   if (targetChanged) {
     // Snapshot the current interpolated position as the new "from"
+    // Use spring to compute where we currently are in the old transition
     const elapsed = frame - prev.changeFrame;
-    const oldProgress = Math.min(1, elapsed / (fps * 1.5));
+    const oldProgress = spring({
+      frame: elapsed,
+      fps,
+      config: { damping: 22, stiffness: 35, mass: 1.2 },
+      durationInFrames: Math.round(fps * 2.5),
+    });
     prevRef.current = {
       target: {
         x: prev.target.x + (zoomTarget.x - prev.target.x) * oldProgress,
@@ -174,12 +180,12 @@ export function useCircleZoom(opts: {
   const from = prevRef.current.target;
   const elapsed = frame - prevRef.current.changeFrame;
 
-  // Spring-driven progress
+  // Spring-driven progress — smooth, visible zoom (not instant)
   const progress = spring({
     frame: elapsed,
     fps,
-    config: { damping: 18, stiffness: 60, mass: 0.8 },
-    durationInFrames: Math.round(fps * 2),
+    config: { damping: 22, stiffness: 35, mass: 1.2 },
+    durationInFrames: Math.round(fps * 2.5),
   });
 
   const vx = interpolate(progress, [0, 1], [from.x, zoomTarget.x]);
