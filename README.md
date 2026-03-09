@@ -14,8 +14,27 @@ A native macOS DAW that combines professional audio production tools with AI-ass
 - **Multi-track timeline** with audio and MIDI recording
 - **AVAudioEngine-based** audio engine with low-latency playback
 - **CoreMIDI integration** for hardware controller support
+- **GM synth fallback** -- built-in General MIDI via macOS DLS soundbank
 - **Sample-based instrument creator** -- drag in samples, map across keys
 - **Mixer** with per-track faders, VU meters, pan, solo/mute
+
+### Circle of Fifths & Harmony Explorer
+- **Interactive circle of fifths** with major, minor, and diminished rings
+- **Live chord path tracking** -- play chords via MIDI, watch nodes appear on a horizontal path
+- **Debounced chord detection** -- handles fast chord playing without spurious releases
+- **Full chord quality display** -- Cmaj7, Am7, sus4, dim7, aug, etc.
+- **Voice leading visualization** -- see common tones and step motion between chords
+- **Branch tree navigation** -- explore harmonic neighbors from any chord node
+- **Famous progression matching** -- 18 progressions across genres
+- **Deterministic harmonic pathfinder** -- beam search algorithm finds optimal chord paths
+- **Harmonic Context Strip HUD** -- diatonic degree overlay with Roman numerals, colored by function
+
+### Interval Trainer (Educational)
+- **Horizontal interval strip** -- 13 positions from unison to octave with connection arcs
+- **Interactive piano keyboard** -- in-scale keys labeled with interval names
+- **8 scale modes** -- Major, Minor, Pentatonic, Blues, Dorian, Mixolydian, Chromatic, Perfect Fifths
+- **Explore mode** -- click to hear interval previews via GM synth
+- **Quiz mode** -- app prompts intervals, player responds via MIDI input, score tracking
 
 ### Music Theory Engine
 - **Real-time key detection** using the Krumhansl-Schmuckler algorithm
@@ -110,7 +129,8 @@ MagicDAW/                 Swift source
 
 MagicDAW-UI/              React + Remotion web UI
   src/
-    components/           Knob, Fader, VUMeter, TransportBar, GlassPanel
+    components/           Panel wrappers (CircleOfFifthsPanel, IntervalTrainerPanel, ...)
+    compositions/         Remotion compositions (CircleOfFifths1, IntervalTrainer, ...)
     bridge.ts             Swift <-> JS message passing
     types/                TypeScript type definitions
 ```

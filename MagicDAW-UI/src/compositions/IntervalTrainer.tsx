@@ -87,17 +87,17 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
   const names = useFlats ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP;
   const activeNoteSet = useMemo(() => new Set(activeNotes.map(n => n % 12)), [activeNotes]);
 
-  // ── Circular interval wheel ────────────────────────────────────────────
-  const wheelR = Math.min(W, H) * 0.28;
-  const wheelCX = CX;
-  const wheelCY = CY - 20;
+  // ── Horizontal interval strip ─────────────────────────────────────────
+  const stripW = Math.min(W * 0.82, 900);
+  const stripX = (W - stripW) / 2;
+  const stripY = CY * 0.52;  // upper-middle area
+  const nodeSpacing = stripW / 12;
 
-  // Generate the 13 interval positions around a circle (0 = top)
+  // Generate the 13 interval positions in a horizontal row (0=left, 12=right)
   const intervalPositions = useMemo(() => {
     return Array.from({ length: 13 }, (_, i) => {
-      const angle = (i / 12) * Math.PI * 2 - Math.PI / 2;
-      const x = wheelCX + Math.cos(angle) * wheelR;
-      const y = wheelCY + Math.sin(angle) * wheelR;
+      const x = stripX + i * nodeSpacing;
+      const y = stripY;
       const noteChroma = (rootIdx + i) % 12;
       const noteName = names[noteChroma];
       const info = INTERVAL_NAMES[i];
@@ -108,7 +108,7 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
       const isPlaying = activeNoteSet.has(noteChroma);
       return { i, x, y, noteName, info, inScale, isCorrect, isWrong, isActive, isPlaying };
     });
-  }, [wheelCX, wheelCY, wheelR, rootIdx, names, scaleIntervals, correctIntervals, wrongInterval, activeInterval, activeNoteSet]);
+  }, [stripX, stripY, nodeSpacing, rootIdx, names, scaleIntervals, correctIntervals, wrongInterval, activeInterval, activeNoteSet]);
 
   // ── Connecting lines from root to each interval ────────────────────────
   const rootPos = intervalPositions[0];
@@ -215,24 +215,38 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
           {score.correct}/{score.total}
         </text>
 
-        {/* ── Interval Wheel ─────────────────────────────────────── */}
+        {/* ── Horizontal Interval Strip ────────────────────────── */}
 
-        {/* Faint circle track */}
-        <circle
-          cx={wheelCX} cy={wheelCY} r={wheelR}
-          fill="none" stroke={palette.glassBorder} strokeWidth={1}
-          opacity={0.3}
+        {/* Faint baseline track */}
+        <line
+          x1={stripX} y1={stripY}
+          x2={stripX + stripW} y2={stripY}
+          stroke={palette.glassBorder} strokeWidth={1}
+          opacity={0.2}
         />
+        {/* Semitone tick marks */}
+        {Array.from({ length: 13 }, (_, i) => (
+          <line
+            key={`tick-${i}`}
+            x1={stripX + i * nodeSpacing} y1={stripY + 20}
+            x2={stripX + i * nodeSpacing} y2={stripY + 26}
+            stroke={palette.glassBorder} strokeWidth={0.5}
+            opacity={0.2}
+          />
+        ))}
 
-        {/* Connection lines from root to each scale interval */}
+        {/* Connection arcs from root to each scale interval */}
         {intervalPositions.filter(p => p.i > 0 && p.inScale).map((p) => {
           const isActive = p.isActive || p.isPlaying;
           const col = p.isCorrect ? palette.teal : p.info.color;
+          // Arc height proportional to interval distance
+          const arcH = 15 + p.i * 4;
+          const midX = (rootPos.x + p.x) / 2;
           return (
-            <line
-              key={`line-${p.i}`}
-              x1={rootPos.x} y1={rootPos.y}
-              x2={p.x} y2={p.y}
+            <path
+              key={`arc-${p.i}`}
+              d={`M ${rootPos.x} ${rootPos.y + 22} Q ${midX} ${rootPos.y + 22 + arcH} ${p.x} ${p.y + 22}`}
+              fill="none"
               stroke={col}
               strokeWidth={isActive ? 2 : 0.8}
               opacity={isActive ? 0.5 : p.isCorrect ? 0.25 : 0.1}
@@ -302,15 +316,17 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
           );
         })}
 
-        {/* Center label */}
-        <text
-          x={wheelCX} y={wheelCY + breathe}
-          textAnchor="middle" dominantBaseline="central"
-          fill={palette.textDim} fontSize={10}
-          fontFamily="monospace" opacity={0.3}
-        >
-          intervals
-        </text>
+        {/* Semitone count labels under ticks */}
+        {Array.from({ length: 13 }, (_, i) => (
+          <text
+            key={`st-${i}`}
+            x={stripX + i * nodeSpacing} y={stripY + 36}
+            textAnchor="middle" fill={palette.textDim}
+            fontSize={6} fontFamily="monospace" opacity={0.2}
+          >
+            {i}
+          </text>
+        ))}
 
         {/* ── Piano Keyboard ─────────────────────────────────────── */}
         <g>
@@ -345,19 +361,19 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
                   stroke={k.inScale ? `${col}66` : 'rgba(80,90,110,0.15)'}
                   strokeWidth={k.inScale ? 0.8 : 0.3}
                 />
-                <text x={k.x + k.w / 2} y={pianoY + k.h - 8}
+                <text x={k.x + k.w / 2} y={pianoY + k.h - 6}
                   textAnchor="middle"
-                  fill={k.inScale ? 'rgba(15,25,40,0.7)' : 'rgba(100,116,139,0.15)'}
-                  fontSize={10} fontFamily="monospace" fontWeight={600}
+                  fill={k.inScale ? 'rgba(10,18,30,0.95)' : 'rgba(100,116,139,0.2)'}
+                  fontSize={14} fontFamily="monospace" fontWeight={800}
                 >
                   {k.name}
                 </text>
                 {k.inScale && (
-                  <text x={k.x + k.w / 2} y={pianoY + k.h - 22}
+                  <text x={k.x + k.w / 2} y={pianoY + k.h - 24}
                     textAnchor="middle"
-                    fill={col} fontSize={7}
+                    fill={col} fontSize={9}
                     fontFamily="monospace" fontWeight={700}
-                    opacity={0.5}
+                    opacity={0.6}
                   >
                     {INTERVAL_NAMES[k.interval]?.short}
                   </text>
@@ -384,8 +400,8 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
                 {k.inScale && (
                   <text x={k.x + k.w / 2} y={pianoY + k.h - 5}
                     textAnchor="middle"
-                    fill="rgba(220,235,255,0.85)" fontSize={7}
-                    fontFamily="monospace" fontWeight={700}
+                    fill="rgba(230,240,255,0.95)" fontSize={10}
+                    fontFamily="monospace" fontWeight={800}
                   >
                     {k.name}
                   </text>
