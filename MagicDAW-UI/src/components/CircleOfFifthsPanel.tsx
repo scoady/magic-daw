@@ -82,10 +82,10 @@ export const CircleOfFifthsPanel: React.FC = () => {
   const [activeComposition, setActiveComposition] = useState(0);
   const [activeKey, setActiveKey] = useState('C');
   const [activeMode, setActiveMode] = useState<'major' | 'minor'>('major');
-  const [detectedChord, setDetectedChord] = useState<string | null>('Am7');
+  const [detectedChord, setDetectedChord] = useState<string | null>(null);
   // No throttle — Remotion Player already renders at 30fps max
   const [activeNotes, setActiveNotes] = useState<number[]>([]);
-  const [chordProgression, setChordProgression] = useState<string[]>(['C', 'Am', 'F', 'G']);
+  const [chordProgression, setChordProgression] = useState<string[]>([]);
   const [pathfinderFrom] = useState<string | null>(null);
   const [pathfinderTo] = useState<string | null>(null);
   const [pathfinderPaths] = useState<string[][]>([]);
@@ -115,6 +115,8 @@ export const CircleOfFifthsPanel: React.FC = () => {
             const next = [...prev, p.chord!];
             return next.slice(-16);
           });
+        } else {
+          setDetectedChord(null);
         }
       }),
     );
