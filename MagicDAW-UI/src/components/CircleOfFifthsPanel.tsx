@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Player } from '@remotion/player';
 import { CircleOfFifths1 } from '../compositions/CircleOfFifths1';
 import { CircleOfFifths2 } from '../compositions/CircleOfFifths2';
@@ -7,22 +7,6 @@ import { CircleOfFifths4 } from '../compositions/CircleOfFifths4';
 import { CircleOfFifths5 } from '../compositions/CircleOfFifths5';
 import type { CircleOfFifthsProps } from '../compositions/CircleOfFifths1';
 import { onSwiftMessage, onMidiStateChange, BridgeMessages } from '../bridge';
-
-// ── Music theory helpers ──────────────────────────────────────────────────
-
-const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const FLAT_TO_SHARP: Record<string, string> = {
-  Db: 'C#', Eb: 'D#', Fb: 'E', Gb: 'F#', Ab: 'G#', Bb: 'A#', Cb: 'B',
-};
-
-function midiToNoteName(midi: number): string {
-  return NOTE_NAMES[midi % 12];
-}
-
-function noteNameToKey(name: string): string {
-  const sharp = FLAT_TO_SHARP[name] ?? name;
-  return sharp;
-}
 
 // ── Composition selector ──────────────────────────────────────────────────
 
@@ -51,25 +35,66 @@ interface KeyDetectedPayload {
   confidence: number;
 }
 
+// ── Throttle helper ───────────────────────────────────────────────────────
+
+/** Leading-edge throttle: fires immediately on first call, then coalesces for intervalMs */
+function useThrottledState<T>(initial: T, intervalMs: number): [T, (v: T) => void] {
+  const [state, setState] = useState(initial);
+  const pendingRef = useRef(initial);
+  const lastFireRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const setThrottled = useCallback((value: T) => {
+    pendingRef.current = value;
+    const now = performance.now();
+    const elapsed = now - lastFireRef.current;
+
+    if (elapsed >= intervalMs) {
+      // Leading edge — fire immediately
+      lastFireRef.current = now;
+      setState(value);
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    } else if (!timerRef.current) {
+      // Schedule trailing edge for remaining time
+      timerRef.current = setTimeout(() => {
+        lastFireRef.current = performance.now();
+        setState(pendingRef.current);
+        timerRef.current = null;
+      }, intervalMs - elapsed);
+    }
+  }, [intervalMs]);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  return [state, setThrottled];
+}
+
 // ── Component ──────────────────────────────────────────────────────────────
 
 export const CircleOfFifthsPanel: React.FC = () => {
-  const [activeComposition, setActiveComposition] = useState(0); // index into COMPOSITIONS
+  const [activeComposition, setActiveComposition] = useState(0);
   const [activeKey, setActiveKey] = useState('C');
   const [activeMode, setActiveMode] = useState<'major' | 'minor'>('major');
   const [detectedChord, setDetectedChord] = useState<string | null>('Am7');
+  // No throttle — Remotion Player already renders at 30fps max
   const [activeNotes, setActiveNotes] = useState<number[]>([]);
   const [chordProgression, setChordProgression] = useState<string[]>(['C', 'Am', 'F', 'G']);
-  const [pathfinderFrom, setPathfinderFrom] = useState<string | null>(null);
-  const [pathfinderTo, setPathfinderTo] = useState<string | null>(null);
-  const [pathfinderPaths, setPathfinderPaths] = useState<string[][]>([]);
-  const [highlightedDegrees, setHighlightedDegrees] = useState<number[]>([]);
+  const [pathfinderFrom] = useState<string | null>(null);
+  const [pathfinderTo] = useState<string | null>(null);
+  const [pathfinderPaths] = useState<string[][]>([]);
+  const [highlightedDegrees] = useState<number[]>([]);
 
   // Subscribe to bridge events
   useEffect(() => {
     const unsubs: Array<() => void> = [];
 
-    // Key detection
     unsubs.push(
       onSwiftMessage(BridgeMessages.KEY_DETECTED, (payload: unknown) => {
         const p = payload as KeyDetectedPayload;
@@ -81,7 +106,6 @@ export const CircleOfFifthsPanel: React.FC = () => {
       }),
     );
 
-    // Chord detection
     unsubs.push(
       onSwiftMessage(BridgeMessages.CHORD_DETECTED, (payload: unknown) => {
         const p = payload as ChordDetectedPayload;
@@ -98,7 +122,7 @@ export const CircleOfFifthsPanel: React.FC = () => {
     return () => unsubs.forEach((fn) => fn());
   }, []);
 
-  // Subscribe to live MIDI notes
+  // Subscribe to live MIDI notes — throttled
   useEffect(() => {
     const unsub = onMidiStateChange((notes) => {
       setActiveNotes(notes.map((n) => n.note));
@@ -106,10 +130,8 @@ export const CircleOfFifthsPanel: React.FC = () => {
     return unsub;
   }, []);
 
-  const comp = COMPOSITIONS[activeComposition];
-  const CompositionComponent = comp.component;
-
-  const inputProps: CircleOfFifthsProps = {
+  // Memoize inputProps to avoid new object reference every render
+  const inputProps: CircleOfFifthsProps = useMemo(() => ({
     activeKey,
     activeMode,
     detectedChord,
@@ -119,7 +141,10 @@ export const CircleOfFifthsPanel: React.FC = () => {
     pathfinderTo,
     pathfinderPaths,
     highlightedDegrees,
-  };
+  }), [activeKey, activeMode, detectedChord, activeNotes, chordProgression, pathfinderFrom, pathfinderTo, pathfinderPaths, highlightedDegrees]);
+
+  const comp = COMPOSITIONS[activeComposition];
+  const CompositionComponent = comp.component;
 
   return (
     <div
@@ -131,7 +156,6 @@ export const CircleOfFifthsPanel: React.FC = () => {
         position: 'relative',
       }}
     >
-      {/* Remotion Player — full viewport */}
       <Player
         component={CompositionComponent}
         inputProps={inputProps}
@@ -148,7 +172,7 @@ export const CircleOfFifthsPanel: React.FC = () => {
         }}
       />
 
-      {/* Composition selector (top-right overlay) */}
+      {/* Composition selector */}
       <div
         style={{
           position: 'absolute',
@@ -177,8 +201,7 @@ export const CircleOfFifthsPanel: React.FC = () => {
                   : 'rgba(120, 200, 220, 0.12)'
               }`,
               borderRadius: 6,
-              color:
-                i === activeComposition ? '#67e8f9' : '#94a3b8',
+              color: i === activeComposition ? '#67e8f9' : '#94a3b8',
               cursor: 'pointer',
               transition: 'all 0.2s ease',
               backdropFilter: 'blur(8px)',

@@ -6,6 +6,7 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
+import { DiatonicChordsPanel } from './MiniKeyboard';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -106,6 +107,11 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
     ? MINORS[MAJORS.indexOf(activeKey)] ?? activeKey
     : activeKey;
   const activeIdx = keyIndex(activeFullKey);
+
+  const playedIndices = useMemo(
+    () => new Set(activeNotes.map((n) => ((n % 12) * 7) % 12)),
+    [activeNotes],
+  );
 
   // ── Gravity well contour lines ───────────────────────────────────────
   const contourLines = useMemo(() => {
@@ -310,10 +316,11 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
       (ring === 'minor' && key === activeFullKey && activeMode === 'minor');
     const isDetected = detectedChord !== null && key === detectedChord;
     const isHighlighted = highlightedDegrees.includes(index);
+    const isPlayed = ring === 'major' && playedIndices.has(index);
 
     // Harmonic mass — size
     const baseSize = ring === 'major' ? 22 : ring === 'minor' ? 17 : 12;
-    const massScale = isActive ? 1.6 : isDetected ? 1.3 : interpolate(dist, [0, 6], [1.15, 0.85]);
+    const massScale = isActive ? 1.6 : isDetected ? 1.3 : isPlayed ? 1.25 : interpolate(dist, [0, 6], [1.15, 0.85]);
     const nodeR = baseSize * massScale;
 
     // Color
@@ -332,6 +339,11 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
       fillColor = '#0c1629';
       textColor = palette.primary;
       glowOp = 0.25;
+    } else if (isPlayed) {
+      strokeColor = palette.primary;
+      fillColor = '#0c1629';
+      textColor = palette.secondary;
+      glowOp = 0.2;
     } else if (isHighlighted) {
       strokeColor = palette.secondary;
       textColor = palette.secondary;
@@ -823,6 +835,22 @@ export const CircleOfFifths3: React.FC<CircleOfFifthsProps> = ({
         {dataPanel}
         {progressionTimeline}
         {timestamp}
+
+        {/* Diatonic chords with mini keyboards */}
+        <DiatonicChordsPanel
+          x={1660}
+          y={120}
+          activeKey={activeKey}
+          activeMode={activeMode}
+          accentColor="#60a5fa"
+          secondaryColor="#93c5fd"
+          textColor="#9ca3af"
+          textDimColor="#4b5563"
+          kbWidth={130}
+          kbHeight={38}
+          spacing={68}
+          opacity={0.75}
+        />
       </svg>
     </AbsoluteFill>
   );

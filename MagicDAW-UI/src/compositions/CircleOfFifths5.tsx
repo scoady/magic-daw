@@ -6,6 +6,7 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
+import { DiatonicChordsPanel } from './MiniKeyboard';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -111,6 +112,11 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
   // MIDI notes → fifths indices currently sounding
   const activeFifthsIdxs = useMemo(
     () => Array.from(new Set(activeNotes.map(midiToFifthsIndex))),
+    [activeNotes],
+  );
+
+  const playedIndices = useMemo(
+    () => new Set(activeNotes.map(midiToFifthsIndex)),
     [activeNotes],
   );
 
@@ -305,7 +311,6 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
                 stroke={palette.accent}
                 strokeWidth={1}
                 opacity={0.5 * beamProgress}
-                filter="url(#gw-glow-soft)"
               />
             );
           })}
@@ -326,15 +331,24 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
           const ex = pa.x + (pb.x - pa.x) * segProgress;
           const ey = pa.y + (pb.y - pa.y) * segProgress;
           return (
-            <line
-              key={`pf-${pathIdx}-${segIdx}`}
-              x1={pa.x} y1={pa.y}
-              x2={ex} y2={ey}
-              stroke={palette.light}
-              strokeWidth={2}
-              opacity={segProgress * 0.95}
-              filter="url(#gw-glow-soft)"
-            />
+            <React.Fragment key={`pf-${pathIdx}-${segIdx}`}>
+              {/* Cheap fake glow: thicker line at lower opacity behind */}
+              <line
+                x1={pa.x} y1={pa.y}
+                x2={ex} y2={ey}
+                stroke={palette.accent}
+                strokeWidth={6}
+                opacity={segProgress * 0.25}
+                strokeLinecap="round"
+              />
+              <line
+                x1={pa.x} y1={pa.y}
+                x2={ex} y2={ey}
+                stroke={palette.light}
+                strokeWidth={2}
+                opacity={segProgress * 0.95}
+              />
+            </React.Fragment>
           );
         })}
 
@@ -342,23 +356,23 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
         {MAJORS.map((label, i) => {
           const p = ringPos(i, OUTER_R);
           const active = isActive('major', i);
-          const op = nodeOpacity('major', i);
-          const r = active ? 6 : 3;
+          const played = playedIndices.has(i) && !active;
+          const op = played ? 0.85 : nodeOpacity('major', i);
+          const r = active ? 6 : played ? 5 : 3;
           return (
             <g key={`maj-${i}`} opacity={op}>
               <circle
                 cx={p.x} cy={p.y} r={r}
-                fill={active ? palette.accent : palette.light}
-                filter={active ? 'url(#gw-glow-massive)' : undefined}
+                fill={active ? palette.accent : played ? palette.accentDim : palette.light}
+                filter={active ? 'url(#gw-glow-massive)' : played ? 'url(#gw-glow-soft)' : undefined}
               />
               <text
-                x={p.x} y={p.y - (active ? 18 : 12)}
+                x={p.x} y={p.y - (active ? 18 : played ? 14 : 12)}
                 textAnchor="middle"
-                fill={active ? palette.accent : palette.light}
-                fontSize={active ? 22 : 12}
+                fill={active ? palette.accent : played ? palette.accentDim : palette.light}
+                fontSize={active ? 22 : played ? 14 : 12}
                 fontFamily="monospace"
-                fontWeight={active ? 700 : 400}
-                filter={active ? 'url(#gw-glow-soft)' : undefined}
+                fontWeight={active ? 700 : played ? 600 : 400}
               >
                 {label}
               </text>
@@ -377,7 +391,6 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
               <circle
                 cx={p.x} cy={p.y} r={r}
                 fill={active ? palette.accent : palette.light}
-                filter={active ? 'url(#gw-glow-massive)' : undefined}
               />
               <text
                 x={p.x} y={p.y - (active ? 16 : 10)}
@@ -386,7 +399,6 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
                 fontSize={active ? 18 : 10}
                 fontFamily="monospace"
                 fontWeight={active ? 700 : 400}
-                filter={active ? 'url(#gw-glow-soft)' : undefined}
               >
                 {label}
               </text>
@@ -398,15 +410,17 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
         {DIMINISHED.map((label, i) => {
           const p = ringPos(i, INNER_R);
           const op = nodeOpacity('dim', i);
+          const r = 2;
           return (
             <g key={`dim-${i}`} opacity={op}>
-              <circle cx={p.x} cy={p.y} r={2} fill={palette.light} />
+              <circle cx={p.x} cy={p.y} r={r} fill={palette.light} />
               <text
                 x={p.x} y={p.y - 8}
                 textAnchor="middle"
                 fill={palette.light}
                 fontSize={8}
                 fontFamily="monospace"
+                fontWeight={400}
               >
                 {label}
               </text>
@@ -432,7 +446,6 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
           fontSize={48}
           fontFamily="monospace"
           fontWeight={700}
-          filter="url(#gw-glow-soft)"
         >
           {activeKey}
         </text>
@@ -516,10 +529,25 @@ export const CircleOfFifths5: React.FC<CircleOfFifthsProps> = ({
               r={3}
               fill={palette.accentDim}
               opacity={0.7}
-              filter="url(#gw-glow-soft)"
             />
           );
         })}
+
+        {/* Diatonic chords with mini keyboards */}
+        <DiatonicChordsPanel
+          x={1660}
+          y={120}
+          activeKey={activeKey}
+          activeMode={activeMode}
+          accentColor="#bfdbfe"
+          secondaryColor="rgba(255,255,255,0.5)"
+          textColor="rgba(255,255,255,0.7)"
+          textDimColor="rgba(255,255,255,0.3)"
+          kbWidth={130}
+          kbHeight={38}
+          spacing={68}
+          opacity={0.6}
+        />
       </svg>
     </AbsoluteFill>
   );

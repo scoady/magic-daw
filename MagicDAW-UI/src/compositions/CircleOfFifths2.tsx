@@ -6,6 +6,7 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
+import { DiatonicChordsPanel } from './MiniKeyboard';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -126,6 +127,11 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
     MINOR_KEYS,
   );
   const activeRingIdx = activeMode === 'major' ? activeMajorIdx : activeMinorIdx;
+
+  const playedIndices = useMemo(
+    () => new Set(activeNotes.map((n) => ((n % 12) * 7) % 12)),
+    [activeNotes],
+  );
 
   // ── Stars background ──────────────────────────────────────────────────
 
@@ -557,8 +563,7 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
           cy={y}
           r={3 - t * 0.3}
           fill={aurora.cyan}
-          opacity={alpha * 0.8}
-          filter="url(#cof2-glow)"
+          opacity={alpha * 0.9}
         />,
       );
     }
@@ -598,31 +603,43 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
     isHighlighted: boolean,
     ringColor: string,
     key: string,
+    isPlayed: boolean = false,
   ) => {
-    const glowR = radius + 8 + (isActive ? breathe * 6 : 0);
-    const borderOpacity = isActive ? 0.9 : isHighlighted ? 0.6 : 0.25;
+    const effectiveRadius = isPlayed && !isActive ? radius + 3 : radius;
+    const glowR = effectiveRadius + 8 + (isActive ? breathe * 6 : 0);
+    const borderOpacity = isActive ? 0.9 : isPlayed ? 0.7 : isHighlighted ? 0.6 : 0.25;
     const labelSize = radius > 24 ? 13 : radius > 20 ? 11 : 9;
 
     return (
       <g key={key}>
-        {/* Outer glow for active/highlighted */}
-        {(isActive || isHighlighted) && (
-          <circle
-            cx={x}
-            cy={y}
-            r={glowR}
-            fill="none"
-            stroke={isActive ? aurora.cyan : ringColor}
-            strokeWidth={isActive ? 2 : 1}
-            opacity={isActive ? 0.6 + breathe * 0.3 : 0.3}
-            filter="url(#cof2-glow)"
-          />
+        {/* Outer glow for active/highlighted/played — cheap double-ring instead of blur */}
+        {(isActive || isHighlighted || isPlayed) && (
+          <>
+            <circle
+              cx={x}
+              cy={y}
+              r={glowR + 6}
+              fill="none"
+              stroke={isActive ? aurora.cyan : isPlayed ? aurora.teal : ringColor}
+              strokeWidth={isActive ? 1 : 0.5}
+              opacity={isActive ? 0.2 + breathe * 0.1 : isPlayed ? 0.15 : 0.1}
+            />
+            <circle
+              cx={x}
+              cy={y}
+              r={glowR}
+              fill="none"
+              stroke={isActive ? aurora.cyan : isPlayed ? aurora.teal : ringColor}
+              strokeWidth={isActive ? 2 : isPlayed ? 1.5 : 1}
+              opacity={isActive ? 0.7 + breathe * 0.3 : isPlayed ? 0.5 : 0.4}
+            />
+          </>
         )}
         {/* Glass circle */}
         <circle
           cx={x}
           cy={y}
-          r={radius}
+          r={effectiveRadius}
           fill="url(#cof2-glass)"
           stroke={isActive ? aurora.cyan : ringColor}
           strokeWidth={isActive ? 2 : 1}
@@ -641,11 +658,11 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
           y={y + 1}
           textAnchor="middle"
           dominantBaseline="central"
-          fill={isActive ? '#ffffff' : aurora.text}
+          fill={isActive ? '#ffffff' : isPlayed ? aurora.teal : aurora.text}
           fontSize={labelSize}
           fontFamily="Georgia, 'Times New Roman', serif"
-          fontWeight={isActive ? 700 : 400}
-          opacity={isActive ? 1 : 0.85}
+          fontWeight={isActive ? 700 : isPlayed ? 600 : 400}
+          opacity={isActive ? 1 : isPlayed ? 0.9 : 0.85}
         >
           {label}
         </text>
@@ -664,6 +681,7 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
         isActive, isHighlighted,
         aurora.gold,
         `outer-${i}`,
+        playedIndices.has(i),
       );
     });
 
@@ -678,6 +696,7 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
         isActive, isHighlighted,
         aurora.purple,
         `middle-${i}`,
+        false,
       );
     });
 
@@ -691,6 +710,7 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
         isActive, isHighlighted,
         aurora.pink,
         `inner-${i}`,
+        false,
       );
     });
 
@@ -747,7 +767,6 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
           fontSize={22}
           fontFamily="Georgia, 'Times New Roman', serif"
           fontWeight={700}
-          filter="url(#cof2-glow)"
         >
           {detectedChord}
         </text>
@@ -831,15 +850,23 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
           const pr = 2 + Math.sin(frame * 0.1 + i) * 1;
 
           return (
-            <circle
-              key={`note-p-${i}`}
-              cx={px}
-              cy={py}
-              r={pr}
-              fill={aurora.cyan}
-              opacity={0.6}
-              filter="url(#cof2-glow)"
-            />
+            <g key={`note-p-${i}`}>
+              {/* Cheap fake glow: larger low-opacity circle behind */}
+              <circle
+                cx={px}
+                cy={py}
+                r={pr + 4}
+                fill={aurora.cyan}
+                opacity={0.15}
+              />
+              <circle
+                cx={px}
+                cy={py}
+                r={pr}
+                fill={aurora.cyan}
+                opacity={0.75}
+              />
+            </g>
           );
         })}
       </g>
@@ -870,10 +897,9 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
         x2={ex - Math.cos(angle) * 30}
         y2={ey - Math.sin(angle) * 30}
         stroke={aurora.cyan}
-        strokeWidth={1.5}
-        opacity={alpha * 0.7}
+        strokeWidth={2}
+        opacity={alpha * 0.85}
         strokeLinecap="round"
-        filter="url(#cof2-glow)"
       />
     );
   };
@@ -907,8 +933,7 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
           rx={80 + breathe * 20}
           ry={60 + breathe * 15}
           fill={aurora.purple}
-          opacity={0.06}
-          filter="url(#cof2-glow-soft)"
+          opacity={0.1}
         />
       </g>
     );
@@ -975,6 +1000,22 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
 
         {/* Progression trail */}
         {renderProgression()}
+
+        {/* ── Diatonic chords with mini keyboards ────────────────────── */}
+        <DiatonicChordsPanel
+          x={1660}
+          y={120}
+          activeKey={activeKey}
+          activeMode={activeMode}
+          accentColor="#67e8f9"
+          secondaryColor="#a78bfa"
+          textColor="#e2e8f0"
+          textDimColor="#94a3b8"
+          kbWidth={130}
+          kbHeight={38}
+          spacing={68}
+          opacity={0.85}
+        />
       </svg>
     </AbsoluteFill>
   );

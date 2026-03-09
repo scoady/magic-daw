@@ -51,13 +51,10 @@ class MIDIRouter {
     }
 
     func setup() {
-        midiManager.onNoteOn = { [weak self] note, velocity, channel in
-            self?.handleNoteOn(note: note, velocity: velocity, channel: channel)
-        }
-
-        midiManager.onNoteOff = { [weak self] note, channel in
-            self?.handleNoteOff(note: note, channel: channel)
-        }
+        // NOTE: Do NOT set midiManager.onNoteOn/Off here.
+        // WebViewBridge.setupCallbacks() owns those callbacks and calls
+        // handleExternalNoteOn/Off to forward events to this router.
+        // This avoids the bridge's raw MIDI forwarding to JS being overwritten.
 
         midiManager.onControlChange = { [weak self] cc, value, channel in
             self?.handleControlChange(cc: cc, value: value, channel: channel)
@@ -68,12 +65,25 @@ class MIDIRouter {
         }
     }
 
+    // MARK: - External entry points (called by WebViewBridge)
+
+    /// Called by WebViewBridge when a MIDI note-on arrives, after it has already
+    /// forwarded the raw event to JS for instant visual feedback.
+    func handleExternalNoteOn(note: UInt8, velocity: UInt8, channel: UInt8) {
+        handleNoteOn(note: note, velocity: velocity, channel: channel)
+    }
+
+    /// Called by WebViewBridge when a MIDI note-off arrives.
+    func handleExternalNoteOff(note: UInt8, channel: UInt8) {
+        handleNoteOff(note: note, channel: channel)
+    }
+
     // MARK: - Note Handling
 
     private func handleNoteOn(note: UInt8, velocity: UInt8, channel: UInt8) {
         activeNotes.insert(note)
         noteOnTimes[note] = ProcessInfo.processInfo.systemUptime
-        sampler?.noteOn(note: note, velocity: velocity)
+        // Note: sampler is played by WebViewBridge.setupCallbacks(), not here
 
         // Feed the real-time key detector
         keyDetector.update(
@@ -100,7 +110,7 @@ class MIDIRouter {
         }
 
         activeNotes.remove(note)
-        sampler?.noteOff(note: note)
+        // Note: sampler noteOff is handled by WebViewBridge.setupCallbacks()
         onNotesChanged?(activeNotes)
         scheduleChordDetection()
     }

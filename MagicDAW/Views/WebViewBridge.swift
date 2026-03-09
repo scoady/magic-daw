@@ -84,8 +84,8 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
 
     override init() {
         super.init()
-        setupCallbacks()
         setupMIDIRouter()
+        setupCallbacks()
         setupTransportCallbacks()
         startMeterTimer()
     }
@@ -93,15 +93,15 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     // MARK: - Setup
 
     private func setupCallbacks() {
-        // Forward MIDI note-on events to JavaScript via bridge.ts pub/sub
-        // Also play through the sampler if samples are loaded
-        // Also feed into MIDIRecorder when recording
+        // Forward MIDI note-on events to JavaScript AND the MIDIRouter for analysis.
+        // This replaces the router's onNoteOn so we must call through to it.
         midiManager.onNoteOn = { [weak self] note, velocity, channel in
             guard let self else { return }
+            // 1. Play through sampler
             if self.sampler.hasSamples {
                 self.sampler.noteOn(note: note, velocity: velocity)
             }
-            // Record if armed track and transport is recording
+            // 2. Record if armed
             if self.audioEngine.isRecording {
                 self.midiRecorder.noteOn(
                     note: note,
@@ -110,20 +110,22 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
                     currentBeat: self.audioEngine.currentBeat
                 )
             }
+            // 3. Forward raw MIDI to JS immediately (for Circle of Fifths node highlighting)
             self.sendEvent("midi_note_on", data: [
                 "note": note,
                 "velocity": velocity,
                 "channel": channel,
             ])
+            // 4. Feed into MIDIRouter for chord/key analysis (runs debounced)
+            self.midiRouter.handleExternalNoteOn(note: note, velocity: velocity, channel: channel)
         }
 
-        // Forward MIDI note-off events to JavaScript via bridge.ts pub/sub
+        // Forward MIDI note-off events to JavaScript AND the MIDIRouter.
         midiManager.onNoteOff = { [weak self] note, channel in
             guard let self else { return }
             if self.sampler.hasSamples {
                 self.sampler.noteOff(note: note)
             }
-            // Record if armed track and transport is recording
             if self.audioEngine.isRecording {
                 self.midiRecorder.noteOff(
                     note: note,
@@ -135,6 +137,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
                 "note": note,
                 "channel": channel,
             ])
+            self.midiRouter.handleExternalNoteOff(note: note, channel: channel)
         }
 
         // Forward MIDI CC events to JavaScript via bridge.ts pub/sub

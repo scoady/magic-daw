@@ -6,6 +6,7 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
+import { DiatonicChordsPanel } from './MiniKeyboard';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -176,6 +177,11 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
   const { fps } = useVideoConfig();
 
   const activeIdx = useMemo(() => keyIndexOnCircle(activeKey), [activeKey]);
+
+  const playedIndices = useMemo(
+    () => new Set(activeNotes.map((n) => ((n % 12) * 7) % 12)),
+    [activeNotes],
+  );
 
   const bgStars = useMemo(() => generateStars(220), []);
   const accretionDisk = useMemo(() => generateAccretionDisk(28), []);
@@ -394,16 +400,26 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
 
           return (
             <g key={`pf-${ai}`}>
-              {/* Glow under path */}
+              {/* Glow under path — wide soft stroke instead of blur filter */}
               <path
                 d={pathD}
                 fill="none"
                 stroke={arc.color}
-                strokeWidth={6}
-                opacity={0.15}
-                filter="url(#cof-glow-md)"
+                strokeWidth={14}
+                opacity={0.08}
                 strokeDasharray={`${dashLen} ${gapLen}`}
                 strokeDashoffset={-frame * 1.5}
+                strokeLinecap="round"
+              />
+              <path
+                d={pathD}
+                fill="none"
+                stroke={arc.color}
+                strokeWidth={8}
+                opacity={0.12}
+                strokeDasharray={`${dashLen} ${gapLen}`}
+                strokeDashoffset={-frame * 1.5}
+                strokeLinecap="round"
               />
               {/* Path itself */}
               <path
@@ -426,13 +442,19 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
                 const px = sx + (ex - sx) * segT;
                 const py = sy + (ey - sy) * segT;
                 return (
-                  <circle
-                    key={`pf-p-${ai}-${pi}`}
-                    cx={px} cy={py} r={3}
-                    fill={arc.color}
-                    opacity={0.9}
-                    filter="url(#cof-glow-sm)"
-                  />
+                  <React.Fragment key={`pf-p-${ai}-${pi}`}>
+                    {/* Fake glow: larger low-opacity circle behind */}
+                    <circle
+                      cx={px} cy={py} r={8}
+                      fill={arc.color}
+                      opacity={0.2}
+                    />
+                    <circle
+                      cx={px} cy={py} r={4}
+                      fill={arc.color}
+                      opacity={0.95}
+                    />
+                  </React.Fragment>
                 );
               })}
             </g>
@@ -511,14 +533,20 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
                 strokeWidth={0.5}
                 opacity={glowOpacity * 0.4}
               />
-              {/* Glow */}
+              {/* Glow — layered opacity circles instead of blur filter */}
               {isRelativeMinor && (
-                <circle
-                  cx={x} cy={y} r={nodeR + 10}
-                  fill={palette.purple}
-                  opacity={0.12 + 0.06 * Math.sin(frame * 0.05)}
-                  filter="url(#cof-glow-md)"
-                />
+                <>
+                  <circle
+                    cx={x} cy={y} r={nodeR + 22}
+                    fill={palette.purple}
+                    opacity={0.05 + 0.02 * Math.sin(frame * 0.05)}
+                  />
+                  <circle
+                    cx={x} cy={y} r={nodeR + 14}
+                    fill={palette.purple}
+                    opacity={0.1 + 0.04 * Math.sin(frame * 0.05)}
+                  />
+                </>
               )}
               {/* Node body */}
               <circle
@@ -555,6 +583,7 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           const angle = nodeAngle(i);
           const [bx, by] = polarToXY(CX, CY, OUTER_R, angle);
           const isActive = i === activeIdx;
+          const isPlayed = playedIndices.has(i);
           const dist = activeIdx >= 0 ? fifthsDistance(i, activeIdx) : 6;
 
           // Gravity offset
@@ -565,13 +594,21 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
 
           const nodeR = isActive
             ? interpolate(pulseSpring, [0, 1], [24, 28])
-            : interpolate(dist, [0, 6], [24, 20], { extrapolateRight: 'clamp' });
+            : isPlayed
+              ? 27
+              : interpolate(dist, [0, 6], [24, 20], { extrapolateRight: 'clamp' });
 
           const glowColor = isActive
             ? (activeMode === 'minor' ? palette.purple : palette.cyan)
-            : palette.cyan;
+            : isPlayed
+              ? palette.teal
+              : palette.cyan;
 
-          const nodeOpacity = interpolate(dist, [0, 6], [1, 0.35], { extrapolateRight: 'clamp' });
+          const nodeOpacity = isActive
+            ? 1
+            : isPlayed
+              ? 0.8
+              : interpolate(dist, [0, 6], [1, 0.35], { extrapolateRight: 'clamp' });
 
           return (
             <g key={`maj-${i}`}>
@@ -612,14 +649,36 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
                 </>
               )}
 
-              {/* Aurora glow aura for nearby nodes */}
-              {dist <= 2 && !isActive && (
-                <circle
-                  cx={x} cy={y} r={nodeR + 12}
-                  fill={palette.teal}
-                  opacity={0.05}
-                  filter="url(#cof-glow-sm)"
-                />
+              {/* Played note glow — layered opacity circles */}
+              {isPlayed && !isActive && (
+                <>
+                  <circle
+                    cx={x} cy={y} r={nodeR + 16}
+                    fill={palette.teal}
+                    opacity={0.05}
+                  />
+                  <circle
+                    cx={x} cy={y} r={nodeR + 10}
+                    fill={palette.teal}
+                    opacity={0.1}
+                  />
+                </>
+              )}
+
+              {/* Aurora glow aura for nearby nodes — layered opacity instead of blur */}
+              {dist <= 2 && !isActive && !isPlayed && (
+                <>
+                  <circle
+                    cx={x} cy={y} r={nodeR + 20}
+                    fill={palette.teal}
+                    opacity={0.03}
+                  />
+                  <circle
+                    cx={x} cy={y} r={nodeR + 12}
+                    fill={palette.teal}
+                    opacity={0.06}
+                  />
+                </>
               )}
 
               {/* Node body */}
@@ -700,12 +759,20 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
                 strokeDasharray="8 5"
                 strokeDashoffset={-frame * 0.6}
               />
+              {/* Soft glow line — wider stroke with low opacity instead of blur */}
               <line
                 x1={ax} y1={ay} x2={tx} y2={ty}
                 stroke={palette.cyan}
-                strokeWidth={5}
-                opacity={0.06}
-                filter="url(#cof-glow-sm)"
+                strokeWidth={10}
+                opacity={0.04}
+                strokeLinecap="round"
+              />
+              <line
+                x1={ax} y1={ay} x2={tx} y2={ty}
+                stroke={palette.cyan}
+                strokeWidth={6}
+                opacity={0.07}
+                strokeLinecap="round"
               />
             </g>
           );
@@ -868,6 +935,21 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
             />
           );
         })}
+        {/* ── Diatonic chords with mini keyboards ────────────────────── */}
+        <DiatonicChordsPanel
+          x={1660}
+          y={120}
+          activeKey={activeKey}
+          activeMode={activeMode}
+          accentColor={palette.cyan}
+          secondaryColor={palette.purple}
+          textColor={palette.text}
+          textDimColor={palette.textDim}
+          kbWidth={130}
+          kbHeight={38}
+          spacing={68}
+          opacity={0.85}
+        />
       </svg>
     </AbsoluteFill>
   );

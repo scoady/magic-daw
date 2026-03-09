@@ -6,6 +6,7 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
+import { DiatonicChordsPanel } from './MiniKeyboard';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -296,6 +297,10 @@ export const CircleOfFifths4: React.FC<CircleOfFifthsProps> = ({
   // ── Derived state ──
   const activeRoot = useMemo(() => extractRoot(activeKey), [activeKey]);
   const activeIdx = useMemo(() => keyIndex(activeKey), [activeKey]);
+  const playedIndices = useMemo(
+    () => new Set(activeNotes.map((n) => ((n % 12) * 7) % 12)),
+    [activeNotes],
+  );
   const chordRoot = useMemo(() => extractRoot(detectedChord ?? ''), [detectedChord]);
   const chordIdx = useMemo(() => keyIndex(detectedChord ?? ''), [detectedChord]);
 
@@ -711,8 +716,10 @@ export const CircleOfFifths4: React.FC<CircleOfFifthsProps> = ({
     isActive: boolean,
     isChord: boolean,
     isPathEnd: boolean,
+    isPlayed: boolean = false,
   ) => {
-    const nodeR = type === 'major' ? 24 : type === 'minor' ? 19 : 15;
+    const baseNodeR = type === 'major' ? 24 : type === 'minor' ? 19 : 15;
+    const nodeR = isPlayed && !isActive && !isChord ? baseNodeR + 3 : baseNodeR;
     const fillColor = type === 'major' ? jewel.gold : type === 'minor' ? jewel.purple : jewel.emerald;
     const borderColor = type === 'major' ? jewel.goldDark : type === 'minor' ? jewel.purpleDark : jewel.emeraldLight;
 
@@ -740,14 +747,14 @@ export const CircleOfFifths4: React.FC<CircleOfFifthsProps> = ({
     return (
       <g key={`node-${type}-${idx}`}>
         {/* Outer glow */}
-        {(isActive || isChord || isPathEnd) && (
+        {(isActive || isChord || isPathEnd || isPlayed) && (
           <circle
             cx={x} cy={y}
             r={nodeR + 12}
             fill="none"
-            stroke={isPathEnd ? jewel.rubyLight : isChord ? jewel.sapphireLight : jewel.gold}
-            strokeWidth={2}
-            opacity={0.4 + glowPulse + chordPulse}
+            stroke={isPathEnd ? jewel.rubyLight : isChord ? jewel.sapphireLight : isPlayed && !isActive ? jewel.sapphireLight : jewel.gold}
+            strokeWidth={isPlayed && !isActive && !isChord ? 1.5 : 2}
+            opacity={isPlayed && !isActive && !isChord ? 0.35 : 0.4 + glowPulse + chordPulse}
           />
         )}
         {/* Ripple ring */}
@@ -774,10 +781,10 @@ export const CircleOfFifths4: React.FC<CircleOfFifthsProps> = ({
         <circle
           cx={x} cy={y}
           r={nodeR}
-          fill={isActive || isChord ? fillColor : hexColor(fillColor, 0.2)}
-          stroke={isActive || isChord || highlighted ? fillColor : borderColor}
-          strokeWidth={isActive || isChord ? 2 : 1}
-          opacity={isActive || isChord ? 1 : highlighted ? 0.85 : 0.7}
+          fill={isActive || isChord ? fillColor : isPlayed ? hexColor(fillColor, 0.5) : hexColor(fillColor, 0.2)}
+          stroke={isActive || isChord || highlighted || isPlayed ? fillColor : borderColor}
+          strokeWidth={isActive || isChord ? 2 : isPlayed ? 1.5 : 1}
+          opacity={isActive || isChord ? 1 : isPlayed ? 0.9 : highlighted ? 0.85 : 0.7}
         />
         {/* Inner star pattern */}
         <polygon
@@ -813,18 +820,18 @@ export const CircleOfFifths4: React.FC<CircleOfFifthsProps> = ({
         const active = isKeyActive(i);
         const chord = isChordActive(i);
         const isPathEnd = i === pathfinderFromIdx || i === pathfinderToIdx;
-        return renderOrnateNode(x, y, key, 'major', i, active, chord, isPathEnd);
+        return renderOrnateNode(x, y, key, 'major', i, active, chord, isPathEnd, playedIndices.has(i));
       })}
       {/* Middle ring — Minor keys */}
       {MINOR_KEYS.map((key, i) => {
         const [x, y] = middleNodes[i];
         const active = activeMode === 'minor' && isKeyActive(i);
-        return renderOrnateNode(x, y, key, 'minor', i, active, false, false);
+        return renderOrnateNode(x, y, key, 'minor', i, active, false, false, false);
       })}
       {/* Inner ring — Diminished */}
       {DIM_KEYS.map((key, i) => {
         const [x, y] = innerNodes[i];
-        return renderOrnateNode(x, y, key, 'dim', i, false, false, false);
+        return renderOrnateNode(x, y, key, 'dim', i, false, false, false, false);
       })}
     </g>
   );
@@ -1317,6 +1324,22 @@ export const CircleOfFifths4: React.FC<CircleOfFifthsProps> = ({
 
         {/* Layer 18: Border frame */}
         {renderBorderFrame()}
+
+        {/* Diatonic chords with mini keyboards */}
+        <DiatonicChordsPanel
+          x={1660}
+          y={120}
+          activeKey={activeKey}
+          activeMode={activeMode}
+          accentColor="#fbbf24"
+          secondaryColor="#7c3aed"
+          textColor="#e2e8f0"
+          textDimColor="#94a3b8"
+          kbWidth={130}
+          kbHeight={38}
+          spacing={68}
+          opacity={0.8}
+        />
       </svg>
     </AbsoluteFill>
   );
