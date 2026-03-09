@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import {
   AbsoluteFill,
   useCurrentFrame,
@@ -6,7 +6,7 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
-import { useCircleZoom, chordToRingIndex } from './useCircleZoom';
+import { useCircleZoom, chordToRingIndex, FIFTHS_MAJOR, FIFTHS_MINOR } from './useCircleZoom';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -14,13 +14,183 @@ export interface CircleOfFifthsProps {
   activeKey: string;
   activeMode: 'major' | 'minor';
   detectedChord: string | null;
+  /** True when the detected chord came from 3+ notes (a real chord, not inferred from a single note) */
+  isFullChord?: boolean;
   activeNotes: number[];
   chordProgression: string[];
   pathfinderFrom: string | null;
   pathfinderTo: string | null;
   pathfinderPaths: string[][];
   highlightedDegrees: number[];
+  /** Signal to reset the chord path and zoom out to circle */
+  resetSignal?: number;
+  /** Callback when save is requested — receives the chord path */
+  onSavePath?: (chords: string[]) => void;
+  /** External pan offset from click-and-drag (SVG units) */
+  panOffset?: { x: number; y: number };
+  /** Callback when a branch node is clicked — adds chord to path programmatically */
+  onClickChord?: (chord: string) => void;
+  /** Callback to delete a node at index from the chord path */
+  onDeleteNode?: (index: number) => void;
+  /** Import chords directly into the path — set this to load a progression without MIDI */
+  importChords?: string[] | null;
+  /** Whether playback is active — highlights the current playback position */
+  playbackIndex?: number;
+  /** Loop region [startIdx, endIdx] inclusive */
+  loopRegion?: [number, number] | null;
+  /** Callback to set loop region */
+  onSetLoopRegion?: (region: [number, number] | null) => void;
 }
+
+// ── Famous chord progressions database ──────────────────────────────────
+
+export interface FamousProgression {
+  name: string;
+  artist?: string;
+  chords: string[]; // normalized chord names relative to key (roman → actual computed at runtime)
+  romans: string[];  // roman numerals for display
+  genre: string;
+}
+
+// Progressions stored as scale degree indices + quality, resolved at runtime to actual chords
+const FAMOUS_PROGRESSIONS: FamousProgression[] = [
+  { name: 'Axis of Awesome', chords: ['I', 'V', 'vi', 'IV'], romans: ['I', 'V', 'vi', 'IV'], genre: 'Pop' },
+  { name: '50s Progression', chords: ['I', 'vi', 'IV', 'V'], romans: ['I', 'vi', 'IV', 'V'], genre: 'Pop' },
+  { name: 'Pachelbel\'s Canon', chords: ['I', 'V', 'vi', 'iii', 'IV', 'I', 'IV', 'V'], romans: ['I', 'V', 'vi', 'iii', 'IV', 'I', 'IV', 'V'], genre: 'Classical' },
+  { name: 'Andalusian Cadence', chords: ['vi', 'V', 'IV', 'III'], romans: ['vi', 'V', 'IV', 'III'], genre: 'Flamenco' },
+  { name: '12-Bar Blues', chords: ['I', 'I', 'I', 'I', 'IV', 'IV', 'I', 'I', 'V', 'IV', 'I', 'V'], romans: ['I', 'I', 'I', 'I', 'IV', 'IV', 'I', 'I', 'V', 'IV', 'I', 'V'], genre: 'Blues' },
+  { name: 'Heart and Soul', chords: ['I', 'vi', 'IV', 'V'], romans: ['I', 'vi', 'IV', 'V'], genre: 'Pop' },
+  { name: 'Creep', artist: 'Radiohead', chords: ['I', 'III', 'IV', 'iv'], romans: ['I', 'III', 'IV', 'iv'], genre: 'Rock' },
+  { name: 'Let It Be', artist: 'Beatles', chords: ['I', 'V', 'vi', 'IV'], romans: ['I', 'V', 'vi', 'IV'], genre: 'Rock' },
+  { name: 'Jazz ii-V-I', chords: ['ii', 'V', 'I'], romans: ['ii', 'V', 'I'], genre: 'Jazz' },
+  { name: 'Rhythm Changes', chords: ['I', 'vi', 'ii', 'V'], romans: ['I', 'vi', 'ii', 'V'], genre: 'Jazz' },
+  { name: 'Minor Jazz ii-V-i', chords: ['ii', 'V', 'i'], romans: ['ii°', 'V', 'i'], genre: 'Jazz' },
+  { name: 'Despacito', artist: 'Luis Fonsi', chords: ['vi', 'IV', 'V', 'I'], romans: ['vi', 'IV', 'V', 'I'], genre: 'Latin Pop' },
+  { name: 'Autumn Leaves', chords: ['ii', 'V', 'I', 'IV', 'vii', 'III', 'vi'], romans: ['ii', 'V', 'I', 'IV', 'vii°', 'III', 'vi'], genre: 'Jazz' },
+  { name: 'Hallelujah', artist: 'Leonard Cohen', chords: ['I', 'IV', 'I', 'IV', 'I', 'V', 'IV', 'V'], romans: ['I', 'IV', 'I', 'IV', 'I', 'V', 'IV', 'V'], genre: 'Folk' },
+  { name: 'Hotel California', artist: 'Eagles', chords: ['vi', 'III', 'V', 'II', 'IV', 'I', 'ii', 'V'], romans: ['vi', 'III', 'V', 'II', 'IV', 'I', 'ii', 'V'], genre: 'Rock' },
+  { name: 'Knockin\' on Heaven\'s Door', artist: 'Bob Dylan', chords: ['I', 'V', 'ii', 'ii'], romans: ['I', 'V', 'ii', 'ii'], genre: 'Folk Rock' },
+  { name: 'Stand By Me', artist: 'Ben E. King', chords: ['I', 'vi', 'IV', 'V'], romans: ['I', 'vi', 'IV', 'V'], genre: 'R&B' },
+  { name: 'No Woman No Cry', artist: 'Bob Marley', chords: ['I', 'V', 'vi', 'IV'], romans: ['I', 'V', 'vi', 'IV'], genre: 'Reggae' },
+];
+
+/** Resolve a roman numeral to an actual chord name in a given key */
+function romanToChord(roman: string, key: string, _mode: 'major' | 'minor'): string {
+  const norm = ENHARMONIC[key] ?? key;
+  const rootIdx = CHROMATIC.indexOf(norm);
+  if (rootIdx < 0) return 'C';
+
+  // Map roman numeral to scale degree + quality
+  const romanMap: Record<string, [number, string]> = {
+    'I': [0, ''], 'i': [0, 'm'],
+    'II': [2, ''], 'ii': [2, 'm'], 'ii°': [2, 'dim'],
+    'III': [4, ''], 'iii': [4, 'm'],
+    'IV': [5, ''], 'iv': [5, 'm'],
+    'V': [7, ''], 'v': [7, 'm'],
+    'VI': [9, ''], 'vi': [9, 'm'],
+    'VII': [11, ''], 'vii': [11, 'dim'], 'vii°': [11, 'dim'],
+    'bII': [1, ''], 'bIII': [3, ''], 'bV': [6, ''],
+    'bVI': [8, ''], 'bVII': [10, ''],
+  };
+
+  const entry = romanMap[roman];
+  if (!entry) return key; // fallback
+  const [interval, quality] = entry;
+  const noteIdx = (rootIdx + interval) % 12;
+  const useFlats = FLAT_KEYS.has(key);
+  const noteName = (useFlats ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP)[noteIdx];
+  return noteName + quality;
+}
+
+/** Check if current path matches or is close to a famous progression */
+function matchFamousProgressions(
+  path: string[], key: string, mode: 'major' | 'minor',
+): { exact: FamousProgression[]; close: { prog: FamousProgression; distance: number }[] } {
+  if (path.length < 3) return { exact: [], close: [] };
+
+  const normalized = path.map(c => normalizeChordForMatch(c));
+  const exact: FamousProgression[] = [];
+  const close: { prog: FamousProgression; distance: number }[] = [];
+
+  for (const prog of FAMOUS_PROGRESSIONS) {
+    const resolved = prog.chords.map(r => normalizeChordForMatch(romanToChord(r, key, mode)));
+    // Check exact subsequence match
+    const progStr = resolved.join(',');
+    const pathStr = normalized.join(',');
+    if (pathStr.includes(progStr) || progStr === pathStr) {
+      exact.push(prog);
+      continue;
+    }
+    // Check if path is close (off by 1 chord)
+    if (Math.abs(normalized.length - resolved.length) <= 1) {
+      let mismatches = 0;
+      const minLen = Math.min(normalized.length, resolved.length);
+      for (let i = 0; i < minLen; i++) {
+        if (normalized[i] !== resolved[i]) mismatches++;
+      }
+      mismatches += Math.abs(normalized.length - resolved.length);
+      if (mismatches <= 1) {
+        close.push({ prog, distance: mismatches });
+      }
+    }
+  }
+  return { exact, close };
+}
+
+/** Compute harmonic tension for a chord relative to the key (0 = stable, 1 = max tension) */
+function chordTension(chord: string, key: string, _mode: 'major' | 'minor'): number {
+  const norm = ENHARMONIC[key] ?? key;
+  const rootIdx = CHROMATIC.indexOf(norm);
+  const chordRoot = normalizeChordForMatch(chord).replace(/m$/, '').replace(/dim$/, '');
+  const chordNorm = ENHARMONIC[chordRoot] ?? chordRoot;
+  const chordIdx = CHROMATIC.indexOf(chordNorm);
+  if (rootIdx < 0 || chordIdx < 0) return 0.5;
+
+  const interval = ((chordIdx - rootIdx) % 12 + 12) % 12;
+  // Tension values by interval from tonic
+  const tensionMap: Record<number, number> = {
+    0: 0,     // I - tonic, stable
+    2: 0.4,   // ii - mild
+    4: 0.35,  // iii - mild
+    5: 0.25,  // IV - gentle
+    7: 0.7,   // V - dominant tension
+    9: 0.3,   // vi - relative minor
+    11: 0.85, // vii - leading tone, high tension
+    1: 0.9,   // bII - chromatic, high
+    3: 0.5,   // bIII - modal
+    6: 1.0,   // tritone - maximum tension
+    8: 0.6,   // bVI - chromatic
+    10: 0.55, // bVII - modal
+  };
+  const baseTension = tensionMap[interval] ?? 0.5;
+  // Diminished/minor chords add slight tension
+  const isDim = chord.includes('dim');
+  const isMinor = chord.endsWith('m') && !isDim;
+  return Math.min(1, baseTension + (isDim ? 0.15 : isMinor ? 0.05 : 0));
+}
+
+/** Determine harmonic function: tonic, subdominant, dominant */
+function chordFunction(chord: string, key: string): 'tonic' | 'subdominant' | 'dominant' | 'chromatic' {
+  const norm = ENHARMONIC[key] ?? key;
+  const rootIdx = CHROMATIC.indexOf(norm);
+  const chordRoot = normalizeChordForMatch(chord).replace(/m$/, '').replace(/dim$/, '');
+  const chordNorm = ENHARMONIC[chordRoot] ?? chordRoot;
+  const chordIdx = CHROMATIC.indexOf(chordNorm);
+  if (rootIdx < 0 || chordIdx < 0) return 'chromatic';
+
+  const interval = ((chordIdx - rootIdx) % 12 + 12) % 12;
+  if ([0, 4, 9].includes(interval)) return 'tonic';       // I, iii, vi
+  if ([5, 2].includes(interval)) return 'subdominant';     // IV, ii
+  if ([7, 11].includes(interval)) return 'dominant';       // V, vii
+  return 'chromatic';
+}
+
+const FUNCTION_COLORS: Record<string, string> = {
+  tonic: '#67e8f9',      // cyan - stable
+  subdominant: '#2dd4bf', // teal - warm
+  dominant: '#fbbf24',    // gold - tension
+  chromatic: '#a78bfa',   // purple - color
+};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -85,6 +255,60 @@ function noteName(chromaticIdx: number, key: string): string {
   return (useFlats ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP)[chromaticIdx % 12];
 }
 
+// Chord quality for each scale degree
+const MAJOR_QUALITIES = ['', 'm', 'm', '', '', 'm', 'dim'] as const;
+const MINOR_QUALITIES = ['m', 'dim', '', 'm', 'm', '', ''] as const;
+
+/** Detect chord quality from a set of MIDI notes (e.g. [60,64,67,71] → "Cmaj7") */
+function detectChordFromNotes(notes: number[], key: string): string | null {
+  if (notes.length < 2) return null;
+  const chromas = [...new Set(notes.map(n => n % 12))].sort((a, b) => a - b);
+  if (chromas.length < 2) return null;
+  const useFlats = FLAT_KEYS.has(key);
+  const names = useFlats ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP;
+
+  // Try each chroma as root and check interval pattern
+  for (const root of chromas) {
+    const intervals = chromas.map(c => ((c - root) % 12 + 12) % 12).sort((a, b) => a - b);
+    const pat = intervals.join(',');
+
+    // Triads
+    if (pat === '0,3,7') return names[root] + 'm';
+    if (pat === '0,4,7') return names[root];
+    if (pat === '0,3,6') return names[root] + 'dim';
+    if (pat === '0,4,8') return names[root] + 'aug';
+
+    // Sevenths
+    if (pat === '0,4,7,11') return names[root] + 'maj7';
+    if (pat === '0,4,7,10') return names[root] + '7';
+    if (pat === '0,3,7,10') return names[root] + 'm7';
+    if (pat === '0,3,6,10') return names[root] + 'm7b5';
+    if (pat === '0,3,6,9')  return names[root] + 'dim7';
+    if (pat === '0,3,7,11') return names[root] + 'mMaj7';
+
+    // Sus chords
+    if (pat === '0,5,7') return names[root] + 'sus4';
+    if (pat === '0,2,7') return names[root] + 'sus2';
+  }
+  return null;
+}
+
+/** Infer diatonic chord from a MIDI note in the given key/mode */
+function inferChordFromNote(midiNote: number, key: string, mode: 'major' | 'minor'): string {
+  const norm = ENHARMONIC[key] ?? key;
+  const rootIdx = CHROMATIC.indexOf(norm);
+  const noteChroma = midiNote % 12;
+  const useFlats = FLAT_KEYS.has(key);
+  const chordRoot = (useFlats ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP)[noteChroma];
+  if (rootIdx < 0) return chordRoot;
+  const interval = ((noteChroma - rootIdx) % 12 + 12) % 12;
+  const scaleIntervals = mode === 'major' ? MAJOR_INTERVALS : MINOR_INTERVALS;
+  const qualities = mode === 'major' ? MAJOR_QUALITIES : MINOR_QUALITIES;
+  const degreeIdx = scaleIntervals.indexOf(interval);
+  if (degreeIdx < 0) return chordRoot; // chromatic note → major
+  return chordRoot + qualities[degreeIdx];
+}
+
 /**
  * Build piano keys from root to root (one octave of the scale).
  * Returns chromatic indices spanning 13 semitones (root to root inclusive).
@@ -120,6 +344,358 @@ const BRANCH_TOOLTIPS: Record<string, BranchTooltip> = {
   'bIII': { roman: 'bIII', description: 'Chromatic mediant — bright, unexpected shift', tension: 'chromatic color', genres: 'Film, Prog rock, Pop', voiceLeading: 'Common tone modulation' },
   'V/vi': { roman: 'V/vi', description: 'Secondary dominant — targets the vi chord', tension: 'applied tension → vi', genres: 'Jazz, Classical, Pop', voiceLeading: 'Creates temporary leading tone' },
 };
+
+// ── Chord path types ──────────────────────────────────────────────────────
+
+interface PathNode {
+  chord: string;          // normalized base name ("C", "Am") — used for ring matching & dedup
+  displayChord: string;   // full detected name ("Cmaj7", "Am7") — shown on the node label
+  ring: 'major' | 'minor' | 'dim';
+  index: number;          // fifths-circle index
+  x: number;              // SVG position
+  y: number;
+  arrivalAngle: number;   // angle from prev node (degrees), used to fan branches away
+  isFullChord: boolean;   // true = played as real chord (3+ notes), false = inferred from single note
+}
+
+interface Branch {
+  label: string; roman: string; color: string;
+  angle: number; dist: number; tier: number;
+  transition: string; width: number;
+  targetChord: string; // normalized chord name for matching
+}
+
+/** Normalize a detected chord for matching: "Am/C" → "Am", "G7" → "G" */
+function normalizeChordForMatch(chord: string): string {
+  const base = chord.includes('/') ? chord.split('/')[0] : chord;
+  return base.replace(/(maj7|m7|7|9|11|13|sus[24]|aug|\?)$/i, '');
+}
+
+/** Generate branches from a node — fan out horizontally to the right, spread vertically */
+function generateBranches(
+  pi: number, ring: 'major' | 'minor' | 'dim',
+  _arrivalAngle: number, scale: number,
+  _treeCentroid?: { x: number; y: number; nodeX: number; nodeY: number },
+): Branch[] {
+  // Branches extend to the RIGHT and fan vertically
+  // Tier 1: close, slight vertical spread; Tier 2: further right, wider spread; Tier 3: furthest
+  const r1 = 160 * scale, r2 = 240 * scale, r3 = 320 * scale;
+
+  // Angles: 0 = straight right, negative = up-right, positive = down-right
+  // All branches go rightward (angles stay in -70..+70 range so they extend to the right)
+  const raw: Branch[] = ring === 'minor' ? [
+    { label: FIFTHS_MAJOR[(pi + 9) % 12],  roman: 'III',   color: '#67e8f9', angle: 90,   dist: r1, tier: 1, transition: '', width: 3, targetChord: FIFTHS_MAJOR[(pi + 9) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 8) % 12],  roman: 'bVII',  color: '#2dd4bf', angle: 60,   dist: r1, tier: 1, transition: '', width: 3, targetChord: FIFTHS_MAJOR[(pi + 8) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 5) % 12],  roman: 'iv',    color: '#60a5fa', angle: 120,  dist: r1, tier: 1, transition: '', width: 2.5, targetChord: FIFTHS_MAJOR[(pi + 5) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 7) % 12],  roman: 'bVI',   color: '#e879f9', angle: 40,   dist: r2, tier: 2, transition: '', width: 2, targetChord: FIFTHS_MAJOR[(pi + 7) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 2) % 12],  roman: 'V',     color: '#fb923c', angle: 140,  dist: r2, tier: 2, transition: FIFTHS_MAJOR[(pi + 2) % 12] + '7', width: 2, targetChord: FIFTHS_MAJOR[(pi + 2) % 12] },
+    { label: FIFTHS_MINOR[(pi + 5) % 12],  roman: 'iv(m)', color: '#a78bfa', angle: 75,   dist: r2, tier: 2, transition: '', width: 1.5, targetChord: FIFTHS_MINOR[(pi + 5) % 12] },
+    { label: FIFTHS_MAJOR[pi],              roman: 'I',     color: '#818cf8', angle: 105,  dist: r2, tier: 2, transition: '', width: 1.5, targetChord: FIFTHS_MAJOR[pi] },
+    { label: FIFTHS_MAJOR[(pi + 10) % 12], roman: 'bII',   color: '#f87171', angle: 25,   dist: r3, tier: 3, transition: '', width: 1, targetChord: FIFTHS_MAJOR[(pi + 10) % 12] },
+    { label: FIFTHS_MINOR[(pi + 7) % 12],  roman: 'vm',    color: '#fbbf24', angle: 155,  dist: r3, tier: 3, transition: '', width: 1, targetChord: FIFTHS_MINOR[(pi + 7) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 3) % 12],  roman: 'IV',    color: '#34d399', angle: 10,   dist: r3, tier: 3, transition: '', width: 1, targetChord: FIFTHS_MAJOR[(pi + 3) % 12] },
+    { label: FIFTHS_MINOR[(pi + 2) % 12],  roman: 'iim',   color: '#c084fc', angle: 170,  dist: r3, tier: 3, transition: '', width: 1, targetChord: FIFTHS_MINOR[(pi + 2) % 12] },
+  ] : [
+    { label: FIFTHS_MAJOR[(pi + 1) % 12],  roman: 'V',     color: '#67e8f9', angle: 90,   dist: r1, tier: 1, transition: FIFTHS_MAJOR[(pi + 1) % 12] + '7', width: 3, targetChord: FIFTHS_MAJOR[(pi + 1) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 11) % 12], roman: 'IV',    color: '#2dd4bf', angle: 60,   dist: r1, tier: 1, transition: '', width: 3, targetChord: FIFTHS_MAJOR[(pi + 11) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 2) % 12],  roman: 'ii',    color: '#60a5fa', angle: 120,  dist: r1, tier: 1, transition: FIFTHS_MAJOR[(pi + 2) % 12] + '7', width: 2.5, targetChord: FIFTHS_MAJOR[(pi + 2) % 12] },
+    { label: FIFTHS_MINOR[pi],              roman: 'vi',    color: '#a78bfa', angle: 40,   dist: r2, tier: 2, transition: '', width: 2, targetChord: FIFTHS_MINOR[pi] },
+    { label: FIFTHS_MAJOR[(pi + 10) % 12], roman: 'bVII',  color: '#fb923c', angle: 140,  dist: r2, tier: 2, transition: '', width: 2, targetChord: FIFTHS_MAJOR[(pi + 10) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 9) % 12],  roman: 'bVI',   color: '#e879f9', angle: 75,   dist: r2, tier: 2, transition: '', width: 1.5, targetChord: FIFTHS_MAJOR[(pi + 9) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 3) % 12],  roman: 'iii',   color: '#818cf8', angle: 105,  dist: r2, tier: 2, transition: FIFTHS_MAJOR[(pi + 3) % 12] + '7', width: 1.5, targetChord: FIFTHS_MAJOR[(pi + 3) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 8) % 12],  roman: 'bV',    color: '#f87171', angle: 25,   dist: r3, tier: 3, transition: '', width: 1, targetChord: FIFTHS_MAJOR[(pi + 8) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 5) % 12],  roman: 'vii°',  color: '#fbbf24', angle: 155,  dist: r3, tier: 3, transition: '', width: 1, targetChord: FIFTHS_MAJOR[(pi + 5) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 7) % 12],  roman: 'bIII',  color: '#34d399', angle: 10,   dist: r3, tier: 3, transition: '', width: 1, targetChord: FIFTHS_MAJOR[(pi + 7) % 12] },
+    { label: FIFTHS_MAJOR[(pi + 4) % 12],  roman: 'V/vi',  color: '#c084fc', angle: 170,  dist: r3, tier: 3, transition: '', width: 1, targetChord: FIFTHS_MAJOR[(pi + 4) % 12] },
+  ];
+
+  // No rotation — branches always fan rightward
+  return raw;
+}
+
+// ── MIDI export ───────────────────────────────────────────────────────────
+
+/** Convert a chord name to a MIDI root note number (middle octave) */
+function chordToMidi(chord: string): number[] {
+  const base = normalizeChordForMatch(chord);
+  const isMinor = base.endsWith('m') && !base.endsWith('dim');
+  const root = isMinor ? base.slice(0, -1) : base;
+  const norm = ENHARMONIC[root] ?? root;
+  const rootIdx = CHROMATIC.indexOf(norm);
+  if (rootIdx < 0) return [60]; // fallback C
+  const midiRoot = 60 + rootIdx; // C4 = 60
+  if (isMinor) return [midiRoot, midiRoot + 3, midiRoot + 7]; // minor triad
+  return [midiRoot, midiRoot + 4, midiRoot + 7]; // major triad
+}
+
+// ── Deterministic harmonic pathfinder ─────────────────────────────────────
+
+/** Get the chromatic index (0-11) for a chord root */
+function chordChroma(chord: string): number {
+  const base = normalizeChordForMatch(chord);
+  const isMin = base.endsWith('m') && !base.endsWith('dim');
+  const root = isMin ? base.slice(0, -1) : base;
+  const norm = ENHARMONIC[root] ?? root;
+  return CHROMATIC.indexOf(norm);
+}
+
+/** Is this chord minor? */
+function isMinorChord(chord: string): boolean {
+  const base = normalizeChordForMatch(chord);
+  return base.endsWith('m') && !base.endsWith('dim');
+}
+
+/** Get the circle-of-fifths position (0-11) for a chromatic index */
+function chromaToFifthsPos(chroma: number): number {
+  // C=0, G=1, D=2, A=3, E=4, B=5, F#=6, Db=7, Ab=8, Eb=9, Bb=10, F=11
+  const map = [0, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10, 5];
+  return map[chroma];
+}
+
+/** Voice leading cost: sum of semitone distances between closest chord tones */
+function voiceLeadingCost(from: string, to: string): number {
+  const fromNotes = chordToMidi(from).map(n => n % 12);
+  const toNotes = chordToMidi(to).map(n => n % 12);
+  let cost = 0;
+  const used = new Set<number>();
+  for (const fn of fromNotes) {
+    let bestDist = 12;
+    let bestIdx = 0;
+    for (let ti = 0; ti < toNotes.length; ti++) {
+      if (used.has(ti)) continue;
+      const d = Math.min(Math.abs(toNotes[ti] - fn), 12 - Math.abs(toNotes[ti] - fn));
+      if (d < bestDist) { bestDist = d; bestIdx = ti; }
+    }
+    used.add(bestIdx);
+    cost += bestDist;
+  }
+  return cost;
+}
+
+/** Generate all neighbor chords with weighted edges from a given chord */
+function harmonicNeighbors(chord: string, key: string, mode: 'major' | 'minor'): { chord: string; cost: number }[] {
+  const chroma = chordChroma(chord);
+  const isMin = isMinorChord(chord);
+  const useFlats = FLAT_KEYS.has(key);
+  const names = useFlats ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP;
+  const neighbors: { chord: string; cost: number }[] = [];
+
+  const addChord = (semitones: number, quality: string, baseCost: number) => {
+    const targetChroma = ((chroma + semitones) % 12 + 12) % 12;
+    const name = names[targetChroma] + quality;
+    const vlCost = voiceLeadingCost(chord, name);
+    neighbors.push({ chord: name, cost: baseCost + vlCost * 0.5 });
+  };
+
+  // Circle of fifths motion (strongest relationships)
+  addChord(7, isMin ? 'm' : '', 1);   // up a fifth
+  addChord(5, isMin ? 'm' : '', 1);   // up a fourth (down a fifth)
+
+  // Relative major/minor
+  if (isMin) addChord(3, '', 1.5);     // relative major (up minor 3rd)
+  else addChord(-3, 'm', 1.5);         // relative minor (down minor 3rd)
+
+  // Parallel major/minor
+  addChord(0, isMin ? '' : 'm', 2);
+
+  // Diatonic neighbors (stepwise)
+  addChord(2, '', 2.5);   // whole step up major
+  addChord(-2, '', 2.5);  // whole step down major
+  addChord(2, 'm', 2.5);  // whole step up minor
+  addChord(-2, 'm', 2.5); // whole step down minor
+
+  // Chromatic mediant
+  addChord(4, '', 3);     // major third up
+  addChord(-4, '', 3);    // major third down
+  addChord(3, '', 3);     // minor third up major
+  addChord(-3, '', 3);    // minor third down major
+
+  // Tritone sub
+  addChord(6, '', 4);
+  addChord(6, 'm', 4);
+
+  // Half step (chromatic)
+  addChord(1, '', 3.5);
+  addChord(-1, '', 3.5);
+  addChord(1, 'm', 3.5);
+  addChord(-1, 'm', 3.5);
+
+  return neighbors;
+}
+
+/**
+ * Find a harmonic path from one chord to another using weighted BFS (Dijkstra).
+ * Returns an array of chord names including start and end.
+ */
+export function findHarmonicPath(
+  from: string, to: string, steps: number,
+  key: string, mode: 'major' | 'minor',
+): string[] {
+  // Normalize
+  const startNorm = normalizeChordForMatch(from);
+  const endNorm = normalizeChordForMatch(to);
+  if (startNorm === endNorm) return [from, to];
+
+  // For the target step count, we do iterative-deepening BFS with cost
+  // Try to find paths of exactly `steps` length, pick the lowest-cost one
+  interface PathState {
+    chord: string;
+    path: string[];
+    cost: number;
+  }
+
+  const targetLen = Math.max(2, Math.min(steps, 16));
+  let bestPath: string[] | null = null;
+  let bestCost = Infinity;
+
+  // Beam search: at each depth, keep top-K candidates
+  const beamWidth = 50;
+  let beam: PathState[] = [{ chord: from, path: [from], cost: 0 }];
+
+  for (let depth = 1; depth < targetLen; depth++) {
+    const nextBeam: PathState[] = [];
+    const isLastStep = depth === targetLen - 1;
+
+    for (const state of beam) {
+      const neighbors = harmonicNeighbors(state.chord, key, mode);
+      for (const n of neighbors) {
+        // Avoid revisiting chords in the path (unless it's the target on last step)
+        if (state.path.includes(n.chord) && !(isLastStep && normalizeChordForMatch(n.chord) === endNorm)) continue;
+
+        if (isLastStep) {
+          // Last step must reach the target
+          if (normalizeChordForMatch(n.chord) === endNorm) {
+            const totalCost = state.cost + n.cost;
+            if (totalCost < bestCost) {
+              bestCost = totalCost;
+              bestPath = [...state.path, to]; // use original `to` name
+            }
+          }
+        } else {
+          nextBeam.push({
+            chord: n.chord,
+            path: [...state.path, n.chord],
+            cost: state.cost + n.cost,
+          });
+        }
+      }
+    }
+
+    // Prune beam to top K by cost
+    nextBeam.sort((a, b) => a.cost - b.cost);
+    beam = nextBeam.slice(0, beamWidth);
+
+    if (beam.length === 0 && !bestPath) break;
+  }
+
+  if (bestPath) return bestPath;
+
+  // Fallback: if exact step count wasn't reachable, try shorter paths
+  // Simple BFS for shortest path
+  const queue: PathState[] = [{ chord: from, path: [from], cost: 0 }];
+  const visited = new Set<string>([startNorm]);
+
+  while (queue.length > 0) {
+    const state = queue.shift()!;
+    if (state.path.length > 12) continue;
+
+    for (const n of harmonicNeighbors(state.chord, key, mode)) {
+      const nNorm = normalizeChordForMatch(n.chord);
+      if (nNorm === endNorm) return [...state.path, to];
+      if (visited.has(nNorm)) continue;
+      visited.add(nNorm);
+      queue.push({ chord: n.chord, path: [...state.path, n.chord], cost: state.cost + n.cost });
+    }
+  }
+
+  // Ultimate fallback: direct
+  return [from, to];
+}
+
+/** Get circle-of-fifths position for a chord (0-11, where 0=C, 1=G, etc.) */
+export function chordToFifthsPosition(chord: string): number {
+  return chromaToFifthsPos(chordChroma(chord));
+}
+
+/** Build a simple MIDI file (format 0) from a chord path — quarter notes at 120 BPM */
+function buildMidiFile(chords: string[]): Uint8Array {
+  const ticksPerBeat = 480;
+  const tempo = 120;
+  const microsecondsPerBeat = Math.round(60000000 / tempo);
+
+  // Helper to write variable-length quantity
+  function vlq(value: number): number[] {
+    if (value < 128) return [value];
+    const bytes: number[] = [];
+    bytes.push(value & 0x7f);
+    value >>= 7;
+    while (value > 0) {
+      bytes.push((value & 0x7f) | 0x80);
+      value >>= 7;
+    }
+    return bytes.reverse();
+  }
+
+  // Track data
+  const track: number[] = [];
+
+  // Tempo meta event
+  track.push(0x00, 0xff, 0x51, 0x03,
+    (microsecondsPerBeat >> 16) & 0xff,
+    (microsecondsPerBeat >> 8) & 0xff,
+    microsecondsPerBeat & 0xff);
+
+  // Time signature: 4/4
+  track.push(0x00, 0xff, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08);
+
+  // Note events — each chord is a quarter note
+  for (const chord of chords) {
+    const notes = chordToMidi(chord);
+    // Note on (all at delta 0)
+    for (let i = 0; i < notes.length; i++) {
+      track.push(...vlq(i === 0 ? 0 : 0), 0x90, notes[i] & 0x7f, 100);
+    }
+    // Note off after one beat
+    for (let i = 0; i < notes.length; i++) {
+      track.push(...vlq(i === 0 ? ticksPerBeat : 0), 0x80, notes[i] & 0x7f, 0);
+    }
+  }
+
+  // End of track
+  track.push(0x00, 0xff, 0x2f, 0x00);
+
+  // Build file
+  const header = [
+    0x4d, 0x54, 0x68, 0x64, // "MThd"
+    0x00, 0x00, 0x00, 0x06, // header length
+    0x00, 0x00,             // format 0
+    0x00, 0x01,             // 1 track
+    (ticksPerBeat >> 8) & 0xff, ticksPerBeat & 0xff,
+  ];
+
+  const trackHeader = [
+    0x4d, 0x54, 0x72, 0x6b, // "MTrk"
+    (track.length >> 24) & 0xff,
+    (track.length >> 16) & 0xff,
+    (track.length >> 8) & 0xff,
+    track.length & 0xff,
+  ];
+
+  return new Uint8Array([...header, ...trackHeader, ...track]);
+}
+
+/** Trigger a file download in the browser */
+function downloadBlob(data: Uint8Array, filename: string, mime: string) {
+  const blob = new Blob([data.buffer as ArrayBuffer], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 
@@ -229,12 +805,22 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
   activeKey,
   activeMode,
   detectedChord,
+  isFullChord = false,
   activeNotes,
   chordProgression,
   pathfinderFrom,
   pathfinderTo,
   pathfinderPaths,
   highlightedDegrees,
+  resetSignal,
+  onSavePath,
+  panOffset,
+  onClickChord,
+  onDeleteNode,
+  playbackIndex = -1,
+  loopRegion = null,
+  onSetLoopRegion,
+  importChords = null,
 }) => {
   const frame = useCurrentFrame();
   const { fps, width: W, height: H } = useVideoConfig();
@@ -249,31 +835,188 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
 
   const activeIdx = useMemo(() => keyIndexOnCircle(activeKey), [activeKey]);
 
-  // Which ring + index does the detected chord belong to?
-  const detectedRing = useMemo(() => chordToRingIndex(detectedChord), [detectedChord]);
-
   // Scale notes for piano overlay
   const scaleNotes = useMemo(() => getScaleNotes(activeKey, activeMode), [activeKey, activeMode]);
 
   // Hover state for branch tooltips
-  const [hoveredBranch, setHoveredBranch] = useState<string | null>(null);
-  const onBranchEnter = useCallback((roman: string) => setHoveredBranch(roman), []);
+  const [hoveredBranch, setHoveredBranch] = useState<{
+    roman: string; tx: number; ty: number; px: number; py: number;
+  } | null>(null);
+  const onBranchEnter = useCallback((roman: string, tx: number, ty: number, px: number, py: number) => {
+    setHoveredBranch({ roman, tx, ty, px, py });
+  }, []);
   const onBranchLeave = useCallback(() => setHoveredBranch(null), []);
+
+  // Hover state for voice leading tooltips
+  const [hoveredVL, setHoveredVL] = useState<{
+    x: number; y: number;
+    fromChord: string; toChord: string;
+    pairs: { fromName: string; toName: string; common: boolean; stepDesc: string }[];
+  } | null>(null);
+  const onVLEnter = useCallback((data: typeof hoveredVL) => setHoveredVL(data), []);
+  const onVLLeave = useCallback(() => setHoveredVL(null), []);
+
+  // ── Local chord inference: bridge chord OR infer from notes ──────────
+  const localChord = useMemo(() => {
+    // No notes → nothing
+    if (activeNotes.length === 0) return { chord: null as string | null, full: false };
+    // Bridge-detected chord takes priority when it's a real multi-note detection
+    if (detectedChord && isFullChord && activeNotes.length >= 3) {
+      return { chord: detectedChord, full: true };
+    }
+    // Try multi-note detection (identifies maj7, m7, 7, etc.)
+    if (activeNotes.length >= 3) {
+      const detected = detectChordFromNotes(activeNotes, activeKey);
+      if (detected) return { chord: detected, full: true };
+    }
+    // Infer from lowest active note (works for single notes AND when bridge hasn't detected)
+    const lowest = Math.min(...activeNotes);
+    const inferred = inferChordFromNote(lowest, activeKey, activeMode);
+    return { chord: inferred, full: activeNotes.length >= 3 };
+  }, [detectedChord, isFullChord, activeNotes, activeKey, activeMode]);
+
+  // Use the locally-resolved chord for all path/zoom logic
+  const effectiveChord = localChord.chord;
+  const effectiveFullChord = localChord.full;
+  const effectiveRing = useMemo(() => chordToRingIndex(effectiveChord), [effectiveChord]);
+  const detectedRing = effectiveRing; // alias for circle node highlighting
 
   const playedIndices = useMemo(
     () => new Set(activeNotes.map((n) => ((n % 12) * 7) % 12)),
     [activeNotes],
   );
 
+  // ── Chord path tracking (render-body — no useEffect delay) ──────────
+  const pathRef = useRef<PathNode[]>([]);
+  const prevChordRef = useRef<string | null>(null);  // stores NORMALIZED chord for dedup
+  const prevResetRef = useRef<number>(resetSignal ?? 0);
+  /** Track which MIDI notes were held last frame for new-note detection */
+  const prevNoteSetRef = useRef<Set<number>>(new Set());
+  /** Debounce: frame when last new note arrived. Wait SETTLE_FRAMES before committing. */
+  const lastNewNoteFrameRef = useRef(-999);
+  /** Pending chord to commit after settle period */
+  const pendingChordRef = useRef<{ normalized: string; display: string; full: boolean } | null>(null);
+  const SETTLE_FRAMES = 4; // ~130ms at 30fps — time to let chord fully form
+
+  // Handle reset signal
+  if (resetSignal !== prevResetRef.current) {
+    prevResetRef.current = resetSignal ?? 0;
+    pathRef.current = [];
+    prevChordRef.current = null;
+  }
+
+  // Horizontal layout for chord path — nodes placed left-to-right
+  const PATH_START_X = W * 0.12;  // start center-left
+  const PATH_START_Y = H / 2;     // vertically centered
+  const PATH_STEP_X = 190 * scale; // horizontal gap between played nodes
+
+  // Handle imported chords — build the full path directly
+  const prevImportRef = useRef<string | null>(null);
+  const importKey = importChords ? importChords.join(',') : null;
+  if (importChords && importKey !== prevImportRef.current && importChords.length > 0) {
+    prevImportRef.current = importKey;
+    const path: PathNode[] = [];
+    for (let i = 0; i < importChords.length; i++) {
+      const chord = importChords[i];
+      const normalized = normalizeChordForMatch(chord);
+      const ringInfo = chordToRingIndex(chord);
+      const ring = ringInfo.ring || 'major';
+      const index = ringInfo.index >= 0 ? ringInfo.index : 0;
+      path.push({
+        chord: normalized, displayChord: chord, ring, index,
+        x: PATH_START_X + i * PATH_STEP_X,
+        y: PATH_START_Y,
+        arrivalAngle: 0,
+        isFullChord: false,
+      });
+    }
+    pathRef.current = path;
+    prevChordRef.current = importChords[importChords.length - 1];
+    onSavePath?.(path.map(n => n.chord));
+  } else if (!importKey) {
+    prevImportRef.current = null;
+  }
+
+  // When notes change, detect new presses and debounce chord commitment.
+  // MIDI notes arrive one-at-a-time across frames (D, then F, then A for a Dm chord).
+  // We wait SETTLE_FRAMES after the last new note before committing, so the full chord
+  // has time to form. This also prevents spurious nodes on key release.
+  const currentNoteSet = new Set(activeNotes);
+  const hasNewNote = activeNotes.length > 0 &&
+    activeNotes.some(n => !prevNoteSetRef.current.has(n));
+  prevNoteSetRef.current = currentNoteSet;
+
+  const normalized = effectiveChord ? normalizeChordForMatch(effectiveChord) : null;
+
+  if (hasNewNote) {
+    // A new key was pressed — start/restart the settle timer
+    lastNewNoteFrameRef.current = frame;
+  }
+
+  if (hasNewNote && normalized) {
+    // A new key was pressed — update pending chord (may change as more notes arrive)
+    pendingChordRef.current = { normalized, display: effectiveChord!, full: effectiveFullChord };
+  } else if (activeNotes.length > 0 && normalized && pendingChordRef.current) {
+    // Notes still held, chord detection may have improved (e.g. bridge detected "Cmaj7")
+    // Only update if we're still in the settle window (new notes recently arrived)
+    if (frame - lastNewNoteFrameRef.current < SETTLE_FRAMES) {
+      pendingChordRef.current = { normalized, display: effectiveChord!, full: effectiveFullChord };
+    }
+  }
+
+  // Commit the pending chord once settle period has elapsed since last new note
+  const settled = frame - lastNewNoteFrameRef.current >= SETTLE_FRAMES;
+  if (settled && pendingChordRef.current && pendingChordRef.current.normalized !== prevChordRef.current) {
+    const { normalized: norm, display, full } = pendingChordRef.current;
+    prevChordRef.current = norm;
+    pendingChordRef.current = null;
+    const ringInfo = chordToRingIndex(display);
+    const ring = ringInfo.ring || 'major';
+    const index = ringInfo.index >= 0 ? ringInfo.index : 0;
+
+    const path = pathRef.current;
+    if (path.length === 0) {
+      path.push({ chord: norm, displayChord: display, ring, index, x: PATH_START_X, y: PATH_START_Y, arrivalAngle: 0, isFullChord: full });
+    } else {
+      const lastNode = path[path.length - 1];
+      path.push({
+        chord: norm, displayChord: display, ring, index,
+        x: lastNode.x + PATH_STEP_X,
+        y: PATH_START_Y,
+        arrivalAngle: 0,
+        isFullChord: full,
+      });
+    }
+    onSavePath?.(path.map(n => n.chord));
+  } else if (!effectiveChord) {
+    prevChordRef.current = null;
+    pendingChordRef.current = null;
+  }
+
+  const chordPath = pathRef.current;
+  const latestNode = chordPath.length > 0 ? chordPath[chordPath.length - 1] : null;
+
+  // Zoom target: keep latest node visible with room for branches to the right
+  const zoomTargetXY = latestNode
+    ? { x: latestNode.x + 80 * scale, y: PATH_START_Y }
+    : null;
+  const hasPath = chordPath.length > 0;
+  // Zoom fraction: show a window wide enough for ~2-3 nodes + branches (including tier3 at r3=320)
+  const dynamicZoomFraction = Math.min(1.0, 0.7);
+  const forceReset = resetSignal !== undefined && chordPath.length === 0 && !effectiveChord;
+
   // ── Zoom into played node's quadrant ─────────────────────────────────
   const zoom = useCircleZoom({
     playedIndices,
-    detectedRing,
+    detectedRing: effectiveRing,
     cx: CX, cy: CY, outerR: OUTER_R,
     middleR: MIDDLE_R, innerR: INNER_R,
     fullW: W, fullH: H,
     frame, fps,
-    zoomFraction: 0.28,
+    zoomFraction: hasPath ? dynamicZoomFraction : 0.45,
+    targetXY: zoomTargetXY,
+    stayZoomed: hasPath,
+    forceReset,
   });
 
   const bgStars = useMemo(() => generateStars(220, W, H), [W, H]);
@@ -368,11 +1111,13 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
   return (
     <AbsoluteFill style={{ backgroundColor: palette.bg }}>
       <svg width={W} height={H} viewBox={(() => {
-        // Parse zoom viewBox and add gentle breathing on top
+        // Parse zoom viewBox and add gentle breathing + user pan offset
         const breathX = Math.sin(frame * 0.003) * 8 * (1 + zoom.zoomProgress * 0.5);
         const breathY = Math.cos(frame * 0.0025) * 5 * (1 + zoom.zoomProgress * 0.5);
+        const panX = panOffset?.x ?? 0;
+        const panY = panOffset?.y ?? 0;
         const parts = zoom.viewBox.split(' ').map(Number);
-        return `${parts[0] + breathX} ${parts[1] + breathY} ${parts[2]} ${parts[3]}`;
+        return `${parts[0] + breathX + panX} ${parts[1] + breathY + panY} ${parts[2]} ${parts[3]}`;
       })()}>
         <defs>
           {/* Reusable blur filters — max 3 */}
@@ -385,6 +1130,13 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           <filter id="cof-glow-lg" x="-100%" y="-100%" width="300%" height="300%">
             <feGaussianBlur stdDeviation="30" />
           </filter>
+
+          {/* Tension arc gradient */}
+          <linearGradient id="tension-gradient" x1="0" y1="1" x2="0" y2="0">
+            <stop offset="0%" stopColor={palette.teal} stopOpacity={0} />
+            <stop offset="50%" stopColor={palette.gold} stopOpacity={0.3} />
+            <stop offset="100%" stopColor="#f43f5e" stopOpacity={0.5} />
+          </linearGradient>
 
           {/* Gravitational heatmap gradient */}
           <radialGradient id="cof-heatmap" cx="50%" cy="50%" r="50%">
@@ -424,6 +1176,9 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
             />
           );
         })}
+
+        {/* ── Circle view (fades out when playing or path is active) ──── */}
+        <g opacity={hasPath ? 0 : Math.max(0, 1 - zoom.zoomProgress * 1.5)}>
 
         {/* ── Sacred geometry dodecagon ─────────────────────────────────── */}
         <polygon
@@ -999,6 +1754,8 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           </g>
         )}
 
+        </g>{/* end circle view fade group */}
+
         {/* ── Chord progression trail — bottom glass cards ────────────── */}
         {recentChords.length > 0 && (
           <g>
@@ -1072,171 +1829,602 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
             />
           );
         })}
-        {/* ── Branch tree: local radial nodes around played chord ─────── */}
-        {zoom.primaryPlayedIdx >= 0 && zoom.zoomProgress > 0.05 && (() => {
-          const pi = zoom.primaryPlayedIdx;
-          const [px, py] = polarToXY(CX, CY, OUTER_R, nodeAngle(pi));
-          const zp = zoom.zoomProgress;
+        {/* ── Chord path + branch tree ──────────────────────────────── */}
+        {chordPath.length > 0 && (() => {
+          const zp = hasPath ? 1 : Math.max(zoom.zoomProgress, 0.15); // full opacity when path exists
 
-          // Branch radius — distance from played node in SVG coords
-          // These are in the zoomed-in coordinate space, so they appear larger on screen
-          const branchR1 = 55 * scale;  // tier 1 — closest
-          const branchR2 = 85 * scale;  // tier 2
-          const branchR3 = 115 * scale; // tier 3 — furthest
+          // Compute tension values for the arc
+          const tensions = chordPath.map(n => chordTension(n.chord, activeKey, activeMode));
 
-          // Branch targets with angular placement (local, not circle positions)
-          const branches: Array<{
-            label: string; roman: string; color: string;
-            angle: number; dist: number; tier: number;
-            transition: string; width: number;
-          }> = [
-            // Tier 1 — primary (inner ring, largest)
-            { label: MAJOR_KEYS[(pi + 1) % 12],  roman: 'V',    color: palette.cyan,   angle: -30,  dist: branchR1, tier: 1, transition: MAJOR_KEYS[(pi + 1) % 12] + '7', width: 3 },
-            { label: MAJOR_KEYS[(pi + 11) % 12], roman: 'IV',   color: palette.teal,   angle: -150, dist: branchR1, tier: 1, transition: '', width: 3 },
-            { label: MAJOR_KEYS[(pi + 2) % 12],  roman: 'ii',   color: '#60a5fa',      angle: 30,   dist: branchR1, tier: 1, transition: MAJOR_KEYS[(pi + 2) % 12] + '7', width: 2.5 },
-            // Tier 2 — common (middle ring)
-            { label: MINOR_KEYS[pi],              roman: 'vi',   color: palette.purple,  angle: 180,  dist: branchR2, tier: 2, transition: '', width: 2 },
-            { label: MAJOR_KEYS[(pi + 10) % 12], roman: 'bVII', color: '#fb923c',      angle: -100, dist: branchR2, tier: 2, transition: '', width: 2 },
-            { label: MAJOR_KEYS[(pi + 9) % 12],  roman: 'bVI',  color: '#e879f9',      angle: -60,  dist: branchR2, tier: 2, transition: '', width: 1.5 },
-            { label: MAJOR_KEYS[(pi + 3) % 12],  roman: 'iii',  color: '#818cf8',      angle: 80,   dist: branchR2, tier: 2, transition: MAJOR_KEYS[(pi + 3) % 12] + '7', width: 1.5 },
-            // Tier 3 — chromatic / exotic (outer ring)
-            { label: MAJOR_KEYS[(pi + 8) % 12],  roman: 'bV',   color: '#f87171',      angle: -80,  dist: branchR3, tier: 3, transition: '', width: 1 },
-            { label: MAJOR_KEYS[(pi + 5) % 12],  roman: 'vii°', color: palette.gold,   angle: 60,   dist: branchR3, tier: 3, transition: '', width: 1 },
-            { label: MAJOR_KEYS[(pi + 7) % 12],  roman: 'bIII', color: '#34d399',      angle: 140,  dist: branchR3, tier: 3, transition: '', width: 1 },
-            { label: MAJOR_KEYS[(pi + 4) % 12],  roman: 'V/vi', color: '#c084fc',      angle: 110,  dist: branchR3, tier: 3, transition: '', width: 1 },
-          ];
+          // Famous progression matching
+          const pathChordNames = chordPath.map(n => n.chord);
+          const famousMatch = matchFamousProgressions(pathChordNames, activeKey, activeMode);
 
+          // Render each path node and its connection to the next
           return (
             <g opacity={zp}>
-              {branches.map((b, bi) => {
-                // Position relative to the played node
-                const rad = (b.angle - 90) * Math.PI / 180;
-                const tx = px + b.dist * Math.cos(rad);
-                const ty = py + b.dist * Math.sin(rad);
+              {/* ── Loop region bracket ── */}
+              {loopRegion && chordPath.length > 1 && (() => {
+                const [ls, le] = loopRegion;
+                const startNode = chordPath[Math.min(ls, chordPath.length - 1)];
+                const endNode = chordPath[Math.min(le, chordPath.length - 1)];
+                const bracketY = PATH_START_Y - 55 * scale;
+                const bracketH = 12 * scale;
+                return (
+                  <g>
+                    <rect
+                      x={startNode.x - 8 * scale} y={bracketY}
+                      width={endNode.x - startNode.x + 16 * scale} height={bracketH}
+                      rx={3} fill="rgba(251,191,36,0.08)"
+                      stroke={palette.gold} strokeWidth={1} opacity={0.6}
+                      strokeDasharray="4 2"
+                    />
+                    <text
+                      x={(startNode.x + endNode.x) / 2} y={bracketY + bracketH / 2 + 1}
+                      textAnchor="middle" dominantBaseline="central"
+                      fill={palette.gold} fontSize={4.5 * scale} fontFamily="monospace"
+                      fontWeight={600} opacity={0.7}
+                    >LOOP</text>
+                  </g>
+                );
+              })()}
 
-                // Curved branch line — slight curve away from center
-                const mx = (px + tx) / 2;
-                const my = (py + ty) / 2;
-                const perpX = -(ty - py);
-                const perpY = (tx - px);
-                const perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
-                const curveMag = (b.tier === 1 ? 8 : b.tier === 2 ? 12 : 16) * scale;
-                const cpx = mx + (perpLen > 0 ? perpX / perpLen * curveMag : 0);
-                const cpy = my + (perpLen > 0 ? perpY / perpLen * curveMag : 0);
-                const arcD = `M ${px} ${py} Q ${cpx} ${cpy} ${tx} ${ty}`;
+              {/* ── Tension arc ── */}
+              {chordPath.length >= 2 && (() => {
+                const arcY = PATH_START_Y - 35 * scale;
+                const maxDeflect = 25 * scale; // max height of tension curve
+                // Build SVG path from tension values
+                const points = chordPath.map((node, i) => ({
+                  x: node.x,
+                  y: arcY - tensions[i] * maxDeflect,
+                }));
+                let d = `M ${points[0].x} ${points[0].y}`;
+                for (let i = 1; i < points.length; i++) {
+                  const prev = points[i - 1];
+                  const curr = points[i];
+                  const cpx = (prev.x + curr.x) / 2;
+                  d += ` C ${cpx} ${prev.y} ${cpx} ${curr.y} ${curr.x} ${curr.y}`;
+                }
+                return (
+                  <g>
+                    {/* Tension fill */}
+                    <path
+                      d={d + ` L ${points[points.length - 1].x} ${arcY} L ${points[0].x} ${arcY} Z`}
+                      fill="url(#tension-gradient)" opacity={0.15}
+                    />
+                    {/* Tension line */}
+                    <path d={d} fill="none" stroke={palette.gold} strokeWidth={1.2 * scale}
+                      opacity={0.4} strokeLinecap="round"
+                    />
+                    {/* Tension dots */}
+                    {points.map((p, i) => (
+                      <circle key={`t-${i}`} cx={p.x} cy={p.y} r={2 * scale}
+                        fill={tensions[i] > 0.6 ? palette.gold : tensions[i] > 0.3 ? palette.teal : palette.cyan}
+                        opacity={0.6}
+                      />
+                    ))}
+                    {/* Label */}
+                    <text x={points[0].x - 8 * scale} y={arcY - maxDeflect * 0.5}
+                      textAnchor="end" fill={palette.textDim} fontSize={3.5 * scale}
+                      fontFamily="monospace" opacity={0.3}
+                    >tension</text>
+                  </g>
+                );
+              })()}
 
-                const nodeR = b.tier === 1 ? 14 * scale : b.tier === 2 ? 10 * scale : 8 * scale;
-                const dashLen = b.tier === 1 ? 8 : 5;
-                const gapLen = b.tier === 1 ? 4 : 5;
+              {/* ── Voice leading between nodes ── */}
+              {chordPath.map((node, ni) => {
+                if (ni === 0) return null;
+                const prev = chordPath[ni - 1];
+                const prevNotes = chordToMidi(prev.chord).map(n => n % 12).sort((a, b) => a - b);
+                const currNotes = chordToMidi(node.chord).map(n => n % 12).sort((a, b) => a - b);
 
-                const isHovered = hoveredBranch === b.roman;
-                const hoverScale = isHovered ? 1.2 : 1;
+                // Voice leading: match each note in prev to closest note in curr
+                const vlY = PATH_START_Y + 22 * scale; // below the node center
+                const toneSpacing = 11 * scale;
+                const toneR = 5 * scale;
+                const midX = (prev.x + node.x) / 2;
+
+                // Build voice pairs: for each prev note, find best curr target
+                const usedCurr = new Set<number>();
+                const pairs: { from: number; to: number; fromIdx: number; toIdx: number; common: boolean }[] = [];
+                // First pass: exact matches (common tones)
+                for (let fi = 0; fi < prevNotes.length; fi++) {
+                  const ci = currNotes.indexOf(prevNotes[fi]);
+                  if (ci >= 0 && !usedCurr.has(ci)) {
+                    pairs.push({ from: prevNotes[fi], to: currNotes[ci], fromIdx: fi, toIdx: ci, common: true });
+                    usedCurr.add(ci);
+                  }
+                }
+                // Second pass: step motion for unmatched
+                for (let fi = 0; fi < prevNotes.length; fi++) {
+                  if (pairs.some(p => p.fromIdx === fi)) continue;
+                  let bestCi = -1;
+                  let bestDist = 99;
+                  for (let ci = 0; ci < currNotes.length; ci++) {
+                    if (usedCurr.has(ci)) continue;
+                    const dist = Math.min(
+                      Math.abs(currNotes[ci] - prevNotes[fi]),
+                      12 - Math.abs(currNotes[ci] - prevNotes[fi])
+                    );
+                    if (dist < bestDist) { bestDist = dist; bestCi = ci; }
+                  }
+                  if (bestCi >= 0) {
+                    pairs.push({ from: prevNotes[fi], to: currNotes[bestCi], fromIdx: fi, toIdx: bestCi, common: false });
+                    usedCurr.add(bestCi);
+                  }
+                }
+
+                const age = chordPath.length - ni;
+                const ageDim = Math.max(0.3, 1 - age * 0.1);
+
+                // Build tooltip data for hover
+                const pairData = pairs.map(pair => {
+                  const fromName = noteName(pair.from, activeKey);
+                  const toName = noteName(pair.to, activeKey);
+                  if (pair.common) return { fromName, toName, common: true, stepDesc: 'common tone — held' };
+                  const dist = Math.min(
+                    Math.abs(pair.to - pair.from),
+                    12 - Math.abs(pair.to - pair.from)
+                  );
+                  const dir = ((pair.to - pair.from + 12) % 12) <= 6 ? '↑' : '↓';
+                  const stepDesc = `${dir} ${dist === 1 ? 'half step' : dist === 2 ? 'whole step' : dist + ' semitones'}`;
+                  return { fromName, toName, common: false, stepDesc };
+                });
+
+                const isHovered = hoveredVL?.fromChord === prev.chord && hoveredVL?.toChord === node.chord;
+                const hoverBoost = isHovered ? 1.3 : 1;
+                const vlHitH = Math.max(...[prevNotes.length, currNotes.length]) * toneSpacing + toneR * 8 + 20 * scale;
 
                 return (
-                  <g key={`branch-${bi}`}
-                    onMouseEnter={() => onBranchEnter(b.roman)}
-                    onMouseLeave={onBranchLeave}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    {/* Glow under branch line */}
-                    {b.tier <= 2 && (
-                      <path d={arcD} fill="none"
-                        stroke={b.color} strokeWidth={b.width * 3}
-                        opacity={isHovered ? 0.12 : 0.04} strokeLinecap="round"
+                  <g key={`vl-${ni}`} opacity={ageDim * (isHovered ? 1 : 0.85)}>
+                    {/* Invisible hit area for hover */}
+                    <rect
+                      x={prev.x - 5 * scale} y={vlY - vlHitH / 2}
+                      width={node.x - prev.x + 10 * scale} height={vlHitH}
+                      fill="transparent"
+                      onMouseEnter={() => onVLEnter({
+                        x: midX, y: vlY - vlHitH / 2 - 8 * scale,
+                        fromChord: prev.displayChord || prev.chord,
+                        toChord: node.displayChord || node.chord,
+                        pairs: pairData,
+                      })}
+                      onMouseLeave={onVLLeave}
+                    />
+                    {/* Prev chord tones (stacked vertically) */}
+                    {prevNotes.map((note, ti) => {
+                      const ty = vlY + (ti - (prevNotes.length - 1) / 2) * toneSpacing;
+                      const isCommon = pairs.find(p => p.fromIdx === ti)?.common;
+                      const color = isCommon ? palette.cyan : palette.purple;
+                      const cx0 = prev.x + 14 * scale;
+                      return (
+                        <g key={`vl-p-${ni}-${ti}`}>
+                          {/* Neon glow */}
+                          <circle cx={cx0} cy={ty} r={(toneR + 4 * scale) * hoverBoost}
+                            fill={color} opacity={isHovered ? 0.18 : 0.1}
+                          />
+                          <circle cx={cx0} cy={ty} r={(toneR + 2 * scale) * hoverBoost}
+                            fill={color} opacity={isHovered ? 0.25 : 0.15}
+                          />
+                          {/* Core dot */}
+                          <circle cx={cx0} cy={ty} r={toneR * hoverBoost}
+                            fill={palette.bg} stroke={color}
+                            strokeWidth={(isHovered ? 1.8 : 1.2) * scale} opacity={isHovered ? 1 : 0.8}
+                          />
+                          <circle cx={cx0} cy={ty} r={Math.max(0, toneR * hoverBoost - 1.5 * scale)}
+                            fill={color} opacity={isHovered ? 0.3 : 0.2}
+                          />
+                          {/* Label */}
+                          <text x={cx0} y={ty + 0.5}
+                            textAnchor="middle" dominantBaseline="central"
+                            fill="#ffffff" fontSize={4.5 * scale * hoverBoost} fontFamily="monospace" fontWeight={700}
+                            opacity={isHovered ? 1 : 0.9}
+                          >{noteName(note, activeKey)}</text>
+                        </g>
+                      );
+                    })}
+                    {/* Curr chord tones */}
+                    {currNotes.map((note, ti) => {
+                      const ty = vlY + (ti - (currNotes.length - 1) / 2) * toneSpacing;
+                      const isCommon = pairs.find(p => p.toIdx === ti)?.common;
+                      const color = isCommon ? palette.cyan : palette.purple;
+                      const cx0 = node.x - 14 * scale;
+                      return (
+                        <g key={`vl-c-${ni}-${ti}`}>
+                          {/* Neon glow */}
+                          <circle cx={cx0} cy={ty} r={(toneR + 4 * scale) * hoverBoost}
+                            fill={color} opacity={isHovered ? 0.18 : 0.1}
+                          />
+                          <circle cx={cx0} cy={ty} r={(toneR + 2 * scale) * hoverBoost}
+                            fill={color} opacity={isHovered ? 0.25 : 0.15}
+                          />
+                          {/* Core dot */}
+                          <circle cx={cx0} cy={ty} r={toneR * hoverBoost}
+                            fill={palette.bg} stroke={color}
+                            strokeWidth={(isHovered ? 1.8 : 1.2) * scale} opacity={isHovered ? 1 : 0.8}
+                          />
+                          <circle cx={cx0} cy={ty} r={Math.max(0, toneR * hoverBoost - 1.5 * scale)}
+                            fill={color} opacity={isHovered ? 0.3 : 0.2}
+                          />
+                          {/* Label */}
+                          <text x={cx0} y={ty + 0.5}
+                            textAnchor="middle" dominantBaseline="central"
+                            fill="#ffffff" fontSize={4.5 * scale * hoverBoost} fontFamily="monospace" fontWeight={700}
+                            opacity={isHovered ? 1 : 0.9}
+                          >{noteName(note, activeKey)}</text>
+                        </g>
+                      );
+                    })}
+                    {/* Connection lines between voice pairs */}
+                    {pairs.map((pair, pi) => {
+                      const fromY = vlY + (pair.fromIdx - (prevNotes.length - 1) / 2) * toneSpacing;
+                      const toY = vlY + (pair.toIdx - (currNotes.length - 1) / 2) * toneSpacing;
+                      const x1 = prev.x + 14 * scale + toneR + 2;
+                      const x2 = node.x - 14 * scale - toneR - 2;
+                      const color = pair.common ? palette.cyan : palette.purple;
+                      return (
+                        <g key={`vl-line-${ni}-${pi}`}>
+                          {pair.common ? (
+                            <>
+                              <line x1={x1} y1={fromY} x2={x2} y2={toY}
+                                stroke={color} strokeWidth={(isHovered ? 6 : 4) * scale} opacity={isHovered ? 0.1 : 0.06}
+                                strokeLinecap="round"
+                              />
+                              <line x1={x1} y1={fromY} x2={x2} y2={toY}
+                                stroke={color} strokeWidth={(isHovered ? 2 : 1.5) * scale} opacity={isHovered ? 0.6 : 0.4}
+                                strokeLinecap="round"
+                              />
+                            </>
+                          ) : (
+                            <>
+                              <path
+                                d={`M ${x1} ${fromY} C ${midX} ${fromY} ${midX} ${toY} ${x2} ${toY}`}
+                                fill="none" stroke={color} strokeWidth={(isHovered ? 6 : 4) * scale}
+                                opacity={isHovered ? 0.1 : 0.06} strokeLinecap="round"
+                              />
+                              <path
+                                d={`M ${x1} ${fromY} C ${midX} ${fromY} ${midX} ${toY} ${x2} ${toY}`}
+                                fill="none" stroke={color} strokeWidth={(isHovered ? 1.6 : 1.2) * scale}
+                                opacity={isHovered ? 0.5 : 0.35} strokeDasharray={`${4 * scale} ${3 * scale}`}
+                                strokeLinecap="round"
+                              />
+                            </>
+                          )}
+                        </g>
+                      );
+                    })}
+                  </g>
+                );
+              })}
+
+              {/* ── Path connection lines (neon chain) ── */}
+              {chordPath.map((node, ni) => {
+                if (ni === 0) return null;
+                const prev = chordPath[ni - 1];
+                const isRecent = ni >= chordPath.length - 3;
+                const age = chordPath.length - ni;
+                const ageDim = Math.max(0.4, 1 - age * 0.08);
+                // Color by harmonic function
+                const funcColor = FUNCTION_COLORS[chordFunction(node.chord, activeKey)];
+                const lineColor = funcColor;
+                const inLoop = loopRegion && ni >= loopRegion[0] && ni <= loopRegion[1];
+                return (
+                  <g key={`path-line-${ni}`}>
+                    {/* Wide soft glow */}
+                    <line x1={prev.x} y1={prev.y} x2={node.x} y2={node.y}
+                      stroke={lineColor} strokeWidth={12 * scale}
+                      opacity={0.06 * ageDim * (inLoop ? 1.5 : 1)} strokeLinecap="round"
+                    />
+                    {/* Medium glow */}
+                    <line x1={prev.x} y1={prev.y} x2={node.x} y2={node.y}
+                      stroke={lineColor} strokeWidth={6 * scale}
+                      opacity={0.12 * ageDim} strokeLinecap="round"
+                    />
+                    {/* Core line */}
+                    <line x1={prev.x} y1={prev.y} x2={node.x} y2={node.y}
+                      stroke={lineColor} strokeWidth={2.5 * scale}
+                      opacity={0.6 * ageDim} strokeLinecap="round"
+                    />
+                    {/* Animated dashed overlay */}
+                    <line x1={prev.x} y1={prev.y} x2={node.x} y2={node.y}
+                      stroke="#ffffff" strokeWidth={1.5 * scale}
+                      opacity={0.2 * ageDim} strokeLinecap="round"
+                      strokeDasharray={`${4 * scale} ${6 * scale}`}
+                      strokeDashoffset={-frame * 0.8}
+                    />
+                    {/* Flowing particles on path segment */}
+                    {isRecent && [0, 0.5].map((offset, pi) => {
+                      const progress = ((frame * 1.5 + ni * 30 + offset * 60) % 60) / 60;
+                      const px2 = prev.x + (node.x - prev.x) * progress;
+                      const py2 = prev.y + (node.y - prev.y) * progress;
+                      return (
+                        <React.Fragment key={pi}>
+                          <circle cx={px2} cy={py2} r={3 * scale} fill={lineColor} opacity={0.15} />
+                          <circle cx={px2} cy={py2} r={1.5 * scale} fill={lineColor} opacity={0.7} />
+                        </React.Fragment>
+                      );
+                    })}
+                  </g>
+                );
+              })}
+
+              {/* ── Past path nodes ── */}
+              {chordPath.slice(0, -1).map((node, ni) => {
+                const age = chordPath.length - 1 - ni;
+                const dimFactor = Math.max(0.4, 1 - age * 0.08);
+                const nodeR = 10 * scale;
+                const funcCol = FUNCTION_COLORS[chordFunction(node.chord, activeKey)];
+                const nodeColor = funcCol;
+                const isPlaying = playbackIndex === ni;
+                const playPulse = isPlaying ? 0.5 + 0.5 * Math.sin(frame * 0.15) : 0;
+                return (
+                  <g key={`path-node-${ni}`}>
+                    {/* Playback indicator */}
+                    {isPlaying && (
+                      <circle cx={node.x} cy={node.y} r={nodeR + 18 + playPulse * 5}
+                        fill={palette.gold} opacity={0.15 + playPulse * 0.1}
                       />
                     )}
-                    {/* Branch line — animated dash flowing outward */}
-                    <path d={arcD} fill="none"
-                      stroke={b.color} strokeWidth={b.width * (isHovered ? 1.5 : 1)}
-                      opacity={isHovered ? 0.8 : b.tier === 1 ? 0.5 : b.tier === 2 ? 0.35 : 0.2}
-                      strokeDasharray={`${dashLen} ${gapLen}`}
-                      strokeDashoffset={-frame * (b.tier === 1 ? 1.2 : 0.7)}
-                      strokeLinecap="round"
-                    />
-
-                    {/* Transition label on branch midpoint */}
-                    {b.transition && (
-                      <g>
-                        <rect
-                          x={cpx - 12 * scale} y={cpy - 5 * scale}
-                          width={24 * scale} height={10 * scale} rx={2}
-                          fill="rgba(8,14,24,0.85)"
-                          stroke={b.color} strokeWidth={0.3}
-                          opacity={0.7}
+                    {/* Full chord: double glow ring */}
+                    {node.isFullChord && (
+                      <>
+                        <circle cx={node.x} cy={node.y} r={nodeR + 16}
+                          fill={palette.gold} opacity={0.05 * dimFactor}
                         />
-                        <text x={cpx} y={cpy + 2.5 * scale}
-                          textAnchor="middle" fill={b.color}
-                          fontSize={5.5 * scale} fontFamily="monospace" fontWeight={600}
-                          opacity={0.85}
-                        >
-                          {b.transition}
-                        </text>
-                      </g>
+                        <circle cx={node.x} cy={node.y} r={nodeR + 5}
+                          fill="none" stroke={palette.gold}
+                          strokeWidth={1.2} opacity={0.3 * dimFactor}
+                        />
+                      </>
                     )}
-
-                    {/* Hover hit area — invisible larger circle for easier targeting */}
-                    <circle cx={tx} cy={ty} r={nodeR * 2}
-                      fill="transparent" stroke="none"
+                    {/* Neon glow */}
+                    <circle cx={node.x} cy={node.y} r={nodeR + 10}
+                      fill={nodeColor} opacity={0.08 * dimFactor}
                     />
-
-                    {/* Target node — glass circle */}
-                    <circle cx={tx} cy={ty} r={(nodeR + 6) * hoverScale}
-                      fill={b.color} opacity={(isHovered ? 0.12 : 0.04) + 0.02 * Math.sin(frame * 0.05 + bi)}
+                    {/* Node */}
+                    <circle cx={node.x} cy={node.y} r={nodeR}
+                      fill={palette.bg} stroke={nodeColor}
+                      strokeWidth={isPlaying ? 3 : node.isFullChord ? 2.2 : 1.8} opacity={isPlaying ? 1 : 0.8 * dimFactor}
                     />
-                    {isHovered && (
-                      <circle cx={tx} cy={ty} r={nodeR * hoverScale + 12}
-                        fill={b.color} opacity={0.06}
+                    <circle cx={node.x} cy={node.y} r={nodeR - 3}
+                      fill={nodeColor} opacity={(node.isFullChord ? 0.22 : 0.12) * dimFactor}
+                    />
+                    {/* Label */}
+                    <text x={node.x} y={node.y + 1}
+                      textAnchor="middle" dominantBaseline="central"
+                      fill={isPlaying ? '#ffffff' : palette.text} fontSize={8 * scale}
+                      fontFamily="monospace" fontWeight={isPlaying ? 800 : node.isFullChord ? 700 : 600}
+                      opacity={isPlaying ? 1 : 0.85 * dimFactor}
+                    >
+                      {node.displayChord || node.chord}
+                    </text>
+                    {/* Step number */}
+                    <text x={node.x} y={node.y - nodeR - 4 * scale}
+                      textAnchor="middle" fill={palette.textDim}
+                      fontSize={4 * scale} fontFamily="monospace"
+                      opacity={0.3 * dimFactor}
+                    >
+                      {ni + 1}
+                    </text>
+                    {/* Hit area — right-click to delete */}
+                    {onDeleteNode && (
+                      <circle cx={node.x} cy={node.y} r={nodeR + 4}
+                        fill="transparent" stroke="none"
+                        style={{ cursor: 'pointer' }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          onDeleteNode(ni);
+                        }}
                       />
                     )}
-                    <circle cx={tx} cy={ty} r={nodeR * hoverScale}
-                      fill={palette.bg} stroke={b.color}
-                      strokeWidth={isHovered ? 2.5 : b.tier === 1 ? 2 : 1.2}
-                      opacity={isHovered ? 1 : b.tier === 1 ? 0.9 : b.tier === 2 ? 0.7 : 0.5}
-                    />
-                    <circle cx={tx} cy={ty} r={Math.max(0, nodeR * hoverScale - 3)}
-                      fill={b.color}
-                      opacity={isHovered ? 0.25 : b.tier === 1 ? 0.15 : 0.08}
-                    />
+                  </g>
+                );
+              })}
 
-                    {/* Chord name */}
-                    <text x={tx} y={ty + 1}
-                      textAnchor="middle" dominantBaseline="central"
-                      fill={isHovered ? '#ffffff' : palette.text}
-                      fontSize={(b.tier === 1 ? 9 * scale : b.tier === 2 ? 7 * scale : 6 * scale) * hoverScale}
-                      fontFamily="monospace" fontWeight={isHovered ? 800 : b.tier === 1 ? 700 : 500}
-                      opacity={isHovered ? 1 : b.tier === 1 ? 1 : b.tier === 2 ? 0.85 : 0.65}
-                    >
-                      {b.label}
-                    </text>
+              {/* ── Latest node (large, bright, with branches) ── */}
+              {latestNode && (() => {
+                const px = latestNode.x;
+                const py = latestNode.y;
+                const playedNodeR = 14 * scale;
+                const branches = generateBranches(
+                  latestNode.index, latestNode.ring, latestNode.arrivalAngle, scale,
+                );
 
-                    {/* Roman numeral below node */}
-                    <text x={tx} y={ty + nodeR * hoverScale + 6 * scale}
-                      textAnchor="middle"
-                      fill={b.color}
-                      fontSize={5 * scale * hoverScale} fontFamily="monospace" fontWeight={600}
-                      opacity={isHovered ? 0.9 : b.tier === 1 ? 0.7 : 0.45}
-                    >
-                      {b.roman}
-                    </text>
+                return (
+                  <g>
+                    {/* Branches from latest node */}
+                    {branches.map((b, bi) => {
+                      const rad = (b.angle - 90) * Math.PI / 180;
+                      const tx = px + b.dist * Math.cos(rad);
+                      const ty = py + b.dist * Math.sin(rad);
 
-                    {/* Flowing particle along branch */}
-                    {b.tier <= 2 && (() => {
-                      const period = b.tier === 1 ? 60 : 90;
-                      const progress = ((frame * 2 + bi * 20) % period) / period;
-                      const t2 = progress;
-                      const mt = 1 - t2;
-                      const bx2 = mt * mt * px + 2 * mt * t2 * cpx + t2 * t2 * tx;
-                      const by2 = mt * mt * py + 2 * mt * t2 * cpy + t2 * t2 * ty;
+                      const mx = (px + tx) / 2;
+                      const my = (py + ty) / 2;
+                      const perpX = -(ty - py);
+                      const perpY = (tx - px);
+                      const perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
+                      const curveMag = (b.tier === 1 ? 8 : b.tier === 2 ? 12 : 16) * scale;
+                      const cpx = mx + (perpLen > 0 ? perpX / perpLen * curveMag : 0);
+                      const cpy = my + (perpLen > 0 ? perpY / perpLen * curveMag : 0);
+                      const arcD = `M ${px} ${py} Q ${cpx} ${cpy} ${tx} ${ty}`;
+
+                      const nodeR = b.tier === 1 ? 14 * scale : b.tier === 2 ? 10 * scale : 8 * scale;
+                      const dashLen = b.tier === 1 ? 8 : 5;
+                      const gapLen = b.tier === 1 ? 4 : 5;
+
+                      const isHovered = hoveredBranch?.roman === b.roman;
+                      const hs = isHovered ? 1.2 : 1;
+
+                      return (
+                        <g key={`branch-${bi}`}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          {b.tier <= 2 && (
+                            <path d={arcD} fill="none"
+                              stroke={b.color} strokeWidth={b.width * 3}
+                              opacity={isHovered ? 0.12 : 0.04} strokeLinecap="round"
+                            />
+                          )}
+                          <path d={arcD} fill="none"
+                            stroke={b.color} strokeWidth={b.width * (isHovered ? 1.5 : 1)}
+                            opacity={isHovered ? 0.8 : b.tier === 1 ? 0.5 : b.tier === 2 ? 0.35 : 0.2}
+                            strokeDasharray={`${dashLen} ${gapLen}`}
+                            strokeDashoffset={-frame * (b.tier === 1 ? 1.2 : 0.7)}
+                            strokeLinecap="round"
+                          />
+                          {b.transition && (
+                            <g>
+                              <rect x={cpx - 12 * scale} y={cpy - 5 * scale}
+                                width={24 * scale} height={10 * scale} rx={2}
+                                fill="rgba(8,14,24,0.85)" stroke={b.color} strokeWidth={0.3} opacity={0.7}
+                              />
+                              <text x={cpx} y={cpy + 2.5 * scale}
+                                textAnchor="middle" fill={b.color}
+                                fontSize={5.5 * scale} fontFamily="monospace" fontWeight={600} opacity={0.85}
+                              >{b.transition}</text>
+                            </g>
+                          )}
+                          {/* Wide invisible hit area along the entire branch path */}
+                          <path d={arcD} fill="none" stroke="transparent"
+                            strokeWidth={20 * scale}
+                            style={{ cursor: 'pointer' }}
+                            onMouseEnter={() => onBranchEnter(b.roman, tx, ty, px, py)}
+                            onMouseLeave={onBranchLeave}
+                            onClick={(e) => { e.stopPropagation(); onClickChord?.(b.targetChord); }}
+                          />
+                          {/* Node hit area */}
+                          <circle cx={tx} cy={ty} r={nodeR * 3.5} fill="transparent" stroke="none"
+                            style={{ cursor: 'pointer' }}
+                            onMouseEnter={() => onBranchEnter(b.roman, tx, ty, px, py)}
+                            onMouseLeave={onBranchLeave}
+                            onClick={(e) => { e.stopPropagation(); onClickChord?.(b.targetChord); }}
+                          />
+                          <circle cx={tx} cy={ty} r={(nodeR + 6) * hs}
+                            fill={b.color} opacity={(isHovered ? 0.12 : 0.04) + 0.02 * Math.sin(frame * 0.05 + bi)}
+                          />
+                          {isHovered && <circle cx={tx} cy={ty} r={nodeR * hs + 12} fill={b.color} opacity={0.06} />}
+                          <circle cx={tx} cy={ty} r={nodeR * hs}
+                            fill={palette.bg} stroke={b.color}
+                            strokeWidth={isHovered ? 2.5 : b.tier === 1 ? 2 : 1.2}
+                            opacity={isHovered ? 1 : b.tier === 1 ? 0.9 : b.tier === 2 ? 0.7 : 0.5}
+                          />
+                          <circle cx={tx} cy={ty} r={Math.max(0, nodeR * hs - 3)}
+                            fill={b.color} opacity={isHovered ? 0.25 : b.tier === 1 ? 0.15 : 0.08}
+                          />
+                          <text x={tx} y={ty + 1}
+                            textAnchor="middle" dominantBaseline="central"
+                            fill={isHovered ? '#ffffff' : palette.text}
+                            fontSize={(b.tier === 1 ? 9 * scale : b.tier === 2 ? 7 * scale : 6 * scale) * hs}
+                            fontFamily="monospace" fontWeight={isHovered ? 800 : b.tier === 1 ? 700 : 500}
+                            opacity={isHovered ? 1 : b.tier === 1 ? 1 : b.tier === 2 ? 0.85 : 0.65}
+                          >{b.label}</text>
+                          <text x={tx} y={ty + nodeR * hs + 6 * scale}
+                            textAnchor="middle" fill={b.color}
+                            fontSize={5 * scale * hs} fontFamily="monospace" fontWeight={600}
+                            opacity={isHovered ? 0.9 : b.tier === 1 ? 0.7 : 0.45}
+                          >{b.roman}</text>
+                          {b.tier <= 2 && (() => {
+                            const period = b.tier === 1 ? 60 : 90;
+                            const progress = ((frame * 2 + bi * 20) % period) / period;
+                            const t2 = progress; const mt = 1 - t2;
+                            const bx2 = mt * mt * px + 2 * mt * t2 * cpx + t2 * t2 * tx;
+                            const by2 = mt * mt * py + 2 * mt * t2 * cpy + t2 * t2 * ty;
+                            return (
+                              <>
+                                <circle cx={bx2} cy={by2} r={2.5 * scale} fill={b.color} opacity={0.12} />
+                                <circle cx={bx2} cy={by2} r={1.2 * scale} fill={b.color} opacity={0.6} />
+                              </>
+                            );
+                          })()}
+                        </g>
+                      );
+                    })}
+
+                    {/* Latest played node (on top of branches) */}
+                    {(() => {
+                      const fc = latestNode.isFullChord;
+                      const nodeColor = fc ? palette.gold : palette.cyan;
+                      const pulsePhase = Math.sin(frame * 0.06);
                       return (
                         <>
-                          <circle cx={bx2} cy={by2} r={2.5 * scale} fill={b.color} opacity={0.12} />
-                          <circle cx={bx2} cy={by2} r={1.2 * scale} fill={b.color} opacity={0.6} />
+                          {/* Full chord: outer neon burst ring */}
+                          {fc && (
+                            <>
+                              <circle cx={px} cy={py} r={playedNodeR + 30 + 3 * pulsePhase}
+                                fill={palette.gold} opacity={0.06 + 0.03 * pulsePhase}
+                              />
+                              <circle cx={px} cy={py} r={playedNodeR + 6}
+                                fill="none" stroke={palette.gold}
+                                strokeWidth={2} opacity={0.4 + 0.15 * pulsePhase}
+                                strokeDasharray={`${3 * scale} ${2 * scale}`}
+                                strokeDashoffset={-frame * 0.5}
+                              />
+                            </>
+                          )}
+                          {/* Standard glow */}
+                          <circle cx={px} cy={py} r={playedNodeR + 20}
+                            fill={nodeColor} opacity={0.04 + 0.02 * pulsePhase}
+                          />
+                          <circle cx={px} cy={py} r={playedNodeR + 10}
+                            fill={nodeColor} opacity={fc ? 0.12 : 0.08}
+                          />
+                          <circle cx={px} cy={py} r={playedNodeR + 3}
+                            fill="none" stroke={nodeColor}
+                            strokeWidth={fc ? 2 : 1.5} opacity={0.5 + 0.2 * Math.sin(frame * 0.07)}
+                          />
+                          <circle cx={px} cy={py} r={playedNodeR}
+                            fill={palette.bg} stroke={nodeColor}
+                            strokeWidth={fc ? 3 : 2.5} opacity={1}
+                          />
+                          <circle cx={px} cy={py} r={playedNodeR - 4}
+                            fill={nodeColor} opacity={fc ? 0.3 : 0.2}
+                          />
+                          <text x={px} y={py + 1}
+                            textAnchor="middle" dominantBaseline="central"
+                            fill={fc ? palette.gold : '#ffffff'} fontSize={11 * scale}
+                            fontFamily="monospace" fontWeight={900}
+                          >
+                            {latestNode.displayChord || latestNode.chord}
+                          </text>
+                          {/* Step number */}
+                          <text x={px} y={py - playedNodeR - 5 * scale}
+                            textAnchor="middle" fill={nodeColor}
+                            fontSize={5 * scale} fontFamily="monospace" fontWeight={600}
+                            opacity={0.5}
+                          >
+                            {chordPath.length}
+                          </text>
+                          {/* Hit area — right-click to delete latest node */}
+                          {onDeleteNode && (
+                            <circle cx={px} cy={py} r={playedNodeR + 6}
+                              fill="transparent" stroke="none"
+                              style={{ cursor: 'pointer' }}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                onDeleteNode(chordPath.length - 1);
+                              }}
+                            />
+                          )}
+                          {/* Ripple */}
+                          {(() => {
+                            const ripR = playedNodeR + 4 + (frame % 50);
+                            const ripOp = interpolate(frame % 50, [0, 50], [fc ? 0.2 : 0.15, 0]);
+                            return <circle cx={px} cy={py} r={ripR} fill="none" stroke={nodeColor} strokeWidth={fc ? 1.2 : 0.8} opacity={ripOp} />;
+                          })()}
+                          {/* Full chord: extra ripple ring */}
+                          {fc && (() => {
+                            const ripR2 = playedNodeR + 4 + ((frame + 25) % 60);
+                            const ripOp2 = interpolate((frame + 25) % 60, [0, 60], [0.12, 0]);
+                            return <circle cx={px} cy={py} r={ripR2} fill="none" stroke={palette.gold} strokeWidth={0.6} opacity={ripOp2} />;
+                          })()}
                         </>
                       );
                     })()}
                   </g>
                 );
-              })}
+              })()}
             </g>
           );
         })()}
@@ -1461,18 +2649,120 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           );
         })()}
 
+        {/* ── Famous progression match indicator ─────────────────────── */}
+        {chordPath.length >= 3 && (() => {
+          const pathNames = chordPath.map(n => n.chord);
+          const matches = matchFamousProgressions(pathNames, activeKey, activeMode);
+          if (matches.exact.length === 0 && matches.close.length === 0) return null;
+          const firstNode = chordPath[0];
+          const displayY = PATH_START_Y + 45 * scale;
+          const fs = 5 * scale;
+          return (
+            <g>
+              {matches.exact.map((m, i) => (
+                <g key={`match-${i}`}>
+                  <rect x={firstNode.x - 4 * scale} y={displayY + i * 14 * scale - 5 * scale}
+                    width={180 * scale} height={12 * scale} rx={3}
+                    fill="rgba(251,191,36,0.08)" stroke={palette.gold} strokeWidth={0.5} opacity={0.6}
+                  />
+                  <text x={firstNode.x + 2 * scale} y={displayY + i * 14 * scale + 1.5 * scale}
+                    fill={palette.gold} fontSize={fs} fontFamily="monospace" fontWeight={700} opacity={0.8}
+                  >{m.name}{m.artist ? ` — ${m.artist}` : ''}</text>
+                  <text x={firstNode.x + 170 * scale} y={displayY + i * 14 * scale + 1.5 * scale}
+                    textAnchor="end" fill={palette.textDim} fontSize={fs * 0.8}
+                    fontFamily="monospace" opacity={0.5}
+                  >{m.genre}</text>
+                </g>
+              ))}
+              {matches.close.map((c, i) => (
+                <g key={`close-${i}`}>
+                  <text x={firstNode.x} y={displayY + (matches.exact.length + i) * 14 * scale + 1.5 * scale}
+                    fill={palette.textDim} fontSize={fs * 0.9} fontFamily="monospace" opacity={0.5}
+                  >≈ {c.prog.name}{c.prog.artist ? ` — ${c.prog.artist}` : ''} (1 chord away)</text>
+                </g>
+              ))}
+            </g>
+          );
+        })()}
+
+        {/* ── Voice leading hover tooltip ─────────────────────────── */}
+        {hoveredVL && (() => {
+          const tipW = 180 * scale;
+          const lh = 7.5 * scale;
+          const fs = 5.5 * scale;
+          const tipH = (hoveredVL.pairs.length + 2) * lh + 8 * scale;
+          let tipX = hoveredVL.x - tipW / 2;
+          let tipY = hoveredVL.y - tipH;
+
+          return (
+            <g>
+              <rect x={tipX} y={tipY} width={tipW} height={tipH} rx={4}
+                fill="rgba(8,14,24,0.94)" stroke={palette.glassBorder} strokeWidth={0.5}
+              />
+              {/* Accent bar */}
+              <rect x={tipX} y={tipY} width={2.5} height={tipH} rx={1}
+                fill={palette.purple} opacity={0.6}
+              />
+              {/* Header */}
+              <text x={tipX + 8} y={tipY + lh + 1}
+                fill={palette.text} fontSize={fs * 1.2}
+                fontFamily="monospace" fontWeight={800}
+              >
+                {hoveredVL.fromChord} → {hoveredVL.toChord}
+              </text>
+              <text x={tipX + 8} y={tipY + lh * 2 + 1}
+                fill={palette.textDim} fontSize={fs * 0.85}
+                fontFamily="monospace" opacity={0.5}
+              >Voice Leading</text>
+              {/* Each pair */}
+              {hoveredVL.pairs.map((p, i) => (
+                <g key={`vl-tip-${i}`}>
+                  {/* Dot indicator */}
+                  <circle cx={tipX + 12} cy={tipY + lh * (i + 3) + 1}
+                    r={2 * scale} fill={p.common ? palette.cyan : palette.purple}
+                  />
+                  <text x={tipX + 20} y={tipY + lh * (i + 3) + 2.5}
+                    fill={p.common ? palette.cyan : palette.purple}
+                    fontSize={fs} fontFamily="monospace" fontWeight={600}
+                    opacity={0.9}
+                  >
+                    {p.common
+                      ? `${p.fromName} — held`
+                      : `${p.fromName} → ${p.toName}  ${p.stepDesc}`
+                    }
+                  </text>
+                </g>
+              ))}
+            </g>
+          );
+        })()}
+
         {/* ── Branch hover tooltip ──────────────────────────────────── */}
-        {hoveredBranch && BRANCH_TOOLTIPS[hoveredBranch] && zoom.primaryPlayedIdx >= 0 && (() => {
-          const tip = BRANCH_TOOLTIPS[hoveredBranch];
-          const pi = zoom.primaryPlayedIdx;
-          const [px, py] = polarToXY(CX, CY, OUTER_R, nodeAngle(pi));
-          // Position tooltip to the right of the played node
-          const tipX = px + 35 * scale;
-          const tipY = py - 50 * scale;
+        {hoveredBranch && BRANCH_TOOLTIPS[hoveredBranch.roman] && (() => {
+          const tip = BRANCH_TOOLTIPS[hoveredBranch.roman];
+          const { tx, ty, px: parentX, py: parentY } = hoveredBranch;
           const tipW = 160 * scale;
           const tipH = 62 * scale;
           const fs = 5.5 * scale;
           const lh = 7.5 * scale;
+          const gap = 16 * scale;
+
+          // Direction away from parent node
+          const dx = tx - parentX;
+          const dy = ty - parentY;
+          const len = Math.sqrt(dx * dx + dy * dy) || 1;
+          const nx = dx / len;
+          const ny = dy / len;
+
+          // Place tooltip along the away-direction, offset from the branch node
+          let tipX = tx + nx * gap;
+          let tipY = ty + ny * gap;
+
+          // Anchor adjustment: if pointing left, shift left by width; center vertically
+          if (nx < -0.3) tipX -= tipW;
+          else if (Math.abs(nx) <= 0.3) tipX -= tipW / 2;
+          if (ny < -0.3) tipY -= tipH;
+          else if (Math.abs(ny) <= 0.3) tipY -= tipH / 2;
 
           return (
             <g>
@@ -1535,3 +2825,60 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
     </AbsoluteFill>
   );
 };
+
+/** Export MIDI file from a chord path */
+export function exportMidi(chords: string[]) {
+  if (chords.length === 0) return;
+  const data = buildMidiFile(chords);
+  const timestamp = new Date().toISOString().slice(0, 16).replace(/[:-]/g, '');
+  downloadBlob(data, `chord-path-${timestamp}.mid`, 'audio/midi');
+}
+
+/** Get a weighted-random harmonically valid next chord */
+export function getSurpriseChord(
+  lastChord: string | null,
+  key: string,
+  mode: 'major' | 'minor',
+): string {
+  const norm = ENHARMONIC[key] ?? key;
+  const rootIdx = CHROMATIC.indexOf(norm);
+  if (rootIdx < 0) return key;
+
+  // Weighted scale degree choices (higher weight = more likely)
+  const weights: [string, number][] = mode === 'major'
+    ? [['I', 3], ['ii', 4], ['iii', 2], ['IV', 5], ['V', 5], ['vi', 4], ['bVII', 2], ['bVI', 1], ['bIII', 1]]
+    : [['i', 3], ['III', 3], ['iv', 4], ['v', 2], ['V', 4], ['bVI', 3], ['bVII', 4], ['bII', 1]];
+
+  // Remove the last chord from options to avoid repetition
+  const lastNorm = lastChord ? normalizeChordForMatch(lastChord) : null;
+  const candidates = weights
+    .map(([roman, w]) => ({ chord: romanToChord(roman, key, mode), weight: w }))
+    .filter(c => normalizeChordForMatch(c.chord) !== lastNorm);
+
+  const totalWeight = candidates.reduce((s, c) => s + c.weight, 0);
+  let r = Math.random() * totalWeight;
+  for (const c of candidates) {
+    r -= c.weight;
+    if (r <= 0) return c.chord;
+  }
+  return candidates[candidates.length - 1]?.chord ?? key;
+}
+
+/** Get the list of famous progressions for the import UI */
+export function getFamousProgressions(): FamousProgression[] {
+  return FAMOUS_PROGRESSIONS;
+}
+
+/** Resolve a famous progression to actual chord names in a key */
+export function resolveProgression(
+  prog: FamousProgression,
+  key: string,
+  mode: 'major' | 'minor',
+): string[] {
+  return prog.chords.map(r => romanToChord(r, key, mode));
+}
+
+/** Get MIDI notes for a chord (for playback via bridge) */
+export function chordToMidiNotes(chord: string): number[] {
+  return chordToMidi(chord);
+}

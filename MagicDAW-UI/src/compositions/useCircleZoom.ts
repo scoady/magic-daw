@@ -71,6 +71,8 @@ export interface ZoomState {
   adjacentIndices: number[];
   /** The primary played index (persists during linger/zoom-out) */
   primaryPlayedIdx: number;
+  /** Which ring the primary played chord is on */
+  primaryPlayedRing: 'major' | 'minor' | 'dim' | null;
   /** 0 = full view, 1 = fully zoomed. Drives opacity crossfade. */
   zoomProgress: number;
 }
@@ -109,7 +111,7 @@ function computeZoomWindow(
 
 // ── Spring config ────────────────────────────────────────────────────────────
 
-const ZOOM_IN_SPRING = { damping: 22, stiffness: 35, mass: 1.2 };
+const ZOOM_IN_SPRING = { damping: 18, stiffness: 55, mass: 0.8 };
 const ZOOM_OUT_SPRING = { damping: 20, stiffness: 20, mass: 1.5 }; // slower zoom out
 
 /** Safe spring — clamps to [0,1] and catches errors from Remotion */
@@ -159,6 +161,12 @@ export function useCircleZoom(opts: {
   zoomFraction?: number;
   /** How long to stay zoomed after note release (seconds). Default 5 */
   lingerSeconds?: number;
+  /** Override zoom target — bypass circle positions, zoom to arbitrary XY */
+  targetXY?: { x: number; y: number } | null;
+  /** When true, never auto-zoom-out. Stays zoomed until externally reset. */
+  stayZoomed?: boolean;
+  /** Set to true to force zoom out to idle (reset button). Resets after processing. */
+  forceReset?: boolean;
 }): ZoomState {
   const {
     playedIndices,
@@ -170,6 +178,9 @@ export function useCircleZoom(opts: {
     frame, fps,
     zoomFraction = 0.5,
     lingerSeconds = 5,
+    targetXY,
+    stayZoomed = false,
+    forceReset = false,
   } = opts;
 
   const fullView: ZoomTarget = { x: 0, y: 0, w: fullW, h: fullH };
@@ -189,6 +200,7 @@ export function useCircleZoom(opts: {
     /** Last played indices (persisted for linger) */
     lastIndices: number[];
     lastPrimaryIdx: number;
+    lastPrimaryRing: 'major' | 'minor' | 'dim' | null;
     /** Are we currently in zoomed or zooming-out state? */
     phase: 'idle' | 'zoomed' | 'lingering' | 'zooming-out';
   }>({
@@ -198,6 +210,7 @@ export function useCircleZoom(opts: {
     releaseFrame: 0,
     lastIndices: [],
     lastPrimaryIdx: -1,
+    lastPrimaryRing: null,
     phase: 'idle',
   });
 
@@ -214,13 +227,40 @@ export function useCircleZoom(opts: {
 
   // ── State machine ─────────────────────────────────────────────────────
 
+  // Handle stayZoomed with targetXY but no active notes (e.g. imported path)
+  if (!notesActive && stayZoomed && targetXY && s.phase === 'idle') {
+    const zw = fullW * zoomFraction;
+    const zh = fullH * zoomFraction;
+    const zoomTarget: ZoomTarget = {
+      x: Math.max(0, Math.min(fullW - zw, targetXY.x - zw / 2)),
+      y: Math.max(0, Math.min(fullH - zh, targetXY.y - zh / 2)),
+      w: zw,
+      h: zh,
+    };
+    s.from = { ...s.to };
+    s.to = zoomTarget;
+    s.transitionFrame = frame;
+    s.phase = 'zoomed';
+    s.lastPrimaryIdx = 0;
+    s.lastPrimaryRing = 'major';
+  }
+
   if (notesActive) {
-    // When a chord is detected, zoom to the chord's ring position
-    // instead of the centroid of individual notes on the major ring
     let zoomTarget: ZoomTarget;
     let primaryIdx: number;
 
-    if (dRing && dRing.ring && dRing.index >= 0) {
+    if (targetXY) {
+      // Path mode — zoom to the provided XY position
+      const zw = fullW * zoomFraction;
+      const zh = fullH * zoomFraction;
+      zoomTarget = {
+        x: Math.max(0, Math.min(fullW - zw, targetXY.x - zw / 2)),
+        y: Math.max(0, Math.min(fullH - zh, targetXY.y - zh / 2)),
+        w: zw,
+        h: zh,
+      };
+      primaryIdx = dRing && dRing.index >= 0 ? dRing.index : playedIndices.values().next().value ?? -1;
+    } else if (dRing && dRing.ring && dRing.index >= 0) {
       // Chord detected — zoom to the chord's position on its ring
       const ringR = dRing.ring === 'major' ? outerR
         : dRing.ring === 'minor' ? middleR : innerR;
@@ -253,6 +293,7 @@ export function useCircleZoom(opts: {
     adjSet.add((focusIdx + 7) % 12);  // bIII (chromatic mediant)
     s.lastIndices = Array.from(adjSet).sort((a, b) => a - b);
     s.lastPrimaryIdx = primaryIdx;
+    s.lastPrimaryRing = (dRing && dRing.ring) ? dRing.ring : 'major';
 
     if (s.phase === 'idle' || s.phase === 'zooming-out') {
       // Start zooming in — snapshot current position as "from"
@@ -282,13 +323,39 @@ export function useCircleZoom(opts: {
     s.releaseFrame = 0; // notes are held
   } else {
     // No notes held
-    if (s.phase === 'zoomed') {
+    if (forceReset && (s.phase === 'zoomed' || s.phase === 'lingering')) {
+      // External reset — immediately start zoom out
+      const el = Math.max(0, frame - s.transitionFrame);
+      const prog = safeSpring(el, fps, ZOOM_IN_SPRING, Math.round(fps * 2.5));
+      s.from = lerpTarget(s.from, s.to, prog);
+      s.to = fullView;
+      s.transitionFrame = frame;
+      s.phase = 'zooming-out';
+    } else if (s.phase === 'zoomed' && stayZoomed && targetXY) {
+      // Imported path — track target panning
+      const zw = fullW * zoomFraction;
+      const zh = fullH * zoomFraction;
+      const newTarget: ZoomTarget = {
+        x: Math.max(0, Math.min(fullW - zw, targetXY.x - zw / 2)),
+        y: Math.max(0, Math.min(fullH - zh, targetXY.y - zh / 2)),
+        w: zw,
+        h: zh,
+      };
+      const moved = Math.abs(s.to.x - newTarget.x) > 1 || Math.abs(s.to.y - newTarget.y) > 1;
+      if (moved) {
+        const el = Math.max(0, frame - s.transitionFrame);
+        const prog = safeSpring(el, fps, ZOOM_IN_SPRING, Math.round(fps * 2.5));
+        s.from = lerpTarget(s.from, s.to, prog);
+        s.to = newTarget;
+        s.transitionFrame = frame;
+      }
+    } else if (s.phase === 'zoomed') {
       // Just released — start lingering
       s.releaseFrame = frame;
       s.phase = 'lingering';
     } else if (s.phase === 'lingering') {
-      // Check if linger expired
-      if (frame - s.releaseFrame >= lingerFrames) {
+      // Check if linger expired (skip if stayZoomed)
+      if (!stayZoomed && frame - s.releaseFrame >= lingerFrames) {
         // Start slow zoom out
         const el = Math.max(0, frame - s.transitionFrame);
         const prog = safeSpring(el, fps, ZOOM_IN_SPRING, Math.round(fps * 2.5));
@@ -334,6 +401,7 @@ export function useCircleZoom(opts: {
     isZoomed,
     adjacentIndices: s.lastIndices,
     primaryPlayedIdx: s.lastPrimaryIdx,
+    primaryPlayedRing: s.lastPrimaryRing,
     zoomProgress,
   };
 }

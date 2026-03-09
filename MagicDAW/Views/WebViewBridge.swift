@@ -97,10 +97,8 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         // This replaces the router's onNoteOn so we must call through to it.
         midiManager.onNoteOn = { [weak self] note, velocity, channel in
             guard let self else { return }
-            // 1. Play through sampler
-            if self.sampler.hasSamples {
-                self.sampler.noteOn(note: note, velocity: velocity)
-            }
+            // 1. Play through sampler (falls back to GM synth if no custom samples)
+            self.sampler.noteOn(note: note, velocity: velocity)
             // 2. Record if armed
             if self.audioEngine.isRecording {
                 self.midiRecorder.noteOn(
@@ -123,9 +121,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         // Forward MIDI note-off events to JavaScript AND the MIDIRouter.
         midiManager.onNoteOff = { [weak self] note, channel in
             guard let self else { return }
-            if self.sampler.hasSamples {
-                self.sampler.noteOff(note: note)
-            }
+            self.sampler.noteOff(note: note)
             if self.audioEngine.isRecording {
                 self.midiRecorder.noteOff(
                     note: note,
@@ -352,10 +348,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             guard let note = payload["note"] as? Int,
                   let velocity = payload["velocity"] as? Int,
                   let channel = payload["channel"] as? Int else { return }
-            // Play through sampler if loaded
-            if sampler.hasSamples {
-                sampler.noteOn(note: UInt8(note), velocity: UInt8(velocity))
-            }
+            sampler.noteOn(note: UInt8(note), velocity: UInt8(velocity))
             // Send note-on to all connected MIDI destinations
             for dest in midiManager.availableDestinations {
                 midiManager.sendNoteOn(note: UInt8(note), velocity: UInt8(velocity), channel: UInt8(channel), to: dest)
@@ -364,9 +357,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         case "midi.noteOff":
             guard let note = payload["note"] as? Int,
                   let channel = payload["channel"] as? Int else { return }
-            if sampler.hasSamples {
-                sampler.noteOff(note: UInt8(note))
-            }
+            sampler.noteOff(note: UInt8(note))
             // Send note-off to all connected MIDI destinations
             for dest in midiManager.availableDestinations {
                 midiManager.sendNoteOff(note: UInt8(note), channel: UInt8(channel), to: dest)
@@ -1713,11 +1704,9 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         }
         pushNoteUndoState(clip)
         clip.addNote(tick: startBeat, note: UInt8(pitch), velocity: UInt8(velocity), duration: duration, channel: 0)
-        if sampler.hasSamples {
-            sampler.noteOn(note: UInt8(pitch), velocity: UInt8(velocity))
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.sampler.noteOff(note: UInt8(pitch))
-            }
+        sampler.noteOn(note: UInt8(pitch), velocity: UInt8(velocity))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.sampler.noteOff(note: UInt8(pitch))
         }
         sendUpdatedNotes(clip)
     }

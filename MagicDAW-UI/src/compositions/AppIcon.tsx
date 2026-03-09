@@ -103,7 +103,7 @@ export const AppIcon: React.FC = () => {
   const waveWidth = 520;
 
   return (
-    <AbsoluteFill style={{ backgroundColor: 'transparent' }}>
+    <AbsoluteFill style={{ backgroundColor: '#040810' }}>
       <svg
         width={S}
         height={S}
@@ -111,10 +111,10 @@ export const AppIcon: React.FC = () => {
         xmlns="http://www.w3.org/2000/svg"
       >
         <defs>
-          {/* Background aurora radial */}
-          <radialGradient id="bg-glow" cx="50%" cy="45%" r="50%">
+          {/* Background aurora radial — fills entire square */}
+          <radialGradient id="bg-glow" cx="50%" cy="45%" r="72%">
             <stop offset="0%" stopColor="#0f1a2e" />
-            <stop offset="60%" stopColor="#0a0e1a" />
+            <stop offset="50%" stopColor="#0a0e1a" />
             <stop offset="100%" stopColor="#040810" />
           </radialGradient>
 
@@ -169,8 +169,8 @@ export const AppIcon: React.FC = () => {
           </clipPath>
         </defs>
 
-        {/* ===== Background circle ===== */}
-        <circle cx={cx} cy={cy} r={480} fill="url(#bg-glow)" />
+        {/* ===== Background — full bleed, no transparent corners ===== */}
+        <rect x={0} y={0} width={S} height={S} fill="url(#bg-glow)" />
 
         {/* Aurora atmosphere — large soft glow behind everything */}
         <ellipse

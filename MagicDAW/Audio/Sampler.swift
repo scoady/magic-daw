@@ -9,6 +9,9 @@ class Sampler {
     private let engine: AVAudioEngine
     private let mixer: AVAudioMixerNode
 
+    /// Built-in General MIDI piano synth — used as fallback when no custom samples are loaded.
+    private let gmSynth = AVAudioUnitSampler()
+
     // ADSR envelope
     var attack: Float = 0.01
     var decay: Float = 0.1
@@ -23,6 +26,26 @@ class Sampler {
         self.engine = engine
         self.mixer = AVAudioMixerNode()
         engine.attach(mixer)
+        engine.attach(gmSynth)
+        engine.connect(gmSynth, to: mixer, format: nil)
+        loadGMSoundbank()
+    }
+
+    /// Load the macOS built-in DLS General MIDI soundbank into the GM synth.
+    private func loadGMSoundbank() {
+        let dlsPath = "/System/Library/Components/CoreAudio.component/Contents/Resources/gs_instruments.dls"
+        let dlsURL = URL(fileURLWithPath: dlsPath)
+        do {
+            try gmSynth.loadSoundBankInstrument(
+                at: dlsURL,
+                program: 0,   // Acoustic Grand Piano
+                bankMSB: 0x79, // GM melodic bank
+                bankLSB: 0
+            )
+            print("[Sampler] Loaded built-in GM piano")
+        } catch {
+            print("[Sampler] Failed to load GM soundbank: \(error)")
+        }
     }
 
     /// Connect this sampler's output to a destination mixer.
@@ -52,7 +75,12 @@ class Sampler {
     // MARK: - Playback
 
     func noteOn(note: UInt8, velocity: UInt8) {
-        guard let buffer = sampleBuffers[note] else { return }
+        // Fall back to built-in GM synth when no custom samples are loaded for this note
+        guard let buffer = sampleBuffers[note] else {
+            ensureEngineRunning()
+            gmSynth.startNote(note, withVelocity: velocity, onChannel: 0)
+            return
+        }
         let rootNote = sampleRootNotes[note] ?? note
 
         // Stop any existing player for this note (retrigger)
@@ -104,7 +132,10 @@ class Sampler {
     }
 
     func noteOff(note: UInt8) {
-        guard let player = activePlayers[note] else { return }
+        guard let player = activePlayers[note] else {
+            gmSynth.stopNote(note, onChannel: 0)
+            return
+        }
 
         // Apply release envelope
         if release > 0.001 {
@@ -199,6 +230,21 @@ class Sampler {
     /// Whether any samples are loaded
     var hasSamples: Bool {
         !sampleBuffers.isEmpty
+    }
+
+    /// The GM synth is always available as a fallback
+    var hasGMSynth: Bool { true }
+
+    /// Ensure the AVAudioEngine is running (needed for GM synth playback).
+    private func ensureEngineRunning() {
+        guard !engine.isRunning else { return }
+        do {
+            engine.prepare()
+            try engine.start()
+            print("[Sampler] Started AVAudioEngine for GM synth")
+        } catch {
+            print("[Sampler] Failed to start engine: \(error)")
+        }
     }
 
     // MARK: - Private

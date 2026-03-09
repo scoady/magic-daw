@@ -1,6 +1,17 @@
 import SwiftUI
 import WebKit
 
+/// WKWebView subclass that suppresses the native right-click context menu,
+/// allowing JavaScript `contextmenu` events to fire normally.
+class NoContextMenuWebView: WKWebView {
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        menu.removeAllItems()
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        return nil
+    }
+}
+
 struct MainWindow: View {
     @StateObject private var viewModel = MainWindowViewModel()
 
@@ -150,6 +161,15 @@ struct WebViewContainer: NSViewRepresentable {
 
         // Register the bridge message handler
         userContentController.add(viewModel.bridge, name: "magicdaw")
+
+        // Suppress native context menu so JS contextmenu events fire
+        let noContextMenuScript = WKUserScript(
+            source: "document.addEventListener('contextmenu', function(e) { e.preventDefault(); }, true);",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        userContentController.addUserScript(noContextMenuScript)
+
         config.userContentController = userContentController
 
         // Enable media playback
@@ -163,7 +183,7 @@ struct WebViewContainer: NSViewRepresentable {
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         #endif
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = NoContextMenuWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
 
