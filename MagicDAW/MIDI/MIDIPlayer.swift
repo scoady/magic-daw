@@ -101,7 +101,7 @@ class MIDIPlayer {
             for clip in clips {
                 guard let events = clip.midiEvents else { continue }
 
-                let clipStartBeat = clip.startBar * 4.0  // bars to beats (4/4 time)
+                let clipStartBeat = (clip.startBar - 1) * 4.0  // bars to beats (4/4 time, startBar is 1-indexed)
                 let clipEndBeat = clipStartBeat + clip.lengthBars * 4.0
 
                 // Skip clips not in range

@@ -1033,6 +1033,88 @@ class AudioEngine {
         isPlaying = false
         isRecording = false
     }
+
+    // MARK: - Export / Bounce
+
+    /// Export state for progress tracking.
+    private(set) var isExporting = false
+    private var exportFile: AVAudioFile?
+    private var exportMixerNode: AVAudioMixerNode?
+
+    /// Start capturing the master output to a WAV file.
+    /// Call this before starting playback. Call `stopExportCapture()` after playback ends.
+    func startExportCapture(outputURL: URL) throws {
+        guard isRunning else {
+            throw NSError(domain: "AudioEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Engine not running"])
+        }
+
+        let format = mainMixer.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw NSError(domain: "AudioEngine", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid mixer format"])
+        }
+
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: format.sampleRate,
+            AVNumberOfChannelsKey: format.channelCount,
+            AVLinearPCMBitDepthKey: 24,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+
+        exportFile = try AVAudioFile(
+            forWriting: outputURL,
+            settings: settings,
+            commonFormat: format.commonFormat,
+            interleaved: format.isInterleaved
+        )
+
+        // Insert an export mixer between mainMixer and outputNode to tap without
+        // conflicting with the existing meter tap on mainMixer bus 0.
+        let exportMixer = AVAudioMixerNode()
+        avEngine.attach(exportMixer)
+
+        let outputNode = avEngine.outputNode
+        // Disconnect mainMixer → output, insert export mixer in between
+        avEngine.disconnectNodeOutput(mainMixer)
+        avEngine.connect(mainMixer, to: exportMixer, format: format)
+        avEngine.connect(exportMixer, to: outputNode, format: format)
+
+        exportMixer.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let self, self.isExporting, let file = self.exportFile else { return }
+            do {
+                try file.write(from: buffer)
+            } catch {
+                print("[AudioEngine] Export write error: \(error)")
+            }
+        }
+
+        exportMixerNode = exportMixer
+        isExporting = true
+        print("[AudioEngine] Export capture started → \(outputURL.lastPathComponent)")
+    }
+
+    /// Stop export capture, remove the tap, and restore the audio graph.
+    func stopExportCapture() {
+        isExporting = false
+
+        if let exportMixer = exportMixerNode {
+            exportMixer.removeTap(onBus: 0)
+            let format = mainMixer.outputFormat(forBus: 0)
+            let outputNode = avEngine.outputNode
+
+            // Restore direct mainMixer → output connection
+            avEngine.disconnectNodeOutput(exportMixer)
+            avEngine.disconnectNodeOutput(mainMixer)
+            avEngine.detach(exportMixer)
+            avEngine.connect(mainMixer, to: outputNode, format: format)
+        }
+
+        exportMixerNode = nil
+        exportFile = nil
+        print("[AudioEngine] Export capture stopped")
+    }
 }
 
 // MARK: - AudioTrack

@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 import UniformTypeIdentifiers
 import WebKit
@@ -40,6 +41,8 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     private lazy var aiRouter = AIRouter(client: ollamaClient)
     /// Sound design service for AI patch generation
     private lazy var soundDesignService = SoundDesignService(router: aiRouter)
+    /// Instrument preset library (persisted to ~/Library/Application Support/MagicDAW/Instruments/)
+    private lazy var instrumentLibrary = InstrumentLibrary()
 
     // MARK: - Note Editing Undo Stack
 
@@ -84,6 +87,11 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
 
     override init() {
         super.init()
+        do {
+            try audioEngine.setup()
+        } catch {
+            print("[WebViewBridge] Failed to start audio engine: \(error)")
+        }
         setupMIDIRouter()
         setupCallbacks()
         setupTransportCallbacks()
@@ -716,6 +724,9 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         case "project.updateState":
             updateProjectFromJS(payload)
 
+        case "export_audio":
+            await handleExportAudio(payload)
+
         // ── Instrument / Sampler Messages ──
 
         case "instrument.loadSample":
@@ -737,6 +748,46 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             // Auto note-off after a short duration for preview
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.sampler.noteOff(note: UInt8(note))
+            }
+
+        case "instrument.designSound":
+            if let description = payload["description"] as? String {
+                await handleInstrumentDesignSound(description: description)
+            }
+
+        case "instrument.mapZones":
+            await handleInstrumentMapZones()
+
+        // ── Instrument Factory (GM Preset) Messages ──
+
+        case "instrument.createPreset":
+            if let description = payload["description"] as? String {
+                await handleCreatePreset(description: description)
+            }
+
+        case "instrument.listPresets":
+            handleListPresets()
+
+        case "instrument.deletePreset":
+            if let idStr = payload["id"] as? String,
+               let uuid = UUID(uuidString: idStr) {
+                handleDeletePreset(id: uuid)
+            }
+
+        case "instrument.assignToTrack":
+            let trackIdStr = payload["trackId"] as? String
+            if let presetIdStr = payload["presetId"] as? String,
+               let presetUUID = UUID(uuidString: presetIdStr) {
+                handleAssignPresetToTrack(presetId: presetUUID, trackIdStr: trackIdStr)
+            } else if let gmProg = payload["gmProgram"] as? Int {
+                handleAssignGMProgram(UInt8(gmProg), trackIdStr: trackIdStr)
+            }
+
+        case "instrument.previewPreset":
+            if let presetIdStr = payload["presetId"] as? String,
+               let presetUUID = UUID(uuidString: presetIdStr) {
+                let note = payload["note"] as? Int ?? 60
+                handlePreviewPreset(presetId: presetUUID, note: UInt8(note))
             }
 
         // ── Plugin Builder Messages ──
@@ -776,6 +827,11 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             if let description = payload["description"] as? String {
                 await handleAIGeneratePatch(description: description)
             }
+
+        // ── Audio Import ──
+
+        case "audio.importFile":
+            await handleImportAudioFile()
 
         // ── Track Management Messages ──
 
@@ -856,8 +912,58 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
                 sendTransportState()
             }
 
+        // ── System: file picker & URL opening ──────────────────────────
+        case "system.openFilePicker":
+            let extensions = (payload["extensions"] as? [String]) ?? [".mid"]
+            let pickerId = (payload["pickerId"] as? String) ?? "default"
+            await handleOpenFilePicker(extensions: extensions, pickerId: pickerId)
+
+        case "system.openURL":
+            if let urlStr = payload["url"] as? String, let url = URL(string: urlStr) {
+                NSWorkspace.shared.open(url)
+            }
+
         default:
             print("[Bridge] Unknown message type: \(type)")
+        }
+    }
+
+    // MARK: - File Picker
+
+    @MainActor
+    private func handleOpenFilePicker(extensions: [String], pickerId: String) {
+        let panel = NSOpenPanel()
+        panel.title = "Import File"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+
+        // Build UTTypes from extensions
+        var contentTypes: [UTType] = []
+        for ext in extensions {
+            let cleanExt = ext.hasPrefix(".") ? String(ext.dropFirst()) : ext
+            if let utType = UTType(filenameExtension: cleanExt) {
+                contentTypes.append(utType)
+            }
+        }
+        // Fallback: allow all if no types resolved
+        if contentTypes.isEmpty {
+            contentTypes = [.data]
+        }
+        panel.allowedContentTypes = contentTypes
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        // Read file data as base64 for transport to JS
+        do {
+            let data = try Data(contentsOf: url)
+            let base64 = data.base64EncodedString()
+            sendEvent("system.filePicked", data: [
+                "path": url.lastPathComponent,
+                "data": base64,
+                "pickerId": pickerId,
+            ])
+        } catch {
+            print("[Bridge] Failed to read picked file: \(error)")
         }
     }
 
@@ -904,9 +1010,29 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
 
     // MARK: - Project Operations (called from menu actions)
 
-    /// Create a new empty project, update state, and notify JS.
+    /// Create a new project with default starter tracks, update state, and notify JS.
     func newProject() {
         let project = DAWProject(name: "Untitled")
+
+        // Add default starter tracks so the user has something to work with
+        let midi1 = project.addMIDITrack(name: "MIDI 1", color: .teal)
+        let midi2 = project.addMIDITrack(name: "MIDI 2", color: .purple)
+        let audio1 = project.addAudioTrack(name: "Audio 1", color: .blue)
+
+        // Register in audio engine
+        for track in [midi1, midi2, audio1] {
+            let audioTrack = AudioTrack(
+                id: track.id,
+                name: track.name,
+                volume: track.linearGain,
+                pan: track.pan,
+                isMuted: track.isMuted,
+                isSoloed: track.isSoloed,
+                isBus: false
+            )
+            audioEngine.addTrack(audioTrack)
+        }
+
         currentProject = project
         onProjectChanged?(project)
         sendProjectToJS(project)
@@ -1291,6 +1417,129 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         sendEvent("track_levels", data: data)
     }
 
+    // MARK: - Audio File Import
+
+    /// Import an audio file: show picker, copy to project, create audio track + clip, generate waveform.
+    @MainActor
+    private func handleImportAudioFile() {
+        guard let project = currentProject else { return }
+
+        let panel = NSOpenPanel()
+        panel.title = "Import Audio File"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [
+            .mp3, .wav, .aiff, .audio,
+            UTType(filenameExtension: "m4a") ?? .audio,
+            UTType(filenameExtension: "flac") ?? .audio,
+            UTType(filenameExtension: "ogg") ?? .audio,
+        ]
+
+        guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
+
+        // Ensure audio/ directory exists in project bundle
+        let audioDir: URL
+        if let bundleURL = project.fileURL {
+            audioDir = bundleURL.appendingPathComponent("audio")
+        } else {
+            // No project bundle yet — use temp directory
+            audioDir = FileManager.default.temporaryDirectory.appendingPathComponent("MagicDAW-audio")
+        }
+        try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
+
+        // Copy file into project audio directory
+        let destFilename = sourceURL.lastPathComponent
+        let destURL = audioDir.appendingPathComponent(destFilename)
+        do {
+            // Remove existing file with same name if present
+            if FileManager.default.fileExists(atPath: destURL.path) {
+                try FileManager.default.removeItem(at: destURL)
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: destURL)
+        } catch {
+            print("[Bridge] Failed to copy audio file: \(error)")
+            sendEvent("import_error", data: ["error": "Failed to copy file: \(error.localizedDescription)"])
+            return
+        }
+
+        // Get audio file duration
+        let durationSeconds: Double
+        do {
+            let audioFile = try AVAudioFile(forReading: destURL)
+            let sampleRate = audioFile.processingFormat.sampleRate
+            let frameCount = Double(audioFile.length)
+            durationSeconds = frameCount / sampleRate
+        } catch {
+            print("[Bridge] Failed to read audio file: \(error)")
+            sendEvent("import_error", data: ["error": "Cannot read audio: \(error.localizedDescription)"])
+            return
+        }
+
+        // Create a new audio track
+        let trackName = destFilename
+            .replacingOccurrences(of: ".\(sourceURL.pathExtension)", with: "")
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+        let track = project.addAudioTrack(name: trackName, color: .purple)
+
+        // Register in audio engine
+        let audioTrack = AudioTrack(
+            id: track.id,
+            name: track.name,
+            volume: track.linearGain,
+            pan: track.pan,
+            isMuted: track.isMuted,
+            isSoloed: track.isSoloed,
+            isBus: false
+        )
+        audioEngine.addTrack(audioTrack)
+
+        // Calculate clip length in bars
+        let beatsPerSecond = audioEngine.bpm / 60.0
+        let durationBeats = durationSeconds * beatsPerSecond
+        let beatsPerBar = 4.0
+        let lengthBars = durationBeats / beatsPerBar
+
+        // Audio file reference (relative path within project)
+        let audioFileRef: String
+        if let bundleURL = project.fileURL, destURL.path.hasPrefix(bundleURL.path) {
+            audioFileRef = String(destURL.path.dropFirst(bundleURL.path.count + 1))
+        } else {
+            audioFileRef = destURL.path
+        }
+
+        // Create audio clip starting at bar 1
+        let clip = track.addAudioClip(
+            name: trackName,
+            startBar: 1.0,
+            lengthBars: lengthBars,
+            audioFile: audioFileRef
+        )
+
+        // Generate waveform asynchronously
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            if let waveform = AudioEngine.generateWaveform(from: destURL, points: 500) {
+                let waveformData = waveform.map { Double($0) }
+                self.sendEvent("clip_waveform", data: [
+                    "clipId": clip.id.uuidString,
+                    "waveform": waveformData,
+                ])
+            }
+        }
+
+        // Notify JS
+        sendTracksUpdated()
+        sendEvent("audio_imported", data: [
+            "trackId": track.id.uuidString,
+            "clipId": clip.id.uuidString,
+            "name": trackName,
+            "durationSeconds": durationSeconds,
+            "lengthBars": lengthBars,
+        ])
+    }
+
     // MARK: - Recording Completion
 
     /// Handle the completion of an audio recording: create a clip and send waveform data.
@@ -1357,6 +1606,87 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
 
         // Also send full tracks update
         sendTracksUpdated()
+    }
+
+    // MARK: - Export Handler
+
+    /// Export the master output as a WAV file.
+    /// Plays the project from start to the specified end beat, captures to file, then stops.
+    private func handleExportAudio(_ payload: [String: Any]) async {
+        let totalBeats = payload["totalBeats"] as? Double ?? 128.0  // default 32 bars
+        let filename = payload["filename"] as? String ?? "export"
+
+        // Create export URL in temp directory
+        let exportDir = FileManager.default.temporaryDirectory.appendingPathComponent("MagicDAW-exports")
+        try? FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
+        let exportURL = exportDir.appendingPathComponent("\(filename).wav")
+
+        // Remove existing file
+        try? FileManager.default.removeItem(at: exportURL)
+
+        do {
+            // Stop any current playback
+            audioEngine.stop()
+            audioEngine.currentBeat = 0.0
+
+            // Start capture
+            try audioEngine.startExportCapture(outputURL: exportURL)
+
+            // Start playback from the beginning
+            audioEngine.play()
+            midiPlayer.startPlayback(atBeat: 0.0)
+
+            sendEvent("export_progress", data: ["status": "recording", "filename": filename])
+
+            // Wait for playback to reach the end beat
+            let beatsPerSecond = audioEngine.bpm / 60.0
+            let durationSeconds = totalBeats / beatsPerSecond
+            let durationNs = UInt64(durationSeconds * 1_000_000_000)
+            try await Task.sleep(nanoseconds: durationNs)
+
+            // Stop capture and playback
+            audioEngine.stop()
+            audioEngine.stopExportCapture()
+
+            // Show save panel on main thread
+            await MainActor.run {
+                let savePanel = NSSavePanel()
+                savePanel.allowedContentTypes = [.wav]
+                savePanel.nameFieldStringValue = "\(filename).wav"
+                savePanel.title = "Export Audio"
+
+                if savePanel.runModal() == .OK, let destURL = savePanel.url {
+                    do {
+                        // Copy to user-selected destination
+                        if FileManager.default.fileExists(atPath: destURL.path) {
+                            try FileManager.default.removeItem(at: destURL)
+                        }
+                        try FileManager.default.copyItem(at: exportURL, to: destURL)
+                        sendEvent("export_complete", data: [
+                            "success": true,
+                            "path": destURL.path,
+                            "filename": destURL.lastPathComponent,
+                        ])
+                    } catch {
+                        sendEvent("export_complete", data: [
+                            "success": false,
+                            "error": error.localizedDescription,
+                        ])
+                    }
+                } else {
+                    sendEvent("export_complete", data: [
+                        "success": false,
+                        "error": "Export cancelled",
+                    ])
+                }
+            }
+        } catch {
+            audioEngine.stopExportCapture()
+            sendEvent("export_complete", data: [
+                "success": false,
+                "error": error.localizedDescription,
+            ])
+        }
     }
 
     // MARK: - Track Management Handlers
@@ -2159,7 +2489,224 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    // MARK: - AI Patch Generation
+    // MARK: - AI Instrument Sound Design
+
+    /// Generate ADSR + filter parameters from a text description and apply to the Sampler.
+    private func handleInstrumentDesignSound(description: String) async {
+        sendEvent("instrument_ai_status", data: ["status": "loading", "message": "Designing sound..."])
+
+        let patch = await soundDesignService.designSoundWithFallback(description: description)
+
+        // Extract ADSR from envelope node
+        var attack = 0.01, decay = 0.2, sustain = 0.7, release = 0.3
+        if let envNode = patch.nodes.first(where: { $0.type == "envelope" }) {
+            attack = envNode.parameters["attack"] ?? attack
+            decay = envNode.parameters["decay"] ?? decay
+            sustain = envNode.parameters["sustain"] ?? sustain
+            release = envNode.parameters["release"] ?? release
+        }
+
+        // Extract filter from filter node
+        var cutoff = 8000.0, resonance = 0.5
+        var filterType = "LP"
+        if let filterNode = patch.nodes.first(where: { $0.type == "filter" }) {
+            cutoff = filterNode.parameters["cutoff"] ?? cutoff
+            resonance = filterNode.parameters["resonance"] ?? resonance
+            if let ft = filterNode.parameters["type"] {
+                switch Int(ft) {
+                case 1: filterType = "HP"
+                case 2: filterType = "BP"
+                case 3: filterType = "Notch"
+                default: filterType = "LP"
+                }
+            }
+        }
+
+        // Apply to sampler
+        sampler.attack = Float(attack)
+        sampler.decay = Float(decay)
+        sampler.sustain = Float(sustain)
+        sampler.release = Float(release)
+        sampler.filterCutoff = Float(cutoff)
+        sampler.filterResonance = Float(resonance)
+
+        // Send result back to UI
+        sendEvent("instrument_ai_patch", data: [
+            "name": patch.name,
+            "description": patch.description,
+            "adsr": [
+                "attack": attack,
+                "decay": decay,
+                "sustain": sustain,
+                "release": release,
+            ],
+            "filter": [
+                "cutoff": cutoff,
+                "resonance": resonance,
+                "type": filterType,
+            ],
+            "success": true,
+        ])
+        sendEvent("instrument_ai_status", data: ["status": "done"])
+    }
+
+    /// Auto-map loaded samples to keyboard zones using AI.
+    private func handleInstrumentMapZones() async {
+        sendEvent("instrument_ai_status", data: ["status": "loading", "message": "Mapping zones..."])
+
+        // Gather sample metadata from the sampler
+        let meta = sampler.sampleMetadata()
+        var sampleInfos: [SampleInfo] = []
+        for entry in meta {
+            sampleInfos.append(SampleInfo(
+                filename: entry.filename,
+                detectedPitch: nil,
+                durationSeconds: entry.durationSeconds,
+                rmsLevel: 0.5
+            ))
+        }
+
+        guard !sampleInfos.isEmpty else {
+            sendEvent("instrument_ai_status", data: ["status": "error", "message": "No samples loaded"])
+            return
+        }
+
+        let result = await soundDesignService.suggestSampleMappingWithFallback(samples: sampleInfos)
+
+        // Apply zone mappings
+        let zones = result.zones.map { zone -> [String: Any] in
+            [
+                "sampleFile": zone.sampleFile,
+                "rootNote": Int(zone.rootNote),
+                "lowNote": Int(zone.lowNote),
+                "highNote": Int(zone.highNote),
+                "lowVelocity": Int(zone.lowVelocity),
+                "highVelocity": Int(zone.highVelocity),
+            ]
+        }
+
+        sendEvent("instrument_zones", data: ["zones": zones, "explanation": result.explanation])
+        sendEvent("instrument_ai_status", data: ["status": "done"])
+    }
+
+    // MARK: - Instrument Factory (GM Presets)
+
+    /// Create a new GM instrument preset from a text description using AI.
+    private func handleCreatePreset(description: String) async {
+        sendEvent("instrument_ai_status", data: ["status": "loading", "message": "Designing instrument..."])
+
+        let result = await soundDesignService.designGMInstrument(description: description)
+        let preset = InstrumentPreset(from: result)
+
+        do {
+            try instrumentLibrary.savePreset(preset)
+        } catch {
+            sendEvent("instrument_ai_status", data: ["status": "error", "message": error.localizedDescription])
+            return
+        }
+
+        sendEvent("instrument_preset_created", data: presetToDict(preset))
+        sendEvent("instrument_ai_status", data: ["status": "done"])
+    }
+
+    /// List all saved instrument presets.
+    private func handleListPresets() {
+        let presets = instrumentLibrary.listPresets()
+        let list = presets.map { presetToDict($0) }
+        sendEvent("instrument_preset_list", data: ["presets": list])
+    }
+
+    /// Delete an instrument preset by ID.
+    private func handleDeletePreset(id: UUID) {
+        do {
+            try instrumentLibrary.deletePreset(id: id)
+            sendEvent("instrument_preset_deleted", data: ["id": id.uuidString])
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
+    }
+
+    /// Assign a preset to the sampler (global for now; per-track is future work).
+    private func handleAssignPresetToTrack(presetId: UUID, trackIdStr: String?) {
+        do {
+            let preset = try instrumentLibrary.loadPreset(id: presetId)
+            sampler.applyPreset(preset)
+
+            // Update track instrument ref in the project if a trackId was provided
+            if let trackIdStr = trackIdStr,
+               let uuid = resolveTrackUUID(trackIdStr),
+               let track = currentProject?.tracks.first(where: { $0.id == uuid }) {
+                track.instrument = InstrumentRef(type: .sampler, name: preset.name, path: nil)
+                sendTracksUpdated()
+            }
+
+            sendEvent("instrument_assigned", data: [
+                "presetId": presetId.uuidString,
+                "trackId": trackIdStr ?? "",
+                "name": preset.name,
+            ])
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
+    }
+
+    /// Assign a GM program directly to the sampler (no preset ID needed).
+    private func handleAssignGMProgram(_ program: UInt8, trackIdStr: String?) {
+        sampler.setGMProgram(program)
+
+        let name = trackIdStr != nil ? "GM \(program)" : "GM \(program)"
+
+        // Update track instrument ref
+        if let trackIdStr = trackIdStr,
+           let uuid = resolveTrackUUID(trackIdStr),
+           let track = currentProject?.tracks.first(where: { $0.id == uuid }) {
+            track.instrument = InstrumentRef(type: .sampler, name: name, path: nil)
+            sendTracksUpdated()
+        }
+
+        sendEvent("instrument_assigned", data: [
+            "gmProgram": Int(program),
+            "trackId": trackIdStr ?? "",
+            "name": name,
+        ])
+    }
+
+    /// Preview a preset: apply it to the sampler and play a note.
+    private func handlePreviewPreset(presetId: UUID, note: UInt8) {
+        do {
+            let preset = try instrumentLibrary.loadPreset(id: presetId)
+            sampler.applyPreset(preset)
+            sampler.noteOn(note: note, velocity: 100)
+            // Auto note-off after a short duration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.sampler.noteOff(note: note)
+            }
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
+    }
+
+    /// Convert an InstrumentPreset to a dictionary for sending to JS.
+    private func presetToDict(_ preset: InstrumentPreset) -> [String: Any] {
+        let formatter = ISO8601DateFormatter()
+        return [
+            "id": preset.id.uuidString,
+            "name": preset.name,
+            "description": preset.description,
+            "gmProgram": Int(preset.gmProgram),
+            "bankMSB": Int(preset.bankMSB),
+            "attack": Double(preset.attack),
+            "decay": Double(preset.decay),
+            "sustain": Double(preset.sustain),
+            "release": Double(preset.release),
+            "filterCutoff": Double(preset.filterCutoff),
+            "filterResonance": Double(preset.filterResonance),
+            "filterType": preset.filterType,
+            "createdAt": formatter.string(from: preset.createdAt),
+        ]
+    }
+
+    // MARK: - AI Patch Generation (Plugin Builder)
 
     private func handleAIGeneratePatch(description: String) async {
         let patch = await soundDesignService.designSoundWithFallback(description: description)

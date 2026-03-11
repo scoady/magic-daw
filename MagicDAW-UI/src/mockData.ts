@@ -143,7 +143,7 @@ export const mockTracks: Track[] = [
 
 export const mockDAWState: DAWState = {
   transport: {
-    playing: true,
+    playing: false,
     recording: false,
     bpm: 92,
     timeSignature: [4, 4],

@@ -21,6 +21,21 @@ export const QUANTIZE_LABELS: Record<QuantizeValue, string> = {
   1: '1/4',
 };
 
+export interface InstrumentPreset {
+  id: string;
+  name: string;
+  description: string;
+  gmProgram: number;
+  attack: number;
+  decay: number;
+  sustain: number;
+  release: number;
+  filterCutoff: number;
+  filterResonance: number;
+  filterType: string;
+  createdAt: string;
+}
+
 export interface Track {
   id: string;
   name: string;
@@ -34,6 +49,8 @@ export interface Track {
   clips: Clip[];
   effects?: EffectSlot[];
   sends?: SendLevel[];
+  instrumentPresetId?: string;
+  instrumentPresetName?: string;
 }
 
 // ── Effects Chain Types ─────────────────────────────────────────────────────
@@ -212,8 +229,8 @@ export interface DAWState {
   inputLevelR: number;
 }
 
-export type ViewId = 'arrange' | 'edit' | 'mix' | 'instruments' | 'plugins' | 'chord-builder' | 'learn';
-export type LearnSubView = 'circle' | 'intervals' | 'tonnetz';
+export type ViewId = 'arrange' | 'edit' | 'mix' | 'instruments' | 'plugins' | 'chord-builder' | 'learn' | 'emotions';
+export type LearnSubView = 'circle' | 'intervals' | 'tonnetz' | 'piano-hero';
 
 // ── Project data from Swift (matches DAWProject Codable output) ──────────
 

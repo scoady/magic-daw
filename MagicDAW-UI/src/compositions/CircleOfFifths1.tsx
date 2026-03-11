@@ -1213,6 +1213,65 @@ export const CircleOfFifths1: React.FC<CircleOfFifthsProps> = ({
           />
         ))}
 
+        {/* ── Augmented triad triangles (major 3rds apart) ──────────── */}
+        {(() => {
+          const augTriadColors = ['#67e8f9', '#fbbf24', '#34d399', '#f472b6'];
+          const augTriads = [
+            [0, 4, 8],   // C - E - Ab
+            [1, 5, 9],   // G - B - Eb
+            [2, 6, 10],  // D - F# - Bb
+            [3, 7, 11],  // A - Db - F
+          ];
+          return augTriads.map((indices, ti) => {
+            const pts = indices.map(idx => polarToXY(CX, CY, OUTER_R, nodeAngle(idx)));
+            const color = augTriadColors[ti];
+            // Highlight if the active key is one of the triangle's nodes
+            const isActive = indices.includes(activeIdx);
+            return (
+              <g key={`aug-${ti}`}>
+                <polygon
+                  points={pts.map(([x, y]) => `${x},${y}`).join(' ')}
+                  fill={color}
+                  fillOpacity={isActive ? 0.06 : 0.015}
+                  stroke={color}
+                  strokeWidth={isActive ? 1.2 : 0.5}
+                  strokeOpacity={isActive ? 0.35 : 0.08}
+                  strokeLinejoin="round"
+                />
+              </g>
+            );
+          });
+        })()}
+
+        {/* ── Diminished 7th squares (minor 3rds apart) ────────────── */}
+        {(() => {
+          const dimSquareColors = ['#a78bfa', '#fb7185', '#2dd4bf'];
+          const dimSquares = [
+            [0, 3, 6, 9],   // C - A - F# - Eb
+            [1, 4, 7, 10],  // G - E - Db - Bb
+            [2, 5, 8, 11],  // D - B - Ab - F
+          ];
+          return dimSquares.map((indices, si) => {
+            const pts = indices.map(idx => polarToXY(CX, CY, INNER_R + (MIDDLE_R - INNER_R) * 0.5, nodeAngle(idx)));
+            const color = dimSquareColors[si];
+            const isActive = indices.includes(activeIdx);
+            return (
+              <g key={`dim-${si}`}>
+                <polygon
+                  points={pts.map(([x, y]) => `${x},${y}`).join(' ')}
+                  fill={color}
+                  fillOpacity={isActive ? 0.05 : 0.012}
+                  stroke={color}
+                  strokeWidth={isActive ? 1 : 0.4}
+                  strokeOpacity={isActive ? 0.3 : 0.06}
+                  strokeLinejoin="round"
+                  strokeDasharray={isActive ? 'none' : '4 3'}
+                />
+              </g>
+            );
+          });
+        })()}
+
         {/* ── Gravitational heatmap centered on active key ─────────────── */}
         {activeIdx >= 0 && (
           <circle

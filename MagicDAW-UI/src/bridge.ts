@@ -136,6 +136,7 @@ export const BridgeMessages = {
   MIDI_NOTE_OFF: 'midi_note_off',
   AI_REQUEST: 'ai_request',
   EXPORT_AU: 'export_au',
+  EXPORT_AUDIO: 'export_audio',
   SAVE_PROJECT: 'project.save',
   LOAD_PROJECT: 'project.load',
   NEW_PROJECT: 'project.new',
@@ -182,6 +183,15 @@ export const BridgeMessages = {
   INSTRUMENT_UPDATE_FILTER: 'instrument.updateFilter',
   INSTRUMENT_IMPORT_SAMPLE: 'instrument.importSample',
   INSTRUMENT_PREVIEW_NOTE: 'instrument.previewNote',
+  INSTRUMENT_DESIGN_SOUND: 'instrument.designSound',
+  INSTRUMENT_MAP_ZONES: 'instrument.mapZones',
+
+  // Instrument Factory (JS -> Swift)
+  INSTRUMENT_CREATE_PRESET: 'instrument.createPreset',
+  INSTRUMENT_LIST_PRESETS: 'instrument.listPresets',
+  INSTRUMENT_DELETE_PRESET: 'instrument.deletePreset',
+  INSTRUMENT_ASSIGN_TO_TRACK: 'instrument.assignToTrack',
+  INSTRUMENT_PREVIEW_PRESET: 'instrument.previewPreset',
 
   // Plugin Builder (JS -> Swift)
   ADD_NODE: 'add_node',
@@ -266,6 +276,24 @@ export const BridgeMessages = {
   INSTRUMENT_WAVEFORM: 'instrument_waveform',
   INSTRUMENT_ZONES: 'instrument_zones',
   INSTRUMENT_ERROR: 'instrument_error',
+  INSTRUMENT_AI_PATCH: 'instrument_ai_patch',
+  INSTRUMENT_AI_STATUS: 'instrument_ai_status',
+
+  // Swift -> JS (Instrument Factory)
+  INSTRUMENT_PRESET_CREATED: 'instrument_preset_created',
+  INSTRUMENT_PRESET_LIST: 'instrument_preset_list',
+  INSTRUMENT_PRESET_DELETED: 'instrument_preset_deleted',
+  INSTRUMENT_ASSIGNED: 'instrument_assigned',
+
+  // Audio Import (JS -> Swift)
+  IMPORT_AUDIO_FILE: 'audio.importFile',
+
+  // System (JS -> Swift)
+  OPEN_FILE_PICKER: 'system.openFilePicker',
+  OPEN_URL: 'system.openURL',
+
+  // System (Swift -> JS)
+  FILE_PICKED: 'system.filePicked',
 } as const;
 
 // ── Instrument Helper Types ───────────────────────────────────────────────
@@ -374,6 +402,23 @@ export function setQuantize(grid: number): void {
 /** Select MIDI output device by index (-1 or omit to disable external output). */
 export function setMidiOutput(index: number): void {
   sendToSwift(BridgeMessages.SET_MIDI_OUTPUT, { index });
+}
+
+// ── System Helper Functions ──────────────────────────────────────────────
+
+/** Open native file picker. Extensions should include the dot, e.g. [".mid", ".musicxml"] */
+export function openFilePicker(extensions: string[], pickerId?: string): void {
+  sendToSwift(BridgeMessages.OPEN_FILE_PICKER, { extensions, pickerId: pickerId ?? 'default' });
+}
+
+/** Open a URL in the system default browser. */
+export function openURL(url: string): void {
+  sendToSwift(BridgeMessages.OPEN_URL, { url });
+}
+
+/** Register a one-time callback for when a file is picked. Returns unsubscribe. */
+export function onFilePicked(callback: (payload: { path: string; data: string; pickerId: string }) => void): () => void {
+  return onSwiftMessage(BridgeMessages.FILE_PICKED, callback as SwiftMessageHandler);
 }
 
 // ── Effects Chain Helper Functions ───────────────────────────────────────

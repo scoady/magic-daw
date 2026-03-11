@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import { Player } from '@remotion/player';
-import { ZoomIn, ZoomOut } from 'lucide-react';
+import { ZoomIn, ZoomOut, Plus, Upload, Music, ExternalLink } from 'lucide-react';
 import type { Track, Clip, ViewId } from '../types/daw';
 import { sendToSwift, onSwiftMessage, BridgeMessages } from '../bridge';
 import { LiveArrange } from '../compositions/LiveArrange';
@@ -14,10 +14,20 @@ interface ArrangeViewProps {
   tracks: Track[];
   bpm: number;
   playing: boolean;
+  recording?: boolean;
+  transportPosition?: { bar: number; beat: number; timeMs: number };
   onSwitchView?: (view: ViewId, clipId?: string) => void;
+  onToggleMute?: (trackId: string) => void;
+  onToggleSolo?: (trackId: string) => void;
+  onToggleArm?: (trackId: string) => void;
+  onAddTrack?: (type: 'midi' | 'audio') => void;
+  onDeleteTrack?: (trackId: string) => void;
+  onRenameTrack?: (trackId: string, name: string) => void;
+  onChangeInstrument?: (trackId: string) => void;
 }
 
-const TOTAL_BARS = 32;
+const MIN_BARS = 32;
+const MARGIN_BARS = 8; // extra bars after last clip
 const BEATS_PER_BAR = 4;
 const FPS = 30;
 const DURATION_FRAMES = 9000; // 5 minutes at 30fps
@@ -59,7 +69,7 @@ function snapToBar(bar: number): number {
   return Math.round(bar / SNAP_BARS) * SNAP_BARS;
 }
 
-export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, onSwitchView }) => {
+export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, recording, transportPosition, onSwitchView, onToggleMute, onToggleSolo, onToggleArm, onAddTrack, onDeleteTrack, onRenameTrack, onChangeInstrument }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -85,8 +95,20 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
   const dragRef = useRef(drag);
   dragRef.current = drag;
 
+  // Dynamic timeline: extend beyond last clip + margin
+  const totalBars = useMemo(() => {
+    let maxEnd = 0;
+    for (const track of tracks) {
+      for (const clip of track.clips) {
+        const end = clip.startBar + clip.lengthBars;
+        if (end > maxEnd) maxEnd = end;
+      }
+    }
+    return Math.max(MIN_BARS, maxEnd + MARGIN_BARS);
+  }, [tracks]);
+
   // Visible bars based on zoom
-  const visibleBars = useMemo(() => TOTAL_BARS / zoom, [zoom]);
+  const visibleBars = useMemo(() => totalBars / zoom, [totalBars, zoom]);
 
   // Measure container
   useEffect(() => {
@@ -112,19 +134,28 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
     return unsub;
   }, []);
 
-  // Animate playhead when playing
+  // Sync playhead with Swift transport position (sent at ~30fps when playing)
   useEffect(() => {
-    if (!playing) return;
-    const beatsPerSecond = bpm / 60;
-    const interval = setInterval(() => {
-      setPlayheadBeat((prev) => {
-        const next = prev + beatsPerSecond / FPS;
-        const totalBeats = TOTAL_BARS * BEATS_PER_BAR;
-        return next >= totalBeats ? 0 : next;
-      });
-    }, 1000 / FPS);
-    return () => clearInterval(interval);
-  }, [playing, bpm]);
+    if (!transportPosition) return;
+    // Convert bar:beat (both 1-indexed) to absolute beat position (0-indexed)
+    const absoluteBeat = (transportPosition.bar - 1) * BEATS_PER_BAR + (transportPosition.beat - 1);
+    setPlayheadBeat(absoluteBeat);
+  }, [transportPosition]);
+
+  // Auto-scroll: keep playhead visible when playing
+  useEffect(() => {
+    if (!playing || drag.mode === 'playhead-scrub') return;
+    const playheadBar = playheadBeat / BEATS_PER_BAR;
+    const viewEnd = scrollOffset + visibleBars;
+    const margin = visibleBars * 0.15; // scroll when playhead is within 15% of edge
+    if (playheadBar > viewEnd - margin) {
+      // Playhead approaching right edge — scroll forward
+      setScrollOffset(Math.min(totalBars - visibleBars, playheadBar - visibleBars * 0.3));
+    } else if (playheadBar < scrollOffset + margin) {
+      // Playhead behind left edge (e.g. loop restart)
+      setScrollOffset(Math.max(0, playheadBar - margin));
+    }
+  }, [playheadBeat, playing, scrollOffset, visibleBars, totalBars, drag.mode]);
 
   // Bar width for mouse hit-testing
   const gridW = containerSize.width - HEADER_W;
@@ -470,7 +501,7 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
 
       if (d.mode === 'playhead-scrub') {
         const bar = xToBar(e.clientX);
-        const clampedBar = Math.max(1, Math.min(TOTAL_BARS + 1, bar));
+        const clampedBar = Math.max(1, Math.min(totalBars + 1, bar));
         const beat = (clampedBar - 1) * BEATS_PER_BAR;
         setPlayheadBeat(beat);
         setDrag((prev) => ({ ...prev, hasMoved }));
@@ -500,7 +531,7 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
       if (d.mode === 'playhead-scrub') {
         // Send final position to Swift
         const bar = xToBar(e.clientX);
-        const beat = Math.max(0, (Math.max(1, Math.min(TOTAL_BARS + 1, bar)) - 1)) * BEATS_PER_BAR;
+        const beat = Math.max(0, (Math.max(1, Math.min(totalBars + 1, bar)) - 1)) * BEATS_PER_BAR;
         sendToSwift(BridgeMessages.SET_POSITION, { beat });
         setDrag({ mode: 'idle', startX: 0, startY: 0, originBar: 0, originTrackIdx: 0, deltaBar: 0, deltaTrack: 0, hasMoved: false });
         return;
@@ -582,13 +613,13 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
         // Shift + wheel or horizontal trackpad = horizontal scroll (time)
         const delta = e.shiftKey ? e.deltaY : e.deltaX;
         setScrollOffset((prev) =>
-          Math.max(0, Math.min(TOTAL_BARS - visibleBars, prev + delta * 0.02)),
+          Math.max(0, Math.min(totalBars - visibleBars, prev + delta * 0.02)),
         );
       } else {
         // Plain vertical scroll = horizontal scroll (legacy behavior for track views)
         const scrollDelta = e.deltaY * 0.02;
         setScrollOffset((prev) =>
-          Math.max(0, Math.min(TOTAL_BARS - visibleBars, prev + scrollDelta)),
+          Math.max(0, Math.min(totalBars - visibleBars, prev + scrollDelta)),
         );
       }
     },
@@ -622,7 +653,7 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
       isPlaying: playing,
       bpm,
       beatsPerBar: BEATS_PER_BAR,
-      totalBars: TOTAL_BARS,
+      totalBars: totalBars,
       visibleBars,
       scrollOffsetBars: scrollOffset,
       selectedClipId: selectedClipIdStr,
@@ -691,11 +722,14 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
           }}
         />
 
-        {/* Interactive overlay — captures all mouse events */}
+        {/* Interactive overlay — captures all mouse events on the grid area */}
         <div
           style={{
             position: 'absolute',
-            inset: 0,
+            top: 0,
+            left: HEADER_W,
+            right: 0,
+            bottom: 0,
             cursor: getCursor(),
           }}
           onMouseDown={handleMouseDown}
@@ -705,6 +739,158 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
           onDoubleClick={handleDoubleClick}
           onContextMenu={handleContextMenu}
           onWheel={handleWheel}
+        />
+
+        {/* Interactive track header overlay — mute/solo/arm buttons */}
+        <div
+          style={{
+            position: 'absolute',
+            top: RULER_H + ENERGY_H,
+            left: 0,
+            width: HEADER_W,
+            bottom: 0,
+            overflow: 'hidden',
+          }}
+        >
+          {tracks.map((track, i) => (
+            <div
+              key={track.id}
+              onClick={() => setSelectedTrackId(track.id)}
+              style={{
+                height: TRACK_H,
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'center',
+                padding: '0 6px',
+                cursor: 'default',
+                position: 'relative',
+                background: selectedTrackId === track.id ? 'rgba(103,232,249,0.06)' : 'transparent',
+              }}
+            >
+              {/* Recording indicator */}
+              {recording && track.armed && (
+                <div style={{
+                  width: 6, height: 6, borderRadius: '50%',
+                  background: '#ef4444',
+                  boxShadow: '0 0 8px rgba(239,68,68,0.6)',
+                  animation: 'pulse 1s ease-in-out infinite',
+                  position: 'absolute', top: 4, right: 6,
+                }} />
+              )}
+              {/* Mute / Solo / Arm row */}
+              <div style={{ display: 'flex', gap: 3, marginTop: 2 }}>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onToggleMute?.(track.id); }}
+                  style={{
+                    width: 18, height: 14, fontSize: 8, fontWeight: 700,
+                    border: 'none', borderRadius: 3, cursor: 'pointer',
+                    background: track.muted ? 'rgba(251,191,36,0.25)' : 'rgba(255,255,255,0.06)',
+                    color: track.muted ? '#fbbf24' : 'rgba(255,255,255,0.3)',
+                  }}
+                  title="Mute"
+                >M</button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onToggleSolo?.(track.id); }}
+                  style={{
+                    width: 18, height: 14, fontSize: 8, fontWeight: 700,
+                    border: 'none', borderRadius: 3, cursor: 'pointer',
+                    background: track.soloed ? 'rgba(52,211,153,0.25)' : 'rgba(255,255,255,0.06)',
+                    color: track.soloed ? '#34d399' : 'rgba(255,255,255,0.3)',
+                  }}
+                  title="Solo"
+                >S</button>
+                {track.type === 'midi' && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onToggleArm?.(track.id); }}
+                    style={{
+                      width: 18, height: 14, fontSize: 8, fontWeight: 700,
+                      border: 'none', borderRadius: 3, cursor: 'pointer',
+                      background: track.armed ? 'rgba(239,68,68,0.25)' : 'rgba(255,255,255,0.06)',
+                      color: track.armed ? '#ef4444' : 'rgba(255,255,255,0.3)',
+                    }}
+                    title="Arm for recording"
+                  >R</button>
+                )}
+              </div>
+              {track.type === 'midi' && (
+                <div
+                  onClick={(e) => { e.stopPropagation(); onChangeInstrument?.(track.id); }}
+                  style={{
+                    fontSize: 7,
+                    color: track.instrumentPresetName ? 'rgba(167,139,250,0.8)' : 'rgba(255,255,255,0.2)',
+                    cursor: 'pointer',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    marginTop: 2,
+                  }}
+                  title={track.instrumentPresetName || 'Click to assign instrument'}
+                >
+                  {track.instrumentPresetName || '+ instrument'}
+                </div>
+              )}
+            </div>
+          ))}
+          {/* Add track & import buttons */}
+          <div style={{ height: TRACK_H, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+            <button
+              onClick={() => onAddTrack?.('midi')}
+              style={{
+                width: 24, height: 24, borderRadius: '50%',
+                border: '1px solid rgba(255,255,255,0.1)',
+                background: 'rgba(255,255,255,0.04)',
+                color: 'rgba(255,255,255,0.3)',
+                cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}
+              title="Add MIDI track"
+            >
+              <Plus size={12} />
+            </button>
+            <button
+              onClick={() => sendToSwift(BridgeMessages.IMPORT_AUDIO_FILE)}
+              style={{
+                width: 24, height: 24, borderRadius: '50%',
+                border: '1px solid rgba(167,139,250,0.2)',
+                background: 'rgba(167,139,250,0.06)',
+                color: 'rgba(167,139,250,0.6)',
+                cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}
+              title="Import audio file (Suno, MP3, WAV, etc.)"
+            >
+              <Upload size={10} />
+            </button>
+            <button
+              onClick={() => sendToSwift(BridgeMessages.OPEN_URL, { url: 'https://suno.com' })}
+              style={{
+                width: 24, height: 24, borderRadius: '50%',
+                border: '1px solid rgba(251,191,36,0.2)',
+                background: 'rgba(251,191,36,0.06)',
+                color: 'rgba(251,191,36,0.6)',
+                cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}
+              title="Browse Suno — generate AI music, download, then import"
+            >
+              <Music size={10} />
+            </button>
+          </div>
+        </div>
+
+        {/* Ruler area overlay for playhead scrub */}
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: HEADER_W,
+            right: 0,
+            height: RULER_H,
+            cursor: 'col-resize',
+          }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
         />
 
         {/* Selection rectangle */}

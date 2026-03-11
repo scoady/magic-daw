@@ -9,6 +9,9 @@
 - UI: `cd MagicDAW-UI && npm run build`
 - App: `swift build`
 - Both: `make build`
+- **DMG (always use this when user says "build" or "rebuild"):** `make dmg`
+  - This builds UI + Swift + bundles into .app + creates dist/MagicDAW-0.1.0.dmg
+  - `make build` alone does NOT update the DMG — the user mounts the DMG to run the app
 
 ## AI
 - ALL AI through Ollama at `http://DESKTOP-D4U6J5M:11434`

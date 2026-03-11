@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import type { DAWState, ViewId, LearnSubView, Track, ProjectData, SwiftTrack } from './types/daw';
+import type { DAWState, ViewId, LearnSubView, Track, ProjectData, SwiftTrack, InstrumentPreset } from './types/daw';
 import { mockDAWState, aurora, trackColorToHex } from './mockData';
 import { sendToSwift, onSwiftMessage, onMidiStateChange, BridgeMessages } from './bridge';
 import type { ActiveMidiNote, MidiDeviceList } from './bridge';
@@ -15,6 +15,8 @@ import { ChordVisualizerPanel } from './components/ChordVisualizerPanel';
 import { CircleOfFifthsPanel } from './components/CircleOfFifthsPanel';
 import { IntervalTrainerPanel } from './components/IntervalTrainerPanel';
 import { LearnPanel } from './components/LearnPanel';
+import { ChordBuilderPanel } from './components/ChordBuilderPanel';
+import { EmotionsPanel } from './components/EmotionsPanel';
 import { ToastProvider, useToast } from './components/Toast';
 import { ContextMenuProvider } from './components/ContextMenu';
 
@@ -26,6 +28,7 @@ const VIEW_TABS: { id: ViewId; label: string; key: string }[] = [
   { id: 'plugins', label: 'Plugins', key: '5' },
   { id: 'chord-builder', label: 'Chord Builder', key: '6' },
   { id: 'learn', label: 'Learn', key: '7' },
+  { id: 'emotions', label: 'Emotions of Music', key: '8' },
 ];
 
 const VIEW_IDS: ViewId[] = VIEW_TABS.map((t) => t.id);
@@ -37,6 +40,9 @@ const AppInner: React.FC = () => {
   const [trackLevels, setTrackLevels] = useState<Record<string, { left: number; right: number }>>({});
   const [liveActiveNotes, setLiveActiveNotes] = useState<ActiveMidiNote[]>([]);
   const [midiDevices, setMidiDevices] = useState<MidiDeviceList>({ sources: [], destinations: [] });
+  const [editingClipId, setEditingClipId] = useState<string | null>(null);
+  const [instrumentPickerTrackId, setInstrumentPickerTrackId] = useState<string | null>(null);
+  const [instrumentPresets, setInstrumentPresets] = useState<InstrumentPreset[]>([]);
   const { showToast } = useToast();
 
   // Subscribe to live MIDI state (note on/off from hardware controllers)
@@ -132,6 +138,7 @@ const AppInner: React.FC = () => {
           startBar: c.startBar,
           lengthBars: c.lengthBars,
           color: c.color ? trackColorToHex(c.color) : trackColorToHex(st.color),
+          notes: c.midiEvents as { id: string; pitch: number; start: number; duration: number; velocity: number; channel: number }[] | undefined,
         })),
       }));
 
@@ -180,6 +187,7 @@ const AppInner: React.FC = () => {
           startBar: c.startBar,
           lengthBars: c.lengthBars,
           color: c.color ? trackColorToHex(c.color) : trackColorToHex(st.color),
+          notes: c.midiEvents as { id: string; pitch: number; start: number; duration: number; velocity: number; channel: number }[] | undefined,
         })),
       }));
 
@@ -266,6 +274,40 @@ const AppInner: React.FC = () => {
     return unsub;
   }, []);
 
+  // Listen for clip recorded events (MIDI recording finalization)
+  useEffect(() => {
+    const unsub = onSwiftMessage(BridgeMessages.CLIP_RECORDED, (payload: unknown) => {
+      const data = payload as {
+        trackId: string;
+        clipId: string;
+        clipName: string;
+        startBar: number;
+        lengthBars: number;
+        notes: Array<{ pitch: number; start: number; duration: number; velocity: number; channel: number }>;
+      };
+      showToast(`Recorded: ${data.clipName} (${data.notes.length} notes)`, 'success');
+      // The tracks_updated event (also sent by finalizeRecording) handles the actual state update
+    });
+    return unsub;
+  }, [showToast]);
+
+  // Listen for export events
+  useEffect(() => {
+    const unsub1 = onSwiftMessage('export_progress', (payload: unknown) => {
+      const data = payload as { status: string; filename: string };
+      showToast(`Export: ${data.status}...`);
+    });
+    const unsub2 = onSwiftMessage('export_complete', (payload: unknown) => {
+      const data = payload as { success: boolean; path?: string; filename?: string; error?: string };
+      if (data.success) {
+        showToast(`Exported: ${data.filename ?? 'audio'}`, 'success');
+      } else {
+        showToast(`Export failed: ${data.error ?? 'Unknown'}`, 'error');
+      }
+    });
+    return () => { unsub1(); unsub2(); };
+  }, [showToast]);
+
   // Listen for monitor state changes
   useEffect(() => {
     const unsub = onSwiftMessage(BridgeMessages.MONITOR_STATE, (payload: unknown) => {
@@ -281,6 +323,20 @@ const AppInner: React.FC = () => {
   // Request input device list on mount
   useEffect(() => {
     sendToSwift(BridgeMessages.GET_INPUT_DEVICES);
+  }, []);
+
+  // Listen for instrument preset list from Swift
+  useEffect(() => {
+    const unsub = onSwiftMessage(BridgeMessages.INSTRUMENT_PRESET_LIST, (payload: unknown) => {
+      const data = payload as { presets?: InstrumentPreset[] };
+      setInstrumentPresets(data.presets ?? []);
+    });
+    return unsub;
+  }, []);
+
+  // Request instrument preset list on mount
+  useEffect(() => {
+    sendToSwift(BridgeMessages.INSTRUMENT_LIST_PRESETS);
   }, []);
 
   // ── Unsaved changes indicator in window title ──────────────────────────────
@@ -359,12 +415,29 @@ const AppInner: React.FC = () => {
   }, []);
 
   const handleRecord = useCallback(() => {
-    setDAWState((prev) => ({
-      ...prev,
-      transport: { ...prev.transport, recording: !prev.transport.recording },
-    }));
-    sendToSwift(BridgeMessages.TRANSPORT_RECORD);
-  }, []);
+    const current = dawStateRef.current;
+    if (current.transport.recording) {
+      // Stop recording — also stop transport
+      setDAWState((prev) => ({
+        ...prev,
+        transport: { ...prev.transport, playing: false, recording: false },
+      }));
+      sendToSwift(BridgeMessages.TRANSPORT_STOP);
+    } else {
+      // Check if any track is armed
+      const hasArmedTrack = current.tracks.some((t) => t.armed);
+      if (!hasArmedTrack) {
+        showToast('Arm a track first (R button)', 'error');
+        return;
+      }
+      // Start recording — also starts playback
+      setDAWState((prev) => ({
+        ...prev,
+        transport: { ...prev.transport, playing: true, recording: true },
+      }));
+      sendToSwift(BridgeMessages.TRANSPORT_RECORD);
+    }
+  }, [showToast]);
 
   const handleRewind = useCallback(() => {
     setDAWState((prev) => ({
@@ -493,6 +566,56 @@ const AppInner: React.FC = () => {
     });
   }, []);
 
+  const handleMetronomeToggle = useCallback((enabled: boolean) => {
+    setDAWState((prev) => ({
+      ...prev,
+      transport: { ...prev.transport, metronomeEnabled: enabled },
+    }));
+    sendToSwift(BridgeMessages.SET_METRONOME, { enabled });
+  }, []);
+
+  const handleLoopToggle = useCallback((enabled: boolean) => {
+    setDAWState((prev) => ({
+      ...prev,
+      transport: { ...prev.transport, loopEnabled: enabled },
+    }));
+    sendToSwift(BridgeMessages.SET_LOOP_ENABLED, { enabled });
+  }, []);
+
+  const handleLoopRegionChange = useCallback((startBar: number, endBar: number) => {
+    setDAWState((prev) => ({
+      ...prev,
+      transport: { ...prev.transport, loopStart: startBar, loopEnd: endBar },
+    }));
+    sendToSwift(BridgeMessages.SET_LOOP_REGION, { startBar, endBar });
+  }, []);
+
+  const handleCountInToggle = useCallback((enabled: boolean) => {
+    setDAWState((prev) => ({
+      ...prev,
+      transport: { ...prev.transport, countInEnabled: enabled },
+    }));
+    sendToSwift(BridgeMessages.SET_COUNT_IN, { enabled });
+  }, []);
+
+  const handleExportAudio = useCallback(() => {
+    // Calculate total beats from tracks
+    let maxEndBar = 0;
+    for (const track of dawStateRef.current.tracks) {
+      for (const clip of track.clips) {
+        const end = clip.startBar + clip.lengthBars;
+        if (end > maxEndBar) maxEndBar = end;
+      }
+    }
+    const totalBeats = Math.max(32, maxEndBar) * 4; // 4 beats per bar
+    const projectName = dawStateRef.current.projectName || 'Untitled';
+    sendToSwift(BridgeMessages.EXPORT_AUDIO, {
+      totalBeats,
+      filename: projectName,
+    });
+    showToast('Exporting audio...');
+  }, [showToast]);
+
   const handleTrackEffectChange = useCallback(
     (trackId: string, effectIndex: number, paramName: string, value: number) => {
       sendToSwift(BridgeMessages.SET_TRACK_EFFECT, {
@@ -504,6 +627,40 @@ const AppInner: React.FC = () => {
     },
     [],
   );
+
+  // ── Instrument Assignment ──────────────────────────────────────────────────
+  const handleAssignInstrument = useCallback((trackId: string, preset: InstrumentPreset | null) => {
+    if (preset) {
+      sendToSwift(BridgeMessages.INSTRUMENT_ASSIGN_TO_TRACK, {
+        trackId,
+        presetId: preset.id,
+      });
+      // Optimistically update local state
+      setDAWState((prev) => ({
+        ...prev,
+        tracks: prev.tracks.map((t) =>
+          t.id === trackId
+            ? { ...t, instrumentPresetId: preset.id, instrumentPresetName: preset.name }
+            : t,
+        ),
+      }));
+    } else {
+      // Reset to default GM piano (program 0)
+      sendToSwift(BridgeMessages.INSTRUMENT_ASSIGN_TO_TRACK, {
+        trackId,
+        gmProgram: 0,
+      });
+      setDAWState((prev) => ({
+        ...prev,
+        tracks: prev.tracks.map((t) =>
+          t.id === trackId
+            ? { ...t, instrumentPresetId: undefined, instrumentPresetName: 'Acoustic Grand Piano' }
+            : t,
+        ),
+      }));
+    }
+    setInstrumentPickerTrackId(null);
+  }, []);
 
   // ── Global Keyboard Shortcuts ──────────────────────────────────────────────
   useEffect(() => {
@@ -550,6 +707,13 @@ const AppInner: React.FC = () => {
         e.preventDefault();
         sendToSwift(BridgeMessages.SAVE_PROJECT);
         showToast('Saving...');
+        return;
+      }
+
+      // Cmd+E: Export audio
+      if (e.key === 'e' && meta && !shift) {
+        e.preventDefault();
+        handleExportAudio();
         return;
       }
 
@@ -666,7 +830,7 @@ const AppInner: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handlePlay, handleRecord, handleRewind, handleAddTrack, showToast]);
+  }, [handlePlay, handleRecord, handleRewind, handleAddTrack, handleExportAudio, showToast]);
 
   // Get selected track color for EditView
   const selectedTrack = useMemo(
@@ -683,11 +847,26 @@ const AppInner: React.FC = () => {
             tracks={dawState.tracks}
             bpm={dawState.transport.bpm}
             playing={dawState.transport.playing}
-            onSwitchView={(view, _clipId) => setActiveView(view)}
+            recording={dawState.transport.recording}
+            transportPosition={dawState.transport.position}
+            onSwitchView={(view, clipId) => {
+              setActiveView(view);
+              if (clipId) setEditingClipId(clipId);
+            }}
+            onToggleMute={handleToggleMute}
+            onToggleSolo={handleToggleSolo}
+            onToggleArm={handleToggleArm}
+            onAddTrack={handleAddTrack}
+            onDeleteTrack={handleDeleteTrack}
+            onRenameTrack={handleRenameTrack}
+            onChangeInstrument={(trackId) => {
+              setInstrumentPickerTrackId(trackId);
+              sendToSwift(BridgeMessages.INSTRUMENT_LIST_PRESETS);
+            }}
           />
         );
       case 'edit':
-        return <EditView trackColor={selectedTrack?.color ?? aurora.cyan} liveActiveNotes={liveActiveNotes} />;
+        return <EditView trackColor={selectedTrack?.color ?? aurora.cyan} liveActiveNotes={liveActiveNotes} clipId={editingClipId ?? undefined} />;
       case 'mix':
         return (
           <MixView
@@ -705,9 +884,11 @@ const AppInner: React.FC = () => {
       case 'plugins':
         return <PluginView />;
       case 'chord-builder':
-        return <CircleOfFifthsPanel />;
+        return <ChordBuilderPanel />;
       case 'learn':
         return <LearnPanel />;
+      case 'emotions':
+        return <EmotionsPanel />;
     }
   };
 
@@ -738,10 +919,19 @@ const AppInner: React.FC = () => {
           masterLevelR={dawState.masterLevelR}
           midiInputActive={dawState.midiInputActive}
           ollamaConnected={dawState.ollamaConnected}
+          metronomeEnabled={dawState.transport.metronomeEnabled}
+          loopEnabled={dawState.transport.loopEnabled}
+          loopStart={dawState.transport.loopStart}
+          loopEnd={dawState.transport.loopEnd}
+          countInEnabled={dawState.transport.countInEnabled}
           onPlay={handlePlay}
           onStop={handleStop}
           onRecord={handleRecord}
           onRewind={handleRewind}
+          onMetronomeToggle={handleMetronomeToggle}
+          onLoopToggle={handleLoopToggle}
+          onLoopRegionChange={handleLoopRegionChange}
+          onCountInToggle={handleCountInToggle}
           projectDirty={dawState.projectDirty}
           projectName={dawState.projectName}
         />
@@ -773,7 +963,7 @@ const AppInner: React.FC = () => {
         {/* Main area: TrackList sidebar + View content */}
         <div className="flex flex-1 min-h-0">
           {/* Track list sidebar (visible in arrange/edit/mix views) */}
-          {activeView !== 'instruments' && activeView !== 'plugins' && activeView !== 'chord-builder' && activeView !== 'learn' && (
+          {activeView !== 'instruments' && activeView !== 'plugins' && activeView !== 'chord-builder' && activeView !== 'learn' && activeView !== 'emotions' && (
             <TrackList
               tracks={dawState.tracks}
               selectedTrackId={dawState.selectedTrackId}
@@ -795,6 +985,87 @@ const AppInner: React.FC = () => {
             {renderView()}
           </div>
         </div>
+
+        {/* Instrument Picker Popover */}
+        {instrumentPickerTrackId && (
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 100 }}
+            onClick={() => setInstrumentPickerTrackId(null)}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                position: 'absolute',
+                left: 130,
+                top: '30%',
+                width: 220,
+                maxHeight: 300,
+                overflowY: 'auto',
+                background: 'rgba(10,14,26,0.95)',
+                border: '1px solid rgba(103,232,249,0.15)',
+                borderRadius: 8,
+                padding: 8,
+                zIndex: 101,
+                backdropFilter: 'blur(12px)',
+              }}
+            >
+              <div style={{
+                fontSize: 8,
+                color: 'rgba(255,255,255,0.35)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.1em',
+                marginBottom: 6,
+              }}>
+                Assign Instrument
+              </div>
+              <div
+                onClick={() => handleAssignInstrument(instrumentPickerTrackId, null)}
+                style={{
+                  padding: '4px 8px',
+                  cursor: 'pointer',
+                  fontSize: 9,
+                  color: 'rgba(255,255,255,0.4)',
+                  borderRadius: 4,
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(103,232,249,0.08)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+              >
+                None (default piano)
+              </div>
+              {instrumentPresets.map((preset) => {
+                const isActive = dawState.tracks.find((t) => t.id === instrumentPickerTrackId)?.instrumentPresetId === preset.id;
+                return (
+                  <div
+                    key={preset.id}
+                    onClick={() => handleAssignInstrument(instrumentPickerTrackId, preset)}
+                    style={{
+                      padding: '4px 8px',
+                      cursor: 'pointer',
+                      fontSize: 9,
+                      color: '#e2e8f0',
+                      borderRadius: 4,
+                      background: isActive ? 'rgba(167,139,250,0.15)' : 'transparent',
+                    }}
+                    onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'rgba(103,232,249,0.08)'; }}
+                    onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
+                  >
+                    {preset.name}
+                  </div>
+                );
+              })}
+              {instrumentPresets.length === 0 && (
+                <div style={{
+                  fontSize: 8,
+                  color: 'rgba(255,255,255,0.35)',
+                  padding: 8,
+                  textAlign: 'center',
+                }}>
+                  No instruments yet — create one in the Instruments tab
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Bottom Panel */}
         <BottomPanel

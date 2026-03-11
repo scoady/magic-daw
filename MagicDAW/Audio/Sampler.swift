@@ -8,9 +8,13 @@ class Sampler {
     private var pitchUnits: [UInt8: AVAudioUnitTimePitch] = [:]
     private let engine: AVAudioEngine
     private let mixer: AVAudioMixerNode
+    private let filterNode: AVAudioUnitEQ
 
     /// Built-in General MIDI piano synth — used as fallback when no custom samples are loaded.
     private let gmSynth = AVAudioUnitSampler()
+
+    /// URLs for all loaded sample zones, keyed by root note.
+    private(set) var sampleURLs: [UInt8: URL] = [:]
 
     // ADSR envelope
     var attack: Float = 0.01
@@ -19,16 +23,27 @@ class Sampler {
     var release: Float = 0.3
 
     // Filter
-    var filterCutoff: Float = 20000
-    var filterResonance: Float = 0
+    var filterCutoff: Float = 20000 {
+        didSet { applyFilter() }
+    }
+    var filterResonance: Float = 0 {
+        didSet { applyFilter() }
+    }
+    var filterType: String = "LP" {
+        didSet { applyFilter() }
+    }
 
     init(engine: AVAudioEngine) {
         self.engine = engine
         self.mixer = AVAudioMixerNode()
+        self.filterNode = AVAudioUnitEQ(numberOfBands: 1)
         engine.attach(mixer)
+        engine.attach(filterNode)
         engine.attach(gmSynth)
         engine.connect(gmSynth, to: mixer, format: nil)
+        engine.connect(mixer, to: filterNode, format: nil)
         loadGMSoundbank()
+        applyFilter()
     }
 
     /// Load the macOS built-in DLS General MIDI soundbank into the GM synth.
@@ -51,7 +66,7 @@ class Sampler {
     /// Connect this sampler's output to a destination mixer.
     func connect(to destination: AVAudioMixerNode) {
         let format = destination.outputFormat(forBus: 0)
-        engine.connect(mixer, to: destination, format: format)
+        engine.connect(filterNode, to: destination, format: format)
     }
 
     // MARK: - Load Samples
@@ -59,6 +74,7 @@ class Sampler {
     /// Load a sample mapped across a range of notes.
     func loadSample(url: URL, rootNote: UInt8, lowNote: UInt8, highNote: UInt8) throws {
         let buffer = try loadBuffer(from: url)
+        sampleURLs[rootNote] = url
         for note in lowNote...highNote {
             sampleBuffers[note] = buffer
             sampleRootNotes[note] = rootNote
@@ -68,6 +84,7 @@ class Sampler {
     /// Load a one-shot sample mapped to a single note.
     func loadOneshot(url: URL, rootNote: UInt8 = 60) throws {
         let buffer = try loadBuffer(from: url)
+        sampleURLs[rootNote] = url
         sampleBuffers[rootNote] = buffer
         sampleRootNotes[rootNote] = rootNote
     }
@@ -165,6 +182,39 @@ class Sampler {
         }
     }
 
+    // MARK: - Filter
+
+    private func applyFilter() {
+        guard let band = filterNode.bands.first else { return }
+        switch filterType {
+        case "HP":
+            band.filterType = .highPass
+        case "BP":
+            band.filterType = .bandPass
+        case "Notch":
+            band.filterType = .parametric
+            // Parametric with very narrow bandwidth approximates a notch
+        default: // "LP"
+            band.filterType = .lowPass
+        }
+        band.frequency = filterCutoff
+        band.bandwidth = max(0.05, filterResonance)  // bandwidth in octaves; clamp to avoid zero
+        band.bypass = false
+    }
+
+    // MARK: - Sample Metadata
+
+    /// Return metadata for all loaded sample zones.
+    func sampleMetadata() -> [(filename: String, rootNote: UInt8, durationSeconds: Double)] {
+        var results: [(filename: String, rootNote: UInt8, durationSeconds: Double)] = []
+        for (rootNote, url) in sampleURLs {
+            guard let buffer = sampleBuffers[rootNote] else { continue }
+            let duration = Double(buffer.frameLength) / buffer.format.sampleRate
+            results.append((filename: url.lastPathComponent, rootNote: rootNote, durationSeconds: duration))
+        }
+        return results.sorted { $0.rootNote < $1.rootNote }
+    }
+
     // MARK: - Private
 
     private func cleanupPlayer(for note: UInt8) {
@@ -225,6 +275,31 @@ class Sampler {
         }
         return zones.map { (rootNote: $0.key, lowNote: $0.value.low, highNote: $0.value.high) }
             .sorted { $0.lowNote < $1.lowNote }
+    }
+
+    // MARK: - GM Program & Preset
+
+    /// Switch the GM synth to a different program/bank combination.
+    func setGMProgram(_ program: UInt8, bankMSB: UInt8 = 0x79) {
+        let dlsURL = URL(fileURLWithPath: "/System/Library/Components/CoreAudio.component/Contents/Resources/gs_instruments.dls")
+        do {
+            try gmSynth.loadSoundBankInstrument(at: dlsURL, program: program, bankMSB: bankMSB, bankLSB: 0)
+            print("[Sampler] Loaded GM program \(program) bank=\(bankMSB)")
+        } catch {
+            print("[Sampler] Failed to load GM program \(program): \(error)")
+        }
+    }
+
+    /// Apply a full InstrumentPreset: switch GM program and set ADSR/filter parameters.
+    func applyPreset(_ preset: InstrumentPreset) {
+        setGMProgram(preset.gmProgram, bankMSB: preset.bankMSB)
+        attack = preset.attack
+        decay = preset.decay
+        sustain = preset.sustain
+        release = preset.release
+        filterCutoff = preset.filterCutoff
+        filterResonance = preset.filterResonance
+        filterType = preset.filterType
     }
 
     /// Whether any samples are loaded

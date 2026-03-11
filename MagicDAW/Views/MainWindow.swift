@@ -246,6 +246,11 @@ struct WebViewContainer: NSViewRepresentable {
                 viewModel.markLoaded()
                 // Start MIDI after the UI is loaded so JS handlers are registered
                 viewModel.bridge.startMIDI()
+
+                // Auto-create a default project if none exists (so track/clip operations work)
+                if viewModel.bridge.currentProject == nil {
+                    viewModel.bridge.newProject()
+                }
             }
         }
 

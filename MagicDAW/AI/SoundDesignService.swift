@@ -54,6 +54,23 @@ struct AISampleZone: Codable, Sendable {
     let highVelocity: UInt8
 }
 
+// MARK: - GM Instrument Result
+
+/// Result of AI-powered GM instrument selection and parameter design.
+struct GMInstrumentResult: Codable, Sendable {
+    let name: String
+    let gmProgram: UInt8
+    let bankMSB: UInt8
+    let attack: Float
+    let decay: Float
+    let sustain: Float
+    let release: Float
+    let filterCutoff: Float
+    let filterResonance: Float
+    let filterType: String
+    let description: String
+}
+
 // MARK: - Sound Design Service
 
 /// AI-assisted sound creation service. Uses Ollama to generate synth patches,
@@ -138,6 +155,87 @@ actor SoundDesignService {
             return algorithmicSampleMap(samples: samples)
         }
     }
+
+    // MARK: - GM Instrument Design
+
+    /// Use AI to pick the best GM program and parameters for a text description.
+    /// Falls back to keyword matching if Ollama is unavailable.
+    func designGMInstrument(description: String) async -> GMInstrumentResult {
+        do {
+            let result = try await router.client.generateJSON(
+                model: AIRouter.fastModel,
+                prompt: description,
+                system: gmInstrumentSystemPrompt,
+                type: GMInstrumentResult.self
+            )
+            return result
+        } catch {
+            print("[SoundDesign] GM instrument AI failed, using fallback: \(error.localizedDescription)")
+            return fallbackGMInstrument(for: description)
+        }
+    }
+
+    /// Keyword-based fallback when Ollama is unavailable.
+    private func fallbackGMInstrument(for desc: String) -> GMInstrumentResult {
+        let d = desc.lowercased()
+        if d.contains("piano") {
+            return GMInstrumentResult(name: "Piano", gmProgram: 0, bankMSB: 0x79, attack: 0.005, decay: 0.8, sustain: 0.3, release: 0.5, filterCutoff: 12000, filterResonance: 0.2, filterType: "LP", description: "Acoustic grand piano")
+        }
+        if d.contains("guitar") && (d.contains("distort") || d.contains("power") || d.contains("rock")) {
+            return GMInstrumentResult(name: "Distortion Guitar", gmProgram: 30, bankMSB: 0x79, attack: 0.005, decay: 0.4, sustain: 0.7, release: 0.3, filterCutoff: 6000, filterResonance: 0.4, filterType: "LP", description: "Heavy distortion guitar")
+        }
+        if d.contains("guitar") && d.contains("overdrive") {
+            return GMInstrumentResult(name: "Overdrive Guitar", gmProgram: 29, bankMSB: 0x79, attack: 0.005, decay: 0.3, sustain: 0.6, release: 0.3, filterCutoff: 8000, filterResonance: 0.3, filterType: "LP", description: "Overdrive guitar")
+        }
+        if d.contains("guitar") {
+            return GMInstrumentResult(name: "Clean Guitar", gmProgram: 27, bankMSB: 0x79, attack: 0.005, decay: 0.5, sustain: 0.5, release: 0.4, filterCutoff: 10000, filterResonance: 0.2, filterType: "LP", description: "Clean electric guitar")
+        }
+        if d.contains("bass") && d.contains("synth") {
+            return GMInstrumentResult(name: "Synth Bass", gmProgram: 38, bankMSB: 0x79, attack: 0.005, decay: 0.3, sustain: 0.6, release: 0.2, filterCutoff: 4000, filterResonance: 0.5, filterType: "LP", description: "Synth bass")
+        }
+        if d.contains("bass") {
+            return GMInstrumentResult(name: "Finger Bass", gmProgram: 33, bankMSB: 0x79, attack: 0.005, decay: 0.4, sustain: 0.5, release: 0.3, filterCutoff: 5000, filterResonance: 0.3, filterType: "LP", description: "Finger bass")
+        }
+        if d.contains("string") || d.contains("orchestr") {
+            return GMInstrumentResult(name: "String Ensemble", gmProgram: 48, bankMSB: 0x79, attack: 0.3, decay: 0.5, sustain: 0.8, release: 0.8, filterCutoff: 10000, filterResonance: 0.2, filterType: "LP", description: "String ensemble")
+        }
+        if d.contains("pad") || d.contains("ambient") {
+            return GMInstrumentResult(name: "Warm Pad", gmProgram: 89, bankMSB: 0x79, attack: 0.5, decay: 0.8, sustain: 0.7, release: 1.0, filterCutoff: 6000, filterResonance: 0.3, filterType: "LP", description: "Warm synth pad")
+        }
+        if d.contains("brass") || d.contains("trumpet") {
+            return GMInstrumentResult(name: "Brass Section", gmProgram: 61, bankMSB: 0x79, attack: 0.02, decay: 0.3, sustain: 0.7, release: 0.3, filterCutoff: 8000, filterResonance: 0.3, filterType: "LP", description: "Brass section")
+        }
+        if d.contains("sax") {
+            return GMInstrumentResult(name: "Tenor Sax", gmProgram: 66, bankMSB: 0x79, attack: 0.02, decay: 0.3, sustain: 0.7, release: 0.3, filterCutoff: 8000, filterResonance: 0.3, filterType: "LP", description: "Tenor saxophone")
+        }
+        if d.contains("flute") {
+            return GMInstrumentResult(name: "Flute", gmProgram: 73, bankMSB: 0x79, attack: 0.05, decay: 0.3, sustain: 0.6, release: 0.4, filterCutoff: 12000, filterResonance: 0.2, filterType: "LP", description: "Flute")
+        }
+        if d.contains("organ") {
+            return GMInstrumentResult(name: "Rock Organ", gmProgram: 18, bankMSB: 0x79, attack: 0.01, decay: 0.3, sustain: 0.8, release: 0.2, filterCutoff: 10000, filterResonance: 0.3, filterType: "LP", description: "Rock organ")
+        }
+        if d.contains("drum") || d.contains("percus") {
+            return GMInstrumentResult(name: "Drums", gmProgram: 0, bankMSB: 0x78, attack: 0.001, decay: 0.2, sustain: 0.1, release: 0.1, filterCutoff: 15000, filterResonance: 0.2, filterType: "LP", description: "Drum kit")
+        }
+        if d.contains("choir") || d.contains("vocal") {
+            return GMInstrumentResult(name: "Choir", gmProgram: 52, bankMSB: 0x79, attack: 0.2, decay: 0.5, sustain: 0.7, release: 0.6, filterCutoff: 8000, filterResonance: 0.2, filterType: "LP", description: "Choir aahs")
+        }
+        if d.contains("bell") || d.contains("chime") {
+            return GMInstrumentResult(name: "Tubular Bells", gmProgram: 14, bankMSB: 0x79, attack: 0.001, decay: 1.0, sustain: 0.2, release: 1.5, filterCutoff: 15000, filterResonance: 0.2, filterType: "LP", description: "Tubular bells")
+        }
+        // Default: piano
+        return GMInstrumentResult(name: "Acoustic Piano", gmProgram: 0, bankMSB: 0x79, attack: 0.005, decay: 0.8, sustain: 0.3, release: 0.5, filterCutoff: 12000, filterResonance: 0.2, filterType: "LP", description: "Default acoustic piano")
+    }
+
+    private let gmInstrumentSystemPrompt = """
+    You are a sound design expert. Given a description, pick the best General MIDI program and parameters.
+
+    GM PROGRAMS: 0=Acoustic Grand Piano, 1=Bright Piano, 2=Electric Grand, 3=Honky-tonk, 4=EP1, 5=EP2, 6=Harpsichord, 7=Clavinet, 8=Celesta, 9=Glockenspiel, 10=Music Box, 11=Vibraphone, 12=Marimba, 13=Xylophone, 14=Tubular Bells, 15=Dulcimer, 16=Drawbar Organ, 17=Percussive Organ, 18=Rock Organ, 19=Church Organ, 20=Reed Organ, 21=Accordion, 22=Harmonica, 23=Tango Accordion, 24=Nylon Guitar, 25=Steel Guitar, 26=Jazz Guitar, 27=Clean Electric Guitar, 28=Muted Guitar, 29=Overdrive Guitar, 30=Distortion Guitar, 31=Guitar Harmonics, 32=Acoustic Bass, 33=Finger Bass, 34=Pick Bass, 35=Fretless Bass, 36=Slap Bass 1, 37=Slap Bass 2, 38=Synth Bass 1, 39=Synth Bass 2, 40=Violin, 41=Viola, 42=Cello, 43=Contrabass, 44=Tremolo Strings, 45=Pizzicato Strings, 46=Orchestral Harp, 47=Timpani, 48=String Ensemble 1, 49=String Ensemble 2, 50=Synth Strings 1, 51=Synth Strings 2, 52=Choir Aahs, 53=Voice Oohs, 54=Synth Voice, 55=Orchestra Hit, 56=Trumpet, 57=Trombone, 58=Tuba, 59=Muted Trumpet, 60=French Horn, 61=Brass Section, 62=Synth Brass 1, 63=Synth Brass 2, 64=Soprano Sax, 65=Alto Sax, 66=Tenor Sax, 67=Baritone Sax, 68=Oboe, 69=English Horn, 70=Bassoon, 71=Clarinet, 72=Piccolo, 73=Flute, 74=Recorder, 75=Pan Flute, 76=Blown Bottle, 77=Shakuhachi, 78=Whistle, 79=Ocarina, 80=Square Lead, 81=Saw Lead, 82=Calliope, 83=Chiff Lead, 84=Charang, 85=Voice Lead, 86=Fifths Lead, 87=Bass+Lead, 88=New Age, 89=Warm Pad, 90=Polysynth, 91=Choir Pad, 92=Bowed Pad, 93=Metallic Pad, 94=Halo Pad, 95=Sweep Pad, 96=Rain, 97=Soundtrack, 98=Crystal, 99=Atmosphere, 100=Brightness, 101=Goblins, 102=Echoes, 103=Sci-Fi, 104=Sitar, 105=Banjo, 106=Shamisen, 107=Koto, 108=Kalimba, 109=Bagpipe, 110=Fiddle, 111=Shanai, 112=Tinkle Bell, 113=Agogo, 114=Steel Drums, 115=Woodblock, 116=Taiko, 117=Melodic Tom, 118=Synth Drum, 119=Reverse Cymbal, 120=Guitar Fret, 121=Breath, 122=Seashore, 123=Bird Tweet, 124=Telephone, 125=Helicopter, 126=Applause, 127=Gunshot
+
+    Respond ONLY with JSON: {"name":"Short Name","gmProgram":29,"bankMSB":121,"attack":0.01,"decay":0.3,"sustain":0.6,"release":0.3,"filterCutoff":8000,"filterResonance":0.3,"filterType":"LP","description":"Why these choices"}
+
+    Rules: attack/decay/release in seconds (0.001-10), sustain 0-1, cutoff 20-20000 Hz, resonance 0-1, filterType: LP/HP/BP/Notch, bankMSB: 121 melodic, 120 percussion
+    """
 
     // MARK: - Validation
 

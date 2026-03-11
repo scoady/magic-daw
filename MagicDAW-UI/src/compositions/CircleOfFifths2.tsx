@@ -1056,6 +1056,47 @@ export const CircleOfFifths2: React.FC<CircleOfFifthsProps> = ({
         {renderGoldenSpirals()}
         {renderHexagram()}
 
+        {/* ── Augmented triad triangles (major 3rds apart) ──────────── */}
+        {(() => {
+          const augColors = ['#67e8f9', '#fbbf24', '#34d399', '#f472b6'];
+          const augTriads = [[0,4,8],[1,5,9],[2,6,10],[3,7,11]];
+          return augTriads.map((indices, ti) => {
+            const pts = indices.map(idx => posOnRing(CX, CY, idx, OUTER_R));
+            const color = augColors[ti];
+            const isAct = indices.includes(activeMajorIdx);
+            return (
+              <polygon key={`aug-${ti}`}
+                points={pts.map(([x,y]) => `${x},${y}`).join(' ')}
+                fill={color} fillOpacity={isAct ? 0.06 : 0.015}
+                stroke={color} strokeWidth={isAct ? 1.2 : 0.5}
+                strokeOpacity={isAct ? 0.35 : 0.08}
+                strokeLinejoin="round"
+              />
+            );
+          });
+        })()}
+
+        {/* ── Diminished 7th squares (minor 3rds apart) ────────────── */}
+        {(() => {
+          const dimColors = ['#a78bfa', '#fb7185', '#2dd4bf'];
+          const dimSquares = [[0,3,6,9],[1,4,7,10],[2,5,8,11]];
+          return dimSquares.map((indices, si) => {
+            const pts = indices.map(idx => posOnRing(CX, CY, idx, INNER_R + (MIDDLE_R - INNER_R) * 0.5));
+            const color = dimColors[si];
+            const isAct = indices.includes(activeMajorIdx);
+            return (
+              <polygon key={`dim-${si}`}
+                points={pts.map(([x,y]) => `${x},${y}`).join(' ')}
+                fill={color} fillOpacity={isAct ? 0.05 : 0.012}
+                stroke={color} strokeWidth={isAct ? 1 : 0.4}
+                strokeOpacity={isAct ? 0.3 : 0.06}
+                strokeLinejoin="round"
+                strokeDasharray={isAct ? 'none' : '4 3'}
+              />
+            );
+          });
+        })()}
+
         {/* Active key geometry highlight */}
         {renderAuroraGlow()}
         {renderActiveGeometry()}

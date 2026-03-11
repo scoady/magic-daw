@@ -25,6 +25,24 @@ export interface IntervalTrainerProps {
   modeLabel: string;
   /** Score */
   score: { correct: number; total: number };
+  /** Drill type */
+  drillType?: string;
+  /** MIDI note numbers to highlight on keyboard */
+  highlightedNotes?: number[];
+  /** Currently playing note index (-1 = none) */
+  currentNoteIndex?: number;
+  /** Root MIDI note number */
+  rootNoteMidi?: number;
+  /** Key name (e.g. "C", "F#") */
+  keyName?: string;
+  /** Drill label (e.g. "Major Pentatonic") */
+  drillLabel?: string;
+  /** Accent color for this drill category */
+  drillColor?: string;
+  /** Scale degree / chord tone labels */
+  degreeLabels?: string[];
+  /** How many notes the user has correctly played so far (0 = none) */
+  matchedUpTo?: number;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -37,6 +55,8 @@ const palette = {
   pink: '#f472b6',
   gold: '#fbbf24',
   red: '#f87171',
+  green: '#34d399',
+  orange: '#fb923c',
   text: '#e2e8f0',
   textDim: '#94a3b8',
   glass: 'rgba(120,200,220,0.06)',
@@ -65,7 +85,9 @@ const NOTE_NAMES_FLAT = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', '
 const FLAT_KEYS = new Set(['F', 'Bb', 'Eb', 'Ab', 'Db']);
 const IS_BLACK = [false, true, false, true, false, false, true, false, true, false, true, false];
 
-// ── Component ──────────────────────────────────────────────────────────────
+// ── Scale/chord note position helper ─────────────────────────────────────
+
+// ── Main Component ──────────────────────────────────────────────────────
 
 export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
   rootNote,
@@ -76,24 +98,34 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
   activeNotes,
   modeLabel,
   score,
+  drillType = 'intervals',
+  highlightedNotes = [],
+  currentNoteIndex = -1,
+  rootNoteMidi = 60,
+  keyName = 'C',
+  drillLabel = '',
+  drillColor = palette.cyan,
+  degreeLabels = [],
+  matchedUpTo = 0,
 }) => {
   const frame = useCurrentFrame();
   const { width: W, height: H } = useVideoConfig();
   const CX = W / 2;
   const CY = H / 2;
 
+  // ── ALL hooks must be called unconditionally (React Rules of Hooks) ──
+
   const rootIdx = CHROMATIC.indexOf(rootNote);
   const useFlats = FLAT_KEYS.has(rootNote);
   const names = useFlats ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP;
   const activeNoteSet = useMemo(() => new Set(activeNotes.map(n => n % 12)), [activeNotes]);
 
-  // ── Horizontal interval strip ─────────────────────────────────────────
+  // Horizontal interval strip
   const stripW = Math.min(W * 0.82, 900);
   const stripX = (W - stripW) / 2;
-  const stripY = CY * 0.52;  // upper-middle area
+  const stripY = CY * 0.52;
   const nodeSpacing = stripW / 12;
 
-  // Generate the 13 interval positions in a horizontal row (0=left, 12=right)
   const intervalPositions = useMemo(() => {
     return Array.from({ length: 13 }, (_, i) => {
       const x = stripX + i * nodeSpacing;
@@ -110,10 +142,9 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
     });
   }, [stripX, stripY, nodeSpacing, rootIdx, names, scaleIntervals, correctIntervals, wrongInterval, activeInterval, activeNoteSet]);
 
-  // ── Connecting lines from root to each interval ────────────────────────
   const rootPos = intervalPositions[0];
 
-  // ── Scale-only keyboard at bottom ─────────────────────────────────────
+  // Scale-only keyboard at bottom
   const scaleKeys = useMemo(() => {
     const scaleNotes = scaleIntervals.filter(si => si >= 0);
     const count = scaleNotes.length;
@@ -137,12 +168,135 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
   const pianoY = scaleKeys.length > 0 ? H - scaleKeys[0].h - 30 : H - 200;
   const keyH = scaleKeys.length > 0 ? scaleKeys[0].h : 150;
 
-  // Breathing / pulse
   const pulse = Math.sin(frame * 0.06);
   const breathe = Math.sin(frame * 0.02) * 3;
-
-  // Wrong flash
   const wrongFlash = wrongInterval !== null ? Math.max(0, 1 - (frame % 20) / 10) : 0;
+
+  // ── Scale/chord drill rendering (non-intervals) ────────────────────────
+  if (drillType !== 'intervals') {
+    const dNotes = highlightedNotes.length > 0 ? highlightedNotes : [rootNoteMidi];
+    const dCount = dNotes.length;
+    const totalKW = Math.min(W * 0.7, 700);
+    const kW = totalKW / Math.max(dCount, 1);
+    const kH2 = Math.min(kW * 2.8, H * 0.4);
+    const kStartX = (W - totalKW) / 2;
+    const kY = CY - kH2 / 2 + 30;
+    const dPulse = Math.sin(frame * 0.06);
+    const safeColor = drillColor || palette.cyan;
+    const useFlatsD = FLAT_KEYS.has(keyName || 'C');
+    const namesD = useFlatsD ? NOTE_NAMES_FLAT : NOTE_NAMES_SHARP;
+
+    return (
+      <AbsoluteFill style={{ backgroundColor: palette.bg }}>
+        <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
+          <defs>
+            <filter id="drill-glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="6" result="blur" />
+              <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+            </filter>
+            <radialGradient id="drill-bg-glow" cx="50%" cy="45%" r="60%">
+              <stop offset="0%" stopColor="#0f1a2e" />
+              <stop offset="100%" stopColor={palette.bg} />
+            </radialGradient>
+          </defs>
+          <rect x={0} y={0} width={W} height={H} fill="url(#drill-bg-glow)" />
+
+          {/* Title */}
+          <text x={CX} y={40} textAnchor="middle" fill={palette.text}
+            fontSize={18} fontFamily="monospace" fontWeight={700} opacity={0.8}>
+            Daily Drill
+          </text>
+          <text x={CX} y={62} textAnchor="middle" fill={safeColor}
+            fontSize={12} fontFamily="monospace" fontWeight={600} opacity={0.5}>
+            {keyName || 'C'} {drillLabel || ''}
+          </text>
+
+          {/* Glass backdrop */}
+          <rect x={kStartX - 12} y={kY - 20} width={totalKW + 24} height={kH2 + 60}
+            rx={8} fill="rgba(6,10,18,0.6)" stroke={palette.glassBorder} strokeWidth={0.5} />
+
+          {/* Keys — one per scale/chord note */}
+          {dNotes.map((midi, idx) => {
+            const chroma = midi % 12;
+            const isBlack = IS_BLACK[chroma];
+            const isCurrent = idx === currentNoteIndex;
+            const isMatched = idx < matchedUpTo;
+            const isTarget = idx === matchedUpTo;
+            const isRoot = idx === 0;
+            const x = kStartX + idx * kW;
+            const deg = (degreeLabels || [])[idx] ?? '';
+
+            const keyFill = isMatched ? `${palette.teal}44`
+              : isCurrent ? `${safeColor}55`
+              : isTarget ? `${safeColor}22`
+              : isBlack ? 'rgba(20,28,45,0.9)' : 'rgba(140,180,210,0.8)';
+            const keyStroke = isMatched ? palette.teal
+              : isCurrent || isTarget ? safeColor : `${safeColor}44`;
+            const keyStrokeW = isMatched ? 2 : isCurrent || isTarget ? 2 : 1;
+
+            return (
+              <g key={`dk-${idx}`}>
+                {/* Glow for current (playback) or target (next to play) */}
+                {(isCurrent || isTarget) && (
+                  <rect x={x + 2} y={kY} width={kW - 4} height={kH2} rx={6}
+                    fill={safeColor} opacity={isTarget ? 0.12 + dPulse * 0.06 : 0.25 + dPulse * 0.1}
+                    filter="url(#drill-glow)" />
+                )}
+                {/* Matched checkmark glow */}
+                {isMatched && (
+                  <rect x={x + 2} y={kY} width={kW - 4} height={kH2} rx={6}
+                    fill={palette.teal} opacity={0.08} />
+                )}
+                <rect x={x + 2} y={kY} width={kW - 4} height={kH2} rx={6}
+                  fill={keyFill} stroke={keyStroke} strokeWidth={keyStrokeW} />
+                <text x={x + kW / 2} y={kY + kH2 - 14} textAnchor="middle"
+                  fill={isMatched ? palette.teal : isCurrent ? '#fff' : isTarget ? '#fff' : isBlack ? safeColor : palette.bg}
+                  fontSize={isCurrent || isTarget ? 16 : 13} fontFamily="monospace" fontWeight={700}>
+                  {namesD[chroma]}
+                </text>
+                <text x={x + kW / 2} y={kY - 6} textAnchor="middle"
+                  fill={isMatched ? palette.teal : isCurrent || isTarget ? '#fff' : safeColor}
+                  fontSize={isCurrent || isTarget ? 14 : 11} fontFamily="monospace" fontWeight={700}
+                  opacity={isMatched ? 0.8 : isCurrent || isTarget ? 1 : 0.6}>
+                  {deg}
+                </text>
+                {/* Matched tick */}
+                {isMatched && (
+                  <text x={x + kW / 2} y={kY + 20} textAnchor="middle"
+                    fill={palette.teal} fontSize={14} fontFamily="monospace" fontWeight={700}>
+                    ✓
+                  </text>
+                )}
+                {isRoot && !isMatched && (
+                  <circle cx={x + kW / 2} cy={kY + 16} r={5} fill={safeColor} opacity={0.6} />
+                )}
+              </g>
+            );
+          })}
+
+          {/* Connecting line below keys */}
+          {dCount > 1 && (
+            <g>
+              <polyline
+                points={dNotes.map((_, i) => `${kStartX + i * kW + kW / 2},${kY + kH2 + 18}`).join(' ')}
+                fill="none" stroke={safeColor} strokeWidth={1.5} opacity={0.2}
+                strokeLinecap="round" strokeLinejoin="round" />
+              {dNotes.map((_, i) => (
+                <circle key={`cd-${i}`}
+                  cx={kStartX + i * kW + kW / 2} cy={kY + kH2 + 18}
+                  r={i === currentNoteIndex ? 5 : i < matchedUpTo ? 4 : i === matchedUpTo ? 4 : 3}
+                  fill={i < matchedUpTo ? palette.teal : i === currentNoteIndex ? safeColor : i === matchedUpTo ? safeColor : palette.bg}
+                  stroke={i < matchedUpTo ? palette.teal : safeColor}
+                  strokeWidth={1} opacity={i < matchedUpTo ? 0.8 : i === currentNoteIndex ? 1 : i === matchedUpTo ? 0.7 : 0.4} />
+              ))}
+            </g>
+          )}
+        </svg>
+      </AbsoluteFill>
+    );
+  }
+
+  // ── Intervals visualization ────────────────────────────────────────────
 
   return (
     <AbsoluteFill style={{ backgroundColor: palette.bg }}>
@@ -165,7 +319,7 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
         {/* Background */}
         <rect x={0} y={0} width={W} height={H} fill="url(#it-bg-glow)" />
 
-        {/* ── Title / Mode label ───────────────────────────────────── */}
+        {/* Title / Mode label */}
         <text
           x={CX} y={40}
           textAnchor="middle" fill={palette.text}
@@ -183,7 +337,7 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
           {modeLabel} · {rootNote}
         </text>
 
-        {/* ── Score ───────────────────────────────────────────────── */}
+        {/* Score */}
         <text
           x={W - 20} y={40}
           textAnchor="end" fill={palette.gold}
@@ -193,7 +347,7 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
           {score.correct}/{score.total}
         </text>
 
-        {/* ── Horizontal Interval Strip ────────────────────────── */}
+        {/* Horizontal Interval Strip */}
 
         {/* Faint baseline track */}
         <line
@@ -217,7 +371,6 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
         {intervalPositions.filter(p => p.i > 0 && p.inScale).map((p) => {
           const isActive = p.isActive || p.isPlaying;
           const col = p.isCorrect ? palette.teal : p.info.color;
-          // Arc height proportional to interval distance
           const arcH = 15 + p.i * 4;
           const midX = (rootPos.x + p.x) / 2;
           return (
@@ -248,20 +401,17 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
 
           return (
             <g key={`node-${p.i}`}>
-              {/* Glow */}
               {glowOp > 0 && (
                 <circle cx={p.x} cy={p.y} r={nodeR + 10}
                   fill={col} opacity={glowOp}
                   filter="url(#it-glow)"
                 />
               )}
-              {/* Wrong flash */}
               {p.isWrong && (
                 <circle cx={p.x} cy={p.y} r={nodeR + 15}
                   fill={palette.red} opacity={wrongFlash * 0.3}
                 />
               )}
-              {/* Node circle */}
               <circle cx={p.x} cy={p.y} r={nodeR}
                 fill={palette.bg} stroke={col}
                 strokeWidth={p.isActive || p.isPlaying ? 2.5 : p.isCorrect ? 2 : 1.2}
@@ -271,7 +421,6 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
                 fill={col}
                 opacity={(p.isCorrect ? 0.25 : p.isActive ? 0.2 : 0.08) * opacity}
               />
-              {/* Note name */}
               <text x={p.x} y={p.y - 2}
                 textAnchor="middle" dominantBaseline="central"
                 fill={p.isCorrect || p.isActive ? '#fff' : col}
@@ -281,7 +430,6 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
               >
                 {p.noteName}
               </text>
-              {/* Interval label below */}
               <text x={p.x} y={p.y + (p.i === 0 ? 10 : 8)}
                 textAnchor="middle" dominantBaseline="central"
                 fill={col} fontSize={6}
@@ -306,9 +454,8 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
           </text>
         ))}
 
-        {/* ── Scale-Only Keyboard ───────────────────────────────── */}
+        {/* Scale-Only Keyboard */}
         <g>
-          {/* Glass backdrop */}
           <rect
             x={pianoX - 10} y={pianoY - 20}
             width={pianoW + 20} height={keyH + 30}
@@ -317,7 +464,6 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
             stroke={palette.glassBorder} strokeWidth={0.5}
           />
 
-          {/* Scale degree keys */}
           {scaleKeys.map((k) => {
             const isPlaying = activeNoteSet.has(k.chroma);
             const isActive = activeInterval === k.interval;
@@ -341,7 +487,6 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
                   stroke={`${col}55`}
                   strokeWidth={isRoot ? 1.2 : 0.6}
                 />
-                {/* Note name */}
                 <text x={k.x + k.w / 2} y={pianoY + k.h - 8}
                   textAnchor="middle"
                   fill={k.isBlack ? 'rgba(220,230,245,0.9)' : 'rgba(10,18,30,0.9)'}
@@ -349,7 +494,6 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
                 >
                   {k.name}
                 </text>
-                {/* Interval label */}
                 <text x={k.x + k.w / 2} y={pianoY + k.h - 26}
                   textAnchor="middle"
                   fill={col} fontSize={9}
@@ -363,7 +507,7 @@ export const IntervalTrainer: React.FC<IntervalTrainerProps> = ({
           })}
         </g>
 
-        {/* ── Interval info panel (when an interval is active) ──── */}
+        {/* Interval info panel (when an interval is active) */}
         {activeInterval !== null && activeInterval > 0 && (() => {
           const info = INTERVAL_NAMES[activeInterval];
           const targetNote = names[(rootIdx + activeInterval) % 12];

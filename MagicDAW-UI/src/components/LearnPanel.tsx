@@ -2,21 +2,13 @@ import React, { useState } from 'react';
 import type { LearnSubView } from '../types/daw';
 import { IntervalTrainerPanel } from './IntervalTrainerPanel';
 import { CircleOfFifthsPanel } from './CircleOfFifthsPanel';
-
-// Tonnetz placeholder until Phase 3
-const TonnetzPlaceholder: React.FC = () => (
-  <div style={{
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    height: '100%', width: '100%',
-    color: 'rgba(103,232,249,0.4)', fontFamily: 'monospace', fontSize: 18,
-  }}>
-    Tonnetz — Coming Soon
-  </div>
-);
+import { TonnetzPanel } from './TonnetzPanel';
+import { PianoHeroPanel } from './PianoHeroPanel';
 
 const SUB_VIEWS: { id: LearnSubView; label: string; icon: string; description: string }[] = [
   { id: 'circle', label: 'Circle of Fifths', icon: '◉', description: 'Explore keys, chords & harmony' },
-  { id: 'intervals', label: 'Interval Trainer', icon: '♫', description: 'Ear training & scale mastery' },
+  { id: 'intervals', label: 'Drills', icon: '♫', description: 'Daily practice drills — intervals, scales & chords' },
+  { id: 'piano-hero', label: 'Piano Hero', icon: '🎹', description: 'Guitar Hero-style note waterfall — learn songs by playing along' },
   { id: 'tonnetz', label: 'Tonnetz', icon: '⬡', description: 'Harmonic lattice & path builder' },
 ];
 
@@ -68,7 +60,8 @@ export const LearnPanel: React.FC = () => {
       <div style={{ flex: 1, minHeight: 0 }}>
         {activeSubView === 'circle' && <CircleOfFifthsPanel />}
         {activeSubView === 'intervals' && <IntervalTrainerPanel />}
-        {activeSubView === 'tonnetz' && <TonnetzPlaceholder />}
+        {activeSubView === 'piano-hero' && <PianoHeroPanel />}
+        {activeSubView === 'tonnetz' && <TonnetzPanel />}
       </div>
     </div>
   );
