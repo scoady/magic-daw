@@ -1,0 +1,97 @@
+{
+  "envelope" : {
+    "attack" : 0.005,
+    "decay" : 0.22,
+    "release" : 0.35,
+    "sustain" : 0.74
+  },
+  "filter" : {
+    "cutoff" : 12000,
+    "envAmount" : 0,
+    "keyTracking" : 0.25,
+    "resonance" : 0.08,
+    "type" : "lowpass"
+  },
+  "name" : "Studio Piano Demo",
+  "pitchBendRange" : 2,
+  "polyphony" : 24,
+  "portamento" : null,
+  "roundRobin" : true,
+  "type" : "sampler",
+  "velocityLayers" : 2,
+  "version" : 1,
+  "zones" : [
+    {
+      "highNote" : 54,
+      "highVelocity" : 80,
+      "id" : "2D1AA6F0-C77A-4AE1-903E-5F4A1980E4B1",
+      "loopEnd" : null,
+      "loopStart" : null,
+      "lowNote" : 36,
+      "lowVelocity" : 0,
+      "rootNote" : 48,
+      "sampleFile" : "samples/piano_C3_soft.wav",
+      "tuning" : 0
+    },
+    {
+      "highNote" : 54,
+      "highVelocity" : 127,
+      "id" : "4B4B520B-49CE-4E41-B316-70C9C9A9E3D2",
+      "loopEnd" : null,
+      "loopStart" : null,
+      "lowNote" : 36,
+      "lowVelocity" : 81,
+      "rootNote" : 48,
+      "sampleFile" : "samples/piano_C3_hard.wav",
+      "tuning" : 0
+    },
+    {
+      "highNote" : 66,
+      "highVelocity" : 80,
+      "id" : "43863183-3CF6-4057-8BBA-E243F15D75A0",
+      "loopEnd" : null,
+      "loopStart" : null,
+      "lowNote" : 55,
+      "lowVelocity" : 0,
+      "rootNote" : 60,
+      "sampleFile" : "samples/piano_C4_soft.wav",
+      "tuning" : 0
+    },
+    {
+      "highNote" : 66,
+      "highVelocity" : 127,
+      "id" : "B160D4E2-67C2-40FB-AE56-E9361C3BA89C",
+      "loopEnd" : null,
+      "loopStart" : null,
+      "lowNote" : 55,
+      "lowVelocity" : 81,
+      "rootNote" : 60,
+      "sampleFile" : "samples/piano_C4_hard.wav",
+      "tuning" : 0
+    },
+    {
+      "highNote" : 78,
+      "highVelocity" : 80,
+      "id" : "C697058B-F736-4554-9D5B-915CB22EEAED",
+      "loopEnd" : null,
+      "loopStart" : null,
+      "lowNote" : 67,
+      "lowVelocity" : 0,
+      "rootNote" : 72,
+      "sampleFile" : "samples/piano_C5_soft.wav",
+      "tuning" : 0
+    },
+    {
+      "highNote" : 78,
+      "highVelocity" : 127,
+      "id" : "D26DD3F8-E26B-4B5C-B4C6-8D643163E9B8",
+      "loopEnd" : null,
+      "loopStart" : null,
+      "lowNote" : 67,
+      "lowVelocity" : 81,
+      "rootNote" : 72,
+      "sampleFile" : "samples/piano_C5_hard.wav",
+      "tuning" : 0
+    }
+  ]
+}

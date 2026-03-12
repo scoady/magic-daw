@@ -4,6 +4,17 @@ import Foundation
 import UniformTypeIdentifiers
 import WebKit
 
+private enum LiveInputSource: Hashable {
+    case external
+    case ui
+}
+
+private struct LiveInputNoteKey: Hashable {
+    let note: UInt8
+    let channel: UInt8
+    let source: LiveInputSource
+}
+
 /// Bridge between Swift native layer and the JavaScript UI running in WKWebView.
 /// Receives messages from JS via WKScriptMessageHandler and sends events back via evaluateJavaScript.
 final class WebViewBridge: NSObject, WKScriptMessageHandler {
@@ -37,12 +48,17 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     private var previewLevelTimer: DispatchSourceTimer?
     /// Plugin compiler instance
     private let pluginCompiler = PluginCompiler()
+    /// Saved plugin graph library
+    private let pluginGraphLibrary = PluginGraphLibrary()
     /// AI router for patch generation (lazy — shares ollamaClient)
     private lazy var aiRouter = AIRouter(client: ollamaClient)
     /// Sound design service for AI patch generation
     private lazy var soundDesignService = SoundDesignService(router: aiRouter)
     /// Instrument preset library (persisted to ~/Library/Application Support/MagicDAW/Instruments/)
     private lazy var instrumentLibrary = InstrumentLibrary()
+    private let sampleInstrumentLoader = InstrumentLoader()
+    private let sfzImporter = SFZImporter()
+    private let sampleFinderService = SampleFinderService()
 
     // MARK: - Note Editing Undo Stack
 
@@ -85,6 +101,27 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         return s
     }()
 
+    /// Per-track playback samplers so Arrange can respect each track's instrument assignment.
+    private var trackSamplers: [UUID: Sampler] = [:]
+    /// Per-track graph synths so saved plugin instruments can play directly in Arrange.
+    private var trackGraphSynths: [UUID: GraphSynth] = [:]
+    /// Dedicated preview synth for the plugin builder.
+    private lazy var pluginPreviewSynth: GraphSynth = {
+        let synth = GraphSynth(engine: audioEngine.avEngine)
+        synth.connect(to: audioEngine.avEngine.mainMixerNode)
+        return synth
+    }()
+    /// Last automation-applied mixer state to avoid hammering the engine with identical values.
+    private var lastAutomationVolumes: [UUID: Float] = [:]
+    private var lastAutomationPans: [UUID: Float] = [:]
+    /// Track base mix state as last set by the user/UI, used as the automation fallback target.
+    private var baseTrackVolumes: [UUID: Float] = [:]
+    private var baseTrackPans: [UUID: Float] = [:]
+    /// The track the UI most recently selected. Used as the default live-play target when nothing is armed.
+    private var liveInputSelectedTrackID: UUID?
+    /// Keeps note-offs routed back to the same track/runtime that received the original note-on.
+    private var liveInputNoteTargets: [LiveInputNoteKey: UUID?] = [:]
+
     override init() {
         super.init()
         do {
@@ -92,6 +129,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         } catch {
             print("[WebViewBridge] Failed to start audio engine: \(error)")
         }
+        ensureBundledDemoInstrumentsInstalled()
         setupMIDIRouter()
         setupCallbacks()
         setupTransportCallbacks()
@@ -105,8 +143,8 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         // This replaces the router's onNoteOn so we must call through to it.
         midiManager.onNoteOn = { [weak self] note, velocity, channel in
             guard let self else { return }
-            // 1. Play through sampler (falls back to GM synth if no custom samples)
-            self.sampler.noteOn(note: note, velocity: velocity)
+            // 1. Play through the armed/selected track instrument, falling back to the preview sampler.
+            self.routeLiveInputNoteOn(note: note, velocity: velocity, channel: channel, source: .external)
             // 2. Record if armed
             if self.audioEngine.isRecording {
                 self.midiRecorder.noteOn(
@@ -129,7 +167,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         // Forward MIDI note-off events to JavaScript AND the MIDIRouter.
         midiManager.onNoteOff = { [weak self] note, channel in
             guard let self else { return }
-            self.sampler.noteOff(note: note)
+            self.routeLiveInputNoteOff(note: note, channel: channel, source: .external)
             if self.audioEngine.isRecording {
                 self.midiRecorder.noteOff(
                     note: note,
@@ -167,10 +205,17 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         // Wire the MIDI player to use our sampler and MIDI manager
         midiPlayer.sampler = sampler
         midiPlayer.midiManager = midiManager
+        midiPlayer.onTrackNoteOn = { [weak self] note, velocity, _, trackID in
+            self?.playTrackNoteOn(note: note, velocity: velocity, trackID: trackID)
+        }
+        midiPlayer.onTrackNoteOff = { [weak self] note, _, trackID in
+            self?.playTrackNoteOff(note: note, trackID: trackID)
+        }
 
         // High-frequency transport tick: drive MIDIPlayer and Metronome
         audioEngine.onTransportTick = { [weak self] currentBeat in
             guard let self else { return }
+            self.applyTrackAutomation(atBeat: currentBeat)
             self.midiPlayer.process(currentBeat: currentBeat)
             self.metronome.process(currentBeat: currentBeat)
         }
@@ -199,7 +244,238 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             guard let self else { return }
             self.midiPlayer.stopPlayback()
             self.metronome.reset()
+            self.restoreBaseTrackMixState()
             self.finalizeRecording()
+        }
+    }
+
+    private func registerTrackWithAudioEngine(_ track: Track, isBus: Bool = false) {
+        baseTrackVolumes[track.id] = track.linearGain
+        baseTrackPans[track.id] = track.pan
+        let audioTrack = AudioTrack(
+            id: track.id,
+            name: track.name,
+            volume: track.linearGain,
+            pan: track.pan,
+            isMuted: track.isMuted,
+            isSoloed: track.isSoloed,
+            isBus: isBus
+        )
+        if isBus {
+            audioEngine.addBusTrack(audioTrack)
+        } else {
+            audioEngine.addTrack(audioTrack)
+        }
+        if track.type == .midi {
+            refreshTrackInstrument(for: track)
+        }
+    }
+
+    private func clearProjectAudioState() {
+        guard let project = currentProject else { return }
+        for track in project.tracks {
+            audioEngine.removeTrack(AudioTrack(id: track.id, name: track.name))
+            midiPlayer.removeClips(for: track.id)
+            removeTrackSampler(for: track.id)
+            removeTrackGraphSynth(for: track.id)
+        }
+        lastAutomationVolumes.removeAll()
+        lastAutomationPans.removeAll()
+        baseTrackVolumes.removeAll()
+        baseTrackPans.removeAll()
+        liveInputNoteTargets.removeAll()
+        liveInputSelectedTrackID = nil
+    }
+
+    private func applyTrackAutomation(atBeat beat: Double) {
+        guard let project = currentProject else { return }
+        let beatsPerBar = project.timeSignature.beatsPerBar
+        let currentBar = (beat / max(0.0001, beatsPerBar)) + 1.0
+
+        for track in project.tracks {
+            if track.automation.contains(where: { $0.type == .volume && $0.enabled && !$0.points.isEmpty }) {
+                let baseVolume = baseTrackVolumes[track.id] ?? track.linearGain
+                let automatedVolume = track.automationValue(for: .volume, atBar: currentBar) ?? baseVolume
+                let clampedVolume = max(0.0, min(1.0, automatedVolume))
+                if abs((lastAutomationVolumes[track.id] ?? -1.0) - clampedVolume) > 0.0005 {
+                    audioEngine.setTrackVolume(track.id, volume: clampedVolume)
+                    lastAutomationVolumes[track.id] = clampedVolume
+                }
+            }
+
+            if track.automation.contains(where: { $0.type == .pan && $0.enabled && !$0.points.isEmpty }) {
+                let basePan = baseTrackPans[track.id] ?? track.pan
+                let automatedPanNormalized = track.automationValue(for: .pan, atBar: currentBar)
+                let automatedPan = automatedPanNormalized.map { max(-1.0, min(1.0, ($0 * 2.0) - 1.0)) } ?? basePan
+                if abs((lastAutomationPans[track.id] ?? 9.0) - automatedPan) > 0.0005 {
+                    audioEngine.setTrackPan(track.id, pan: automatedPan)
+                    lastAutomationPans[track.id] = automatedPan
+                }
+            }
+        }
+    }
+
+    private func restoreBaseTrackMixState() {
+        guard let project = currentProject else { return }
+        for track in project.tracks {
+            audioEngine.setTrackVolume(track.id, volume: baseTrackVolumes[track.id] ?? track.linearGain)
+            audioEngine.setTrackPan(track.id, pan: baseTrackPans[track.id] ?? track.pan)
+        }
+        lastAutomationVolumes.removeAll()
+        lastAutomationPans.removeAll()
+    }
+
+    private func ensureTrackSampler(for track: Track) -> Sampler? {
+        if let sampler = trackSamplers[track.id] { return sampler }
+        guard let destination = audioEngine.mixerNode(for: track.id) else { return nil }
+        let sampler = Sampler(engine: audioEngine.avEngine)
+        sampler.connect(to: destination)
+        trackSamplers[track.id] = sampler
+        return sampler
+    }
+
+    private func ensureTrackGraphSynth(for track: Track) -> GraphSynth? {
+        if let synth = trackGraphSynths[track.id] { return synth }
+        guard let destination = audioEngine.mixerNode(for: track.id) else { return nil }
+        let synth = GraphSynth(engine: audioEngine.avEngine)
+        synth.connect(to: destination)
+        trackGraphSynths[track.id] = synth
+        return synth
+    }
+
+    private func refreshTrackInstrument(for track: Track) {
+        switch track.instrument?.type {
+        case .synth:
+            removeTrackSampler(for: track.id)
+            guard let synth = ensureTrackGraphSynth(for: track) else { return }
+            configureTrackGraphSynth(synth, for: track)
+        case .sampler, .external, nil:
+            removeTrackGraphSynth(for: track.id)
+            guard let sampler = ensureTrackSampler(for: track) else { return }
+            configureTrackSampler(sampler, for: track)
+        }
+    }
+
+    private func configureTrackSampler(_ sampler: Sampler, for track: Track) {
+        if let path = track.instrument?.path, !path.isEmpty,
+           let instrumentURL = resolveInstrumentDefinitionURL(from: path) {
+            do {
+                let loaded = try sampleInstrumentLoader.loadInstrumentSync(at: instrumentURL)
+                try sampler.loadInstrument(loaded)
+                return
+            } catch {
+                print("[Bridge] Failed to load sample instrument for track \(track.name): \(error)")
+            }
+        }
+
+        let bankMSB = track.instrument?.bankMSB ?? 0x79
+        let gmProgram = track.instrument?.gmProgram ?? 0
+        sampler.setGMProgram(gmProgram, bankMSB: bankMSB)
+    }
+
+    private func configureTrackGraphSynth(_ synth: GraphSynth, for track: Track) {
+        guard let path = track.instrument?.path, !path.isEmpty else {
+            return
+        }
+
+        do {
+            let graph = try pluginGraphLibrary.loadGraph(at: URL(fileURLWithPath: path))
+            synth.loadGraph(graph)
+        } catch {
+            print("[Bridge] Failed to load graph synth for track \(track.name): \(error)")
+        }
+    }
+
+    private func removeTrackSampler(for trackID: UUID) {
+        guard let sampler = trackSamplers.removeValue(forKey: trackID) else { return }
+        sampler.allNotesOff()
+    }
+
+    private func removeTrackGraphSynth(for trackID: UUID) {
+        guard let synth = trackGraphSynths.removeValue(forKey: trackID) else { return }
+        synth.allNotesOff()
+    }
+
+    private func syncTrackSamplersForCurrentProject() {
+        guard let project = currentProject else { return }
+        let midiTrackIDs = Set(project.tracks.filter { $0.type == .midi }.map(\.id))
+        for track in project.tracks where track.type == .midi {
+            refreshTrackInstrument(for: track)
+        }
+        for staleTrackID in trackSamplers.keys where !midiTrackIDs.contains(staleTrackID) {
+            removeTrackSampler(for: staleTrackID)
+        }
+        for staleTrackID in trackGraphSynths.keys where !midiTrackIDs.contains(staleTrackID) {
+            removeTrackGraphSynth(for: staleTrackID)
+        }
+    }
+
+    private func playTrackNoteOn(note: UInt8, velocity: UInt8, trackID: UUID) {
+        guard let track = currentProject?.tracks.first(where: { $0.id == trackID }),
+              track.type == .midi else {
+            sampler.noteOn(note: note, velocity: velocity)
+            return
+        }
+
+        if track.instrument?.type == .synth,
+           let trackSynth = trackGraphSynths[track.id] ?? ensureTrackGraphSynth(for: track) {
+            trackSynth.noteOn(note: note, velocity: velocity)
+            return
+        }
+
+        if let trackSampler = trackSamplers[track.id] ?? ensureTrackSampler(for: track) {
+            trackSampler.noteOn(note: note, velocity: velocity)
+            return
+        }
+
+        sampler.noteOn(note: note, velocity: velocity)
+    }
+
+    private func playTrackNoteOff(note: UInt8, trackID: UUID) {
+        if let trackSynth = trackGraphSynths[trackID] {
+            trackSynth.noteOff(note: note)
+        } else if let trackSampler = trackSamplers[trackID] {
+            trackSampler.noteOff(note: note)
+        } else {
+            sampler.noteOff(note: note)
+        }
+    }
+
+    private func currentLiveInputTrackID() -> UUID? {
+        guard let project = currentProject else { return nil }
+
+        if let armedTrack = project.tracks.first(where: { $0.type == .midi && $0.isArmed }) {
+            return armedTrack.id
+        }
+
+        if let selectedTrackID = liveInputSelectedTrackID,
+           project.tracks.contains(where: { $0.id == selectedTrackID && $0.type == .midi }) {
+            return selectedTrackID
+        }
+
+        return nil
+    }
+
+    private func routeLiveInputNoteOn(note: UInt8, velocity: UInt8, channel: UInt8, source: LiveInputSource) {
+        let key = LiveInputNoteKey(note: note, channel: channel, source: source)
+        let targetTrackID = currentLiveInputTrackID()
+        liveInputNoteTargets[key] = targetTrackID
+
+        if let targetTrackID {
+            playTrackNoteOn(note: note, velocity: velocity, trackID: targetTrackID)
+        } else {
+            sampler.noteOn(note: note, velocity: velocity)
+        }
+    }
+
+    private func routeLiveInputNoteOff(note: UInt8, channel: UInt8, source: LiveInputSource) {
+        let key = LiveInputNoteKey(note: note, channel: channel, source: source)
+        let targetTrackID = liveInputNoteTargets.removeValue(forKey: key) ?? currentLiveInputTrackID()
+
+        if let targetTrackID {
+            playTrackNoteOff(note: note, trackID: targetTrackID)
+        } else {
+            sampler.noteOff(note: note)
         }
     }
 
@@ -503,6 +779,13 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
                 sendTracksUpdated()
             }
 
+        case "select_track":
+            if let trackIdStr = payload["trackId"] as? String {
+                liveInputSelectedTrackID = resolveTrackUUID(trackIdStr)
+            } else {
+                liveInputSelectedTrackID = nil
+            }
+
         // ── Audio Input Devices ──
 
         case "get_input_devices":
@@ -627,14 +910,24 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             if let trackId = payload["trackId"] as? String,
                let volume = payload["volume"] as? Double,
                let uuid = resolveTrackUUID(trackId) {
-                audioEngine.setTrackVolume(uuid, volume: Float(volume))
+                let linearVolume = max(0.0, min(1.0, Float(volume)))
+                baseTrackVolumes[uuid] = linearVolume
+                audioEngine.setTrackVolume(uuid, volume: linearVolume)
+                if let track = currentProject?.tracks.first(where: { $0.id == uuid }) {
+                    track.volume = linearVolume > 0.0001 ? 20.0 * log10f(linearVolume) : -96.0
+                }
             }
 
         case "set_track_pan":
             if let trackId = payload["trackId"] as? String,
                let pan = payload["pan"] as? Double,
                let uuid = resolveTrackUUID(trackId) {
-                audioEngine.setTrackPan(uuid, pan: Float(pan))
+                let clampedPan = max(-1.0, min(1.0, Float(pan)))
+                baseTrackPans[uuid] = clampedPan
+                audioEngine.setTrackPan(uuid, pan: clampedPan)
+                if let track = currentProject?.tracks.first(where: { $0.id == uuid }) {
+                    track.pan = clampedPan
+                }
             }
 
         case "set_track_mute":
@@ -659,6 +952,9 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
                let uuid = resolveTrackUUID(trackId) {
                 applyEffectParameter(trackID: uuid, effectIndex: effectIndex, paramName: paramName, value: value)
             }
+
+        case "set_track_automation":
+            handleSetTrackAutomation(payload)
 
         // ── Effects Chain Messages ──
 
@@ -685,41 +981,27 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         // Project messages
         case "project.save":
             if let path = payload["path"] as? String {
-                let url = URL(fileURLWithPath: path)
-                let project = currentProject ?? DAWProject(name: "Untitled")
-                do {
-                    try projectManager.save(project, to: url)
-                    sendEvent("project_saved", data: ["success": true, "path": path])
-                } catch {
-                    sendEvent("project_saved", data: ["success": false, "error": error.localizedDescription])
-                }
+                saveProject(to: URL(fileURLWithPath: path))
+            } else if !saveCurrentProject() {
+                showSaveProjectAsPanel()
             }
 
         case "project.load":
             if let path = payload["path"] as? String {
-                let url = URL(fileURLWithPath: path)
-                do {
-                    let project = try projectManager.load(from: url)
-                    currentProject = project
-                    let encoder = JSONEncoder()
-                    encoder.outputFormatting = .prettyPrinted
-                    let data = try encoder.encode(project)
-                    if let json = String(data: data, encoding: .utf8) {
-                        sendEvent("project_loaded", data: ["project": json])
-                    }
-                } catch {
-                    sendEvent("project_loaded", data: ["error": error.localizedDescription])
-                }
+                loadProject(from: URL(fileURLWithPath: path))
+            } else {
+                showOpenProjectPanel()
             }
 
         case "project.new":
-            let name = payload["name"] as? String ?? "Untitled"
-            let bpm = payload["bpm"] as? Double ?? 120.0
-            let project = DAWProject(name: name)
-            project.bpm = bpm
-            currentProject = project
-            onProjectChanged?(project)
-            sendEvent("project_created", data: ["name": name])
+            if let name = payload["name"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                newProject(named: name)
+            } else {
+                newProject()
+            }
+
+        case "project.saveAs":
+            showSaveProjectAsPanel()
 
         case "project.updateState":
             updateProjectFromJS(payload)
@@ -738,8 +1020,17 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         case "instrument.updateFilter":
             handleUpdateFilter(payload)
 
+        case "instrument.updateOutput":
+            handleUpdateOutput(payload)
+
         case "instrument.importSample":
             await handleImportSample()
+
+        case "instrument.importSampleFolder":
+            await handleImportSampleFolder()
+
+        case "instrument.importSFZ":
+            await handleImportSFZ()
 
         case "instrument.previewNote":
             guard let note = payload["note"] as? Int else { return }
@@ -757,6 +1048,42 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
 
         case "instrument.mapZones":
             await handleInstrumentMapZones()
+
+        case "instrument.saveRack":
+            handleSaveCurrentSamplerInstrument(payload)
+
+        case "instrument.assignPreviewRack":
+            handleAssignPreviewRackToTrack(payload)
+
+        case "instrument.listSampleRacks":
+            handleListSampleRacks()
+
+        case "instrument.loadSampleRack":
+            handleLoadSampleRack(payload)
+
+        case "instrument.loadBuiltinDemo":
+            handleLoadBuiltInDemo(payload)
+
+        case "instrument.searchLocal":
+            handleSearchLocalSamples(payload)
+
+        case "instrument.refineSearch":
+            await handleRefineSampleSearch(payload)
+
+        case "instrument.loadDiscovered":
+            handleLoadDiscoveredSample(payload)
+
+        case "instrument.pickSearchRoot":
+            await handlePickSampleSearchRoot()
+
+        case "instrument.listSearchRoots":
+            handleListSampleSearchRoots()
+
+        case "instrument.removeSearchRoot":
+            handleRemoveSampleSearchRoot(payload)
+
+        case "instrument.reindexSearch":
+            handleReindexSampleSearch()
 
         // ── Instrument Factory (GM Preset) Messages ──
 
@@ -776,11 +1103,16 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
 
         case "instrument.assignToTrack":
             let trackIdStr = payload["trackId"] as? String
+            let instrumentName = payload["name"] as? String
             if let presetIdStr = payload["presetId"] as? String,
                let presetUUID = UUID(uuidString: presetIdStr) {
                 handleAssignPresetToTrack(presetId: presetUUID, trackIdStr: trackIdStr)
+            } else if let sampleRackPath = payload["sampleRackPath"] as? String {
+                handleAssignSavedRackToTrack(path: sampleRackPath, trackIdStr: trackIdStr)
+            } else if let pluginGraphPath = payload["pluginGraphPath"] as? String {
+                handleAssignSavedPluginGraphToTrack(path: pluginGraphPath, trackIdStr: trackIdStr)
             } else if let gmProg = payload["gmProgram"] as? Int {
-                handleAssignGMProgram(UInt8(gmProg), trackIdStr: trackIdStr)
+                handleAssignGMProgram(UInt8(gmProg), trackIdStr: trackIdStr, name: instrumentName)
             }
 
         case "instrument.previewPreset":
@@ -814,11 +1146,42 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         case "move_node":
             handleMoveNode(payload)
 
+        case "plugin_sync_graph":
+            handlePluginSyncGraph()
+
+        case "plugin_load_template":
+            if let templateId = payload["templateId"] as? String {
+                handlePluginLoadTemplate(templateId)
+            }
+
         case "plugin_preview_start":
             startPluginPreview()
 
         case "plugin_preview_stop":
             stopPluginPreview()
+
+        case "plugin.previewNote":
+            let note = payload["note"] as? Int ?? 60
+            handlePreviewCurrentPluginGraph(note: UInt8(max(0, min(127, note))))
+
+        case "plugin.saveGraph":
+            handleSaveCurrentPluginGraph(payload)
+
+        case "plugin.listSaved":
+            handleListSavedPluginGraphs()
+
+        case "plugin.loadSaved":
+            if let path = payload["path"] as? String {
+                handleLoadSavedPluginGraph(path: path)
+            }
+
+        case "plugin.assignToTrack":
+            let trackIdStr = payload["trackId"] as? String
+            if let path = payload["path"] as? String, !path.isEmpty {
+                handleAssignSavedPluginGraphToTrack(path: path, trackIdStr: trackIdStr)
+            } else {
+                handleAssignCurrentPluginGraphToTrack(trackIdStr: trackIdStr)
+            }
 
         case "export_auv3":
             await handleExportAUv3()
@@ -902,6 +1265,9 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         case "edit_clip":
             // UI-only action: JS side switches to Edit view. No backend state change needed.
             break
+
+        case "harmonic_lab_commit":
+            handleHarmonicLabCommit(payload)
 
         // ── Transport Position ──
 
@@ -1010,32 +1376,20 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
 
     // MARK: - Project Operations (called from menu actions)
 
-    /// Create a new project with default starter tracks, update state, and notify JS.
-    func newProject() {
-        let project = DAWProject(name: "Untitled")
-
-        // Add default starter tracks so the user has something to work with
-        let midi1 = project.addMIDITrack(name: "MIDI 1", color: .teal)
-        let midi2 = project.addMIDITrack(name: "MIDI 2", color: .purple)
-        let audio1 = project.addAudioTrack(name: "Audio 1", color: .blue)
-
-        // Register in audio engine
-        for track in [midi1, midi2, audio1] {
-            let audioTrack = AudioTrack(
-                id: track.id,
-                name: track.name,
-                volume: track.linearGain,
-                pan: track.pan,
-                isMuted: track.isMuted,
-                isSoloed: track.isSoloed,
-                isBus: false
-            )
-            audioEngine.addTrack(audioTrack)
-        }
+    /// Create a new empty project, reset transport state, and notify JS.
+    func newProject(named name: String = "Untitled") {
+        audioEngine.stop()
+        midiPlayer.stopPlayback()
+        metronome.reset()
+        audioEngine.seekToBar(1)
+        clearProjectAudioState()
+        let project = DAWProject(name: name)
+        audioEngine.setBPM(project.bpm)
 
         currentProject = project
         onProjectChanged?(project)
         sendProjectToJS(project)
+        sendTransportState()
     }
 
     /// Save the current project. If it already has a fileURL, save in place; otherwise trigger Save As.
@@ -1072,12 +1426,31 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     /// Load a project from disk and send its state to JS.
     func loadProject(from url: URL) {
         do {
+            audioEngine.stop()
+            midiPlayer.stopPlayback()
+            metronome.reset()
+            audioEngine.seekToBar(1)
+            clearProjectAudioState()
             let project = try projectManager.load(from: url)
+            audioEngine.setBPM(project.bpm)
             currentProject = project
+            for track in project.tracks {
+                let isBus = track.type == .bus
+                registerTrackWithAudioEngine(track, isBus: isBus)
+            }
             onProjectChanged?(project)
             sendProjectToJS(project)
+            sendEvent("project_loaded", data: [
+                "success": true,
+                "path": url.path,
+                "name": project.name,
+            ])
+            sendTransportState()
         } catch {
-            sendEvent("project_loaded", data: ["error": error.localizedDescription])
+            sendEvent("project_loaded", data: [
+                "success": false,
+                "error": error.localizedDescription,
+            ])
         }
     }
 
@@ -1092,12 +1465,47 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             return
         }
         // Send as a raw JS call since the project JSON is a string that needs to be parsed on the JS side
-        let js = "if (window.__magicDAWReceive) { window.__magicDAWReceive('project_data', { project: \(jsonString) }); }"
+        let hasFileURL = project.fileURL != nil ? "true" : "false"
+        let projectPath: String
+        if let path = project.fileURL?.path {
+            let escapedPath = path
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            projectPath = "\"\(escapedPath)\""
+        } else {
+            projectPath = "null"
+        }
+        let js = "if (window.__magicDAWReceive) { window.__magicDAWReceive('project_data', { project: \(jsonString), hasFileURL: \(hasFileURL), path: \(projectPath) }); }"
         DispatchQueue.main.async { [weak self] in
             self?.webView?.evaluateJavaScript(js) { _, error in
                 if let error = error {
                     print("[Bridge] JS event error for project_data: \(error.localizedDescription)")
                 }
+            }
+        }
+    }
+
+    private func showOpenProjectPanel() {
+        DispatchQueue.main.async { [weak self] in
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [.init(filenameExtension: "magicdaw")].compactMap { $0 }
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            panel.begin { response in
+                guard response == .OK, let url = panel.url else { return }
+                self?.loadProject(from: url)
+            }
+        }
+    }
+
+    private func showSaveProjectAsPanel() {
+        DispatchQueue.main.async { [weak self] in
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [.init(filenameExtension: "magicdaw")].compactMap { $0 }
+            panel.nameFieldStringValue = self?.currentProject?.name ?? "Untitled"
+            panel.begin { response in
+                guard response == .OK, let url = panel.url else { return }
+                self?.saveProject(to: url)
             }
         }
     }
@@ -1201,6 +1609,16 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    /// Update output gain / pan on the preview sampler.
+    private func handleUpdateOutput(_ payload: [String: Any]) {
+        if let gain = payload["gain"] as? Double {
+            sampler.outputGain = Float(gain)
+        }
+        if let pan = payload["pan"] as? Double {
+            sampler.outputPan = Float(pan)
+        }
+    }
+
     /// Show an NSOpenPanel to import an audio sample file.
     @MainActor
     private func handleImportSample() {
@@ -1225,6 +1643,90 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         ])
     }
 
+    @MainActor
+    private func handleImportSampleFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Sample Folder"
+        panel.allowedContentTypes = [.folder]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+
+        guard panel.runModal() == .OK, let folderURL = panel.url else {
+            return
+        }
+
+        let allowedExtensions = Set(["wav", "aif", "aiff", "flac", "caf", "mp3", "m4a"])
+        guard let enumerator = FileManager.default.enumerator(
+            at: folderURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            sendEvent("instrument_error", data: ["error": "Unable to scan sample folder"])
+            return
+        }
+
+        var sampleURLs: [URL] = []
+        for case let fileURL as URL in enumerator {
+            let ext = fileURL.pathExtension.lowercased()
+            if allowedExtensions.contains(ext) {
+                sampleURLs.append(fileURL)
+            }
+        }
+
+        guard !sampleURLs.isEmpty else {
+            sendEvent("instrument_error", data: ["error": "No supported audio samples found in folder"])
+            return
+        }
+
+        sampler.clearLoadedInstrument()
+        for url in sampleURLs.sorted(by: { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }) {
+            let detectedRoot = detectMIDINoteFromFilename(url.lastPathComponent) ?? 60
+            handleLoadSample([
+                "path": url.path,
+                "rootNote": Int(detectedRoot),
+                "lowNote": Int(detectedRoot),
+                "highNote": Int(detectedRoot),
+            ])
+        }
+    }
+
+    @MainActor
+    private func handleImportSFZ() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Instrument Rack"
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "sfz") ?? .data,
+            UTType(filenameExtension: "magicinstrument") ?? .data,
+        ]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        guard panel.runModal() == .OK, let instrumentURL = panel.url else {
+            return
+        }
+
+        do {
+            let loaded: LoadedInstrumentDefinition
+            if instrumentURL.pathExtension.lowercased() == "magicinstrument" {
+                try loadInstrumentDefinitionIntoPreview(
+                    from: instrumentURL,
+                    eventPath: instrumentURL.path,
+                    source: "library"
+                )
+                return
+            } else {
+                loaded = try sfzImporter.loadInstrument(from: instrumentURL)
+            }
+            try sampler.loadInstrument(loaded)
+            sendLoadedSampleRackEvent(for: loaded)
+            sendInstrumentZones()
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
+    }
+
     /// Send the current sample zone map to the JS UI.
     private func sendInstrumentZones() {
         let zones = sampler.loadedZones().map { zone -> [String: Any] in
@@ -1232,15 +1734,451 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
                 "rootNote": Int(zone.rootNote),
                 "lowNote": Int(zone.lowNote),
                 "highNote": Int(zone.highNote),
+                "sampleFile": zone.sampleFile,
+                "lowVelocity": Int(zone.lowVelocity),
+                "highVelocity": Int(zone.highVelocity),
             ]
         }
         sendEvent("instrument_zones", data: ["zones": zones])
+    }
+
+    private func handleListSampleRacks() {
+        let builtInRacks = listBuiltInDemoInstrumentSummaries().map { rack in
+            [
+                "name": rack.name,
+                "path": rack.path,
+                "zoneCount": rack.zoneCount,
+                "sampleCount": rack.sampleCount,
+                "source": "built-in",
+            ]
+        }
+        let libraryRacks = instrumentLibrary.listSampleInstrumentSummaries().map { rack in
+            [
+                "name": rack.name,
+                "path": rack.path,
+                "zoneCount": rack.zoneCount,
+                "sampleCount": rack.sampleCount,
+                "source": "library",
+            ]
+        }
+        sendEvent("instrument_sample_rack_list", data: ["racks": builtInRacks + libraryRacks])
+    }
+
+    private func handleLoadSampleRack(_ payload: [String: Any]) {
+        guard let path = payload["path"] as? String, !path.isEmpty else {
+            sendEvent("instrument_error", data: ["error": "No sample rack path provided"])
+            return
+        }
+
+        guard let definitionURL = resolveInstrumentDefinitionURL(from: path) else {
+            sendEvent("instrument_error", data: ["error": "Could not resolve sample rack: \(path)"])
+            return
+        }
+        do {
+            let source = path.hasPrefix("builtin:") ? "built-in" : (isBuiltInDemoInstrument(definitionURL) ? "built-in" : "library")
+            let eventPath = path.hasPrefix("builtin:") ? path : definitionURL.path
+            try loadInstrumentDefinitionIntoPreview(from: definitionURL, eventPath: eventPath, source: source)
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
+    }
+
+    private func handleLoadBuiltInDemo(_ payload: [String: Any]) {
+        guard let id = payload["id"] as? String, !id.isEmpty else {
+            sendEvent("instrument_error", data: ["error": "No built-in demo id provided"])
+            return
+        }
+        let builtinPath = "builtin:\(id)"
+        guard let definitionURL = resolveInstrumentDefinitionURL(from: builtinPath) else {
+            sendEvent("instrument_error", data: ["error": "Could not resolve built-in demo: \(id)"])
+            return
+        }
+
+        do {
+            try loadInstrumentDefinitionIntoPreview(from: definitionURL, eventPath: builtinPath, source: "built-in")
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
+    }
+
+    private func loadInstrumentDefinitionIntoPreview(from definitionURL: URL, eventPath: String, source: String) throws {
+        let definition = try InstrumentDefinition.load(from: definitionURL)
+        guard let zones = definition.zones, !zones.isEmpty else {
+            throw NSError(domain: "MagicDAW.Instrument", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Instrument has no sample zones",
+            ])
+        }
+
+        let instrumentFolder = definitionURL.deletingLastPathComponent()
+        var sampleSources: [String: URL] = [:]
+        for zone in zones {
+            let sampleURL = instrumentFolder.appendingPathComponent(zone.sampleFile).standardizedFileURL
+            guard FileManager.default.fileExists(atPath: sampleURL.path) else {
+                throw NSError(domain: "MagicDAW.Instrument", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "Missing sample file: \(sampleURL.path)",
+                ])
+            }
+            sampleSources[zone.sampleFile] = sampleURL
+        }
+
+        try sampler.loadPreviewInstrument(definition: definition, sampleSources: sampleSources)
+        sendCurrentPreviewRackLoadedEvent(name: definition.name, path: eventPath, source: source)
+        sendInstrumentZones()
+    }
+
+    private func sendLoadedSampleRackEvent(for loaded: LoadedInstrumentDefinition, source: String? = nil, eventPath: String? = nil) {
+        let regions = loaded.regions.map { region -> [String: Any] in
+            let waveform = sampler.waveformData(for: region.zone.rootNote, points: 500) ?? []
+            return [
+                "name": URL(fileURLWithPath: region.zone.sampleFile).lastPathComponent,
+                "rootNote": Int(region.zone.rootNote),
+                "lowNote": Int(region.zone.lowNote),
+                "highNote": Int(region.zone.highNote),
+                "waveform": waveform,
+            ]
+        }
+        let zones = loaded.regions.map { region -> [String: Any] in
+            [
+                "rootNote": Int(region.zone.rootNote),
+                "lowNote": Int(region.zone.lowNote),
+                "highNote": Int(region.zone.highNote),
+                "sampleFile": region.zone.sampleFile,
+                "lowVelocity": Int(region.zone.lowVelocity),
+                "highVelocity": Int(region.zone.highVelocity),
+            ]
+        }
+        sendEvent("instrument_sample_rack_loaded", data: [
+            "name": loaded.definition.name,
+            "path": eventPath ?? loaded.definitionURL.path,
+            "source": source ?? (isBuiltInDemoInstrument(loaded.definitionURL) ? "built-in" : "library"),
+            "outputGain": loaded.definition.outputGain,
+            "outputPan": loaded.definition.outputPan,
+            "samples": regions,
+            "zones": zones,
+        ])
+    }
+
+    private func sendCurrentPreviewRackLoadedEvent(name: String, path: String, source: String) {
+        let zones = sampler.loadedZones()
+        let samples = zones.map { zone -> [String: Any] in
+            [
+                "name": URL(fileURLWithPath: zone.sampleFile).lastPathComponent,
+                "rootNote": Int(zone.rootNote),
+                "lowNote": Int(zone.lowNote),
+                "highNote": Int(zone.highNote),
+                "waveform": sampler.waveformData(for: zone.rootNote, points: 500) ?? [],
+            ]
+        }
+        let zonePayload = zones.map { zone -> [String: Any] in
+            [
+                "rootNote": Int(zone.rootNote),
+                "lowNote": Int(zone.lowNote),
+                "highNote": Int(zone.highNote),
+                "sampleFile": zone.sampleFile,
+                "lowVelocity": Int(zone.lowVelocity),
+                "highVelocity": Int(zone.highVelocity),
+            ]
+        }
+        sendEvent("instrument_sample_rack_loaded", data: [
+            "name": name,
+            "path": path,
+            "source": source,
+            "outputGain": sampler.outputGain,
+            "outputPan": sampler.outputPan,
+            "samples": samples,
+            "zones": zonePayload,
+        ])
+    }
+
+    private func isBuiltInDemoInstrument(_ fileURL: URL) -> Bool {
+        let standardizedPath = fileURL.standardizedFileURL.path
+        return standardizedPath.contains("/DemoInstruments/")
+    }
+
+    private func resolveInstrumentDefinitionURL(from path: String) -> URL? {
+        if path.hasPrefix("builtin:") {
+            let builtinId = String(path.dropFirst("builtin:".count)).lowercased()
+            let folderName: String
+            let filename: String
+            switch builtinId {
+            case "samplerqa":
+                folderName = "SamplerQA"
+                filename = "SamplerQA.magicinstrument"
+            case "studiopiano":
+                folderName = "StudioPiano"
+                filename = "StudioPiano.magicinstrument"
+            default:
+                return nil
+            }
+
+            let installedURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+                .appendingPathComponent("MagicDAW", isDirectory: true)
+                .appendingPathComponent("SampleInstruments", isDirectory: true)
+                .appendingPathComponent(folderName, isDirectory: true)
+                .appendingPathComponent(filename)
+                .standardizedFileURL
+            if let installedURL, instrumentLibrary.hasSampleInstrument(at: installedURL) {
+                return installedURL
+            }
+
+            for directory in demoInstrumentDirectories() {
+                let explicitPath = directory
+                    .appendingPathComponent(folderName, isDirectory: true)
+                    .appendingPathComponent(filename)
+                    .standardizedFileURL
+                if FileManager.default.fileExists(atPath: explicitPath.path) {
+                    return (try? instrumentLibrary.ensureSampleInstrumentInstalled(from: explicitPath)) ?? explicitPath
+                }
+                if let subpaths = try? FileManager.default.subpathsOfDirectory(atPath: directory.path),
+                   let relativePath = subpaths.first(where: { $0.caseInsensitiveCompare(filename) == .orderedSame || $0.lowercased().hasSuffix("/" + filename.lowercased()) }) {
+                    let resolved = directory.appendingPathComponent(relativePath).standardizedFileURL
+                    return (try? instrumentLibrary.ensureSampleInstrumentInstalled(from: resolved)) ?? resolved
+                }
+                let directPath = directory.appendingPathComponent(filename).standardizedFileURL
+                if FileManager.default.fileExists(atPath: directPath.path) {
+                    return (try? instrumentLibrary.ensureSampleInstrumentInstalled(from: directPath)) ?? directPath
+                }
+            }
+            return nil
+        }
+        return URL(fileURLWithPath: path)
+    }
+
+    private func ensureBundledDemoInstrumentsInstalled() {
+        _ = resolveInstrumentDefinitionURL(from: "builtin:SamplerQA")
+        _ = resolveInstrumentDefinitionURL(from: "builtin:StudioPiano")
+    }
+
+    private func demoInstrumentDirectories() -> [URL] {
+        let fileManager = FileManager.default
+        let executableURL = (Bundle.main.executableURL ?? URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0])).standardizedFileURL
+
+        let candidates: [URL?] = [
+            Bundle.main.url(forResource: "DemoInstruments", withExtension: nil),
+            Bundle.main.resourceURL?.appendingPathComponent("DemoInstruments", isDirectory: true),
+            executableURL
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Resources", isDirectory: true)
+                .appendingPathComponent("DemoInstruments", isDirectory: true),
+            URL(fileURLWithPath: fileManager.currentDirectoryPath)
+                .appendingPathComponent("DemoInstruments", isDirectory: true),
+            executableURL
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("DemoInstruments", isDirectory: true),
+        ]
+
+        var seen: Set<URL> = []
+        var directories: [URL] = []
+        for candidate in candidates.compactMap({ $0?.standardizedFileURL }) {
+            guard fileManager.fileExists(atPath: candidate.path), !seen.contains(candidate) else { continue }
+            seen.insert(candidate)
+            directories.append(candidate)
+        }
+        return directories
+    }
+
+    private func listBuiltInDemoInstrumentSummaries() -> [SampleInstrumentSummary] {
+        var summaries: [SampleInstrumentSummary] = []
+        let fileManager = FileManager.default
+        var candidateFiles: [URL] = []
+
+        let bundledPaths = Bundle.main.paths(forResourcesOfType: "magicinstrument", inDirectory: "DemoInstruments")
+        candidateFiles.append(contentsOf: bundledPaths.map { URL(fileURLWithPath: $0).standardizedFileURL })
+
+        for directory in demoInstrumentDirectories() where fileManager.fileExists(atPath: directory.path) {
+            if let subpaths = try? fileManager.subpathsOfDirectory(atPath: directory.path) {
+                for subpath in subpaths where subpath.lowercased().hasSuffix(".magicinstrument") {
+                    candidateFiles.append(directory.appendingPathComponent(subpath).standardizedFileURL)
+                }
+            }
+        }
+
+        // Hard fallback for bundled demo instruments we ship today.
+        for directory in demoInstrumentDirectories() {
+            candidateFiles.append(directory.appendingPathComponent("SamplerQA/SamplerQA.magicinstrument").standardizedFileURL)
+            candidateFiles.append(directory.appendingPathComponent("StudioPiano/StudioPiano.magicinstrument").standardizedFileURL)
+        }
+
+        var seen: Set<URL> = []
+        for fileURL in candidateFiles where !seen.contains(fileURL) {
+            seen.insert(fileURL)
+            guard fileManager.fileExists(atPath: fileURL.path) else { continue }
+            do {
+                let definition = try InstrumentDefinition.load(from: fileURL)
+                let zones = definition.zones ?? []
+                summaries.append(
+                    SampleInstrumentSummary(
+                        name: definition.name,
+                        path: fileURL.path,
+                        zoneCount: zones.count,
+                        sampleCount: Set(zones.map(\.sampleFile)).count
+                    )
+                )
+            } catch {
+                print("[Bridge] Skipping demo instrument \(fileURL.lastPathComponent): \(error)")
+            }
+        }
+
+        return summaries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private func handleSearchLocalSamples(_ payload: [String: Any]) {
+        let query = (payload["query"] as? String) ?? ""
+        sendEvent("instrument_ai_status", data: ["status": "loading", "message": "Searching local libraries..."])
+        sampleFinderService.searchLocalSamples(query: query) { [weak self] results in
+            guard let self else { return }
+            let payload = results.map { result in
+                [
+                    "name": result.name,
+                    "path": result.path,
+                    "kind": result.kind,
+                    "source": result.source,
+                    "extensionName": result.extensionName,
+                    "family": result.family,
+                    "contentType": result.contentType,
+                    "readiness": result.readiness,
+                    "packageName": result.packageName,
+                    "packageScore": result.packageScore,
+                    "nearbySampleCount": result.nearbySampleCount,
+                    "sizeBytes": result.sizeBytes,
+                    "matchScore": result.matchScore,
+                ]
+            }
+            self.sendEvent("instrument_search_results", data: ["results": payload, "query": query])
+            self.sendEvent("instrument_ai_status", data: ["status": "done", "message": "Found \(results.count) local matches"])
+        }
+    }
+
+    private func handleRefineSampleSearch(_ payload: [String: Any]) async {
+        let query = (payload["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !query.isEmpty else {
+            sendEvent("instrument_search_refined", data: ["query": "", "notes": "Enter a search phrase first."])
+            return
+        }
+
+        let model = (payload["model"] as? String) ?? "qwen2.5:14b"
+        let system = """
+        You are helping a DAW user search for free sample libraries.
+        Rewrite the user's search into a compact instrument-library query.
+        Focus on instrument, texture, articulation, and format keywords.
+        Avoid artist names and copyrighted song references.
+        Return strict JSON: {"query":"...", "notes":"..."}.
+        """
+
+        do {
+            let raw = try await ollamaClient.generate(
+                model: model,
+                prompt: query,
+                system: system,
+                temperature: 0.2,
+                format: .json
+            )
+            if let data = raw.data(using: .utf8),
+               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                sendEvent("instrument_search_refined", data: [
+                    "query": json["query"] as? String ?? query,
+                    "notes": json["notes"] as? String ?? "Refined with Ollama.",
+                ])
+            } else {
+                sendEvent("instrument_search_refined", data: [
+                    "query": query,
+                    "notes": "Ollama returned an unreadable refinement; using the original search."
+                ])
+            }
+        } catch {
+            let fallback = query
+                .replacingOccurrences(of: "song", with: "")
+                .replacingOccurrences(of: "type beat", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            sendEvent("instrument_search_refined", data: [
+                "query": fallback.isEmpty ? query : fallback,
+                "notes": "Ollama unavailable; using a local fallback refinement."
+            ])
+        }
+    }
+
+    private func handleLoadDiscoveredSample(_ payload: [String: Any]) {
+        guard let path = payload["path"] as? String, !path.isEmpty else {
+            sendEvent("instrument_error", data: ["error": "No discovered sample path provided"])
+            return
+        }
+
+        let kind = (payload["kind"] as? String) ?? "sample"
+        switch kind {
+        case "sfz":
+            do {
+                let loaded = try sfzImporter.loadInstrument(from: URL(fileURLWithPath: path))
+                try sampler.loadInstrument(loaded)
+                sendLoadedSampleRackEvent(for: loaded)
+                sendInstrumentZones()
+            } catch {
+                sendEvent("instrument_error", data: ["error": error.localizedDescription])
+            }
+        case "rack":
+            handleLoadSampleRack(["path": path])
+        default:
+            let detectedRoot = detectMIDINoteFromFilename(URL(fileURLWithPath: path).lastPathComponent) ?? 60
+            handleLoadSample([
+                "path": path,
+                "rootNote": Int(detectedRoot),
+                "lowNote": 0,
+                "highNote": 127,
+            ])
+        }
+    }
+
+    @MainActor
+    private func handlePickSampleSearchRoot() {
+        let panel = NSOpenPanel()
+        panel.title = "Add Sample Search Folder"
+        panel.allowedContentTypes = [.folder]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+
+        guard panel.runModal() == .OK, let folderURL = panel.url else { return }
+        sampleFinderService.addRoot(url: folderURL)
+        handleListSampleSearchRoots()
+        handleReindexSampleSearch()
+    }
+
+    private func handleListSampleSearchRoots() {
+        let roots = sampleFinderService.listRoots().map { root in
+            [
+                "path": root.path,
+                "name": root.name,
+                "source": root.source,
+            ]
+        }
+        sendEvent("instrument_search_roots", data: ["roots": roots])
+    }
+
+    private func handleRemoveSampleSearchRoot(_ payload: [String: Any]) {
+        guard let path = payload["path"] as? String, !path.isEmpty else { return }
+        sampleFinderService.removeRoot(path: path)
+        handleListSampleSearchRoots()
+        handleReindexSampleSearch()
+    }
+
+    private func handleReindexSampleSearch() {
+        sendEvent("instrument_ai_status", data: ["status": "loading", "message": "Indexing sample folders..."])
+        sampleFinderService.rebuildIndex { [weak self] count in
+            guard let self else { return }
+            self.sendEvent("instrument_ai_status", data: ["status": "done", "message": "Indexed \(count) sample files"])
+        }
     }
 
     // MARK: - MIDI Playback / Recording
 
     /// Start playback: load clips into MIDIPlayer and start the transport.
     private func startPlayback() {
+        syncTrackSamplersForCurrentProject()
+        lastAutomationVolumes.removeAll()
+        lastAutomationPans.removeAll()
+
         // Load all MIDI clips from the project into the player
         if let project = currentProject {
             for track in project.tracks where track.type == .midi {
@@ -1484,16 +2422,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         let track = project.addAudioTrack(name: trackName, color: .purple)
 
         // Register in audio engine
-        let audioTrack = AudioTrack(
-            id: track.id,
-            name: track.name,
-            volume: track.linearGain,
-            pan: track.pan,
-            isMuted: track.isMuted,
-            isSoloed: track.isSoloed,
-            isBus: false
-        )
-        audioEngine.addTrack(audioTrack)
+        registerTrackWithAudioEngine(track)
 
         // Calculate clip length in bars
         let beatsPerSecond = audioEngine.bpm / 60.0
@@ -1709,20 +2638,7 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         }
 
         // Register in audio engine
-        let audioTrack = AudioTrack(
-            id: track.id,
-            name: track.name,
-            volume: track.linearGain,
-            pan: track.pan,
-            isMuted: track.isMuted,
-            isSoloed: track.isSoloed,
-            isBus: typeStr == "bus"
-        )
-        if typeStr == "bus" {
-            audioEngine.addBusTrack(audioTrack)
-        } else {
-            audioEngine.addTrack(audioTrack)
-        }
+        registerTrackWithAudioEngine(track, isBus: typeStr == "bus")
 
         sendTracksUpdated()
     }
@@ -1737,6 +2653,8 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         if let track = project.tracks.first(where: { $0.id == uuid }) {
             audioEngine.removeTrack(AudioTrack(id: track.id, name: track.name))
         }
+        removeTrackSampler(for: uuid)
+        removeTrackGraphSynth(for: uuid)
         project.removeTrack(id: uuid)
         sendTracksUpdated()
     }
@@ -1873,6 +2791,163 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
             track.clips.removeAll { clipUUIDs.contains($0.id) }
         }
         sendTracksUpdated()
+    }
+
+    /// Commit a generated Harmonic Lab draft into the current project as new tracks/clips.
+    /// Payload:
+    /// {
+    ///   name?: String, bpm?: Double, key?: String, keyScale?: String,
+    ///   tracks: [{ name, type, color, clips: [{ name, startBar, lengthBars, isLooped?, loopLengthBars?, notes?[] }] }]
+    /// }
+    private func handleHarmonicLabCommit(_ payload: [String: Any]) {
+        func number(from value: Any?) -> Double? {
+            switch value {
+            case let double as Double:
+                return double
+            case let int as Int:
+                return Double(int)
+            case let float as Float:
+                return Double(float)
+            case let number as NSNumber:
+                return number.doubleValue
+            case let string as String:
+                return Double(string)
+            default:
+                return nil
+            }
+        }
+
+        func intNumber(from value: Any?) -> Int? {
+            switch value {
+            case let int as Int:
+                return int
+            case let double as Double:
+                return Int(double)
+            case let number as NSNumber:
+                return number.intValue
+            case let string as String:
+                return Int(string)
+            default:
+                return nil
+            }
+        }
+
+        guard let project = currentProject else {
+            sendEvent("harmonic_lab_commit_result", data: [
+                "success": false,
+                "error": "No active project"
+            ])
+            return
+        }
+
+        if let name = payload["name"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            project.name = name
+        }
+        if let bpm = payload["bpm"] as? Double, bpm > 0 {
+            project.bpm = bpm
+            audioEngine.bpm = bpm
+        }
+        if let key = payload["key"] as? String {
+            project.key = ProjectKey(rawValue: key)
+        }
+        if let keyScale = payload["keyScale"] as? String {
+            project.keyScale = ProjectKey.Scale(rawValue: keyScale)
+        }
+
+        guard let trackPayloads = payload["tracks"] as? [[String: Any]], !trackPayloads.isEmpty else {
+            sendEvent("harmonic_lab_commit_result", data: [
+                "success": false,
+                "error": "No tracks in draft"
+            ])
+            return
+        }
+
+        var createdTrackIds: [String] = []
+
+        for trackData in trackPayloads {
+            guard let name = trackData["name"] as? String else { continue }
+            let typeRaw = (trackData["type"] as? String) ?? "midi"
+            let colorRaw = (trackData["color"] as? String) ?? "teal"
+            let color = TrackColor(rawValue: colorRaw) ?? .teal
+            let instrumentName = (trackData["instrumentName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let gmProgram = trackData["gmProgram"] as? Int
+
+            let track: Track
+            switch typeRaw {
+            case "audio":
+                track = project.addAudioTrack(name: name, color: color)
+            case "bus":
+                track = project.addBusTrack(name: name)
+                track.color = color
+            default:
+                track = project.addMIDITrack(name: name, color: color)
+            }
+
+            if typeRaw == "midi" {
+                if let instrumentName, !instrumentName.isEmpty {
+                    track.instrument = InstrumentRef(
+                        type: .sampler,
+                        name: instrumentName,
+                        path: nil,
+                        gmProgram: gmProgram.map { UInt8(max(0, min(127, $0))) } ?? 0,
+                        bankMSB: 0x79,
+                        presetId: nil
+                    )
+                } else if let gmProgram {
+                    track.instrument = InstrumentRef(
+                        type: .sampler,
+                        name: "GM \(gmProgram)",
+                        path: nil,
+                        gmProgram: UInt8(max(0, min(127, gmProgram))),
+                        bankMSB: 0x79,
+                        presetId: nil
+                    )
+                }
+            }
+
+            registerTrackWithAudioEngine(track, isBus: track.type == .bus)
+            createdTrackIds.append(track.id.uuidString)
+
+            let clips = (trackData["clips"] as? [[String: Any]]) ?? []
+            for clipData in clips {
+                guard let clipName = clipData["name"] as? String,
+                      let startBar = number(from: clipData["startBar"]),
+                      let lengthBars = number(from: clipData["lengthBars"]) else { continue }
+
+                let clipType: ClipType = typeRaw == "audio" ? .audio : .midi
+                let clip = Clip(name: clipName, type: clipType, startBar: startBar, lengthBars: lengthBars)
+                clip.isLooped = (clipData["isLooped"] as? Bool) ?? false
+                clip.loopLengthBars = number(from: clipData["loopLengthBars"])
+
+                if let notePayloads = clipData["notes"] as? [[String: Any]], clipType == .midi {
+                    clip.midiEvents = notePayloads.compactMap { noteData in
+                        guard let pitch = intNumber(from: noteData["pitch"] ?? noteData["note"]),
+                              let start = number(from: noteData["start"] ?? noteData["tick"]),
+                              let duration = number(from: noteData["duration"]) else { return nil }
+                        let velocity = UInt8(intNumber(from: noteData["velocity"]) ?? 100)
+                        let channel = UInt8(intNumber(from: noteData["channel"]) ?? 0)
+                        return MIDIEvent(
+                            tick: start,
+                            type: .noteOn,
+                            note: UInt8(max(0, min(127, pitch))),
+                            velocity: velocity,
+                            duration: max(0.125, duration),
+                            channel: channel
+                        )
+                    }.sorted()
+                }
+
+                track.addClip(clip)
+            }
+        }
+
+        onProjectChanged?(project)
+        sendProjectToJS(project)
+        sendTracksUpdated()
+        sendEvent("harmonic_lab_commit_result", data: [
+            "success": true,
+            "trackIds": createdTrackIds
+        ])
     }
 
     /// Duplicate a clip to a target position/track.
@@ -2190,6 +3265,38 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         print("[Bridge] Applied effect param: track=\(trackID) effect=\(effectSlot.effectType.rawValue) \(paramName)=\(value)")
     }
 
+    private func handleSetTrackAutomation(_ payload: [String: Any]) {
+        guard let project = currentProject,
+              let trackIdStr = payload["trackId"] as? String,
+              let typeStr = payload["type"] as? String,
+              let type = TrackAutomationLane.AutomationType(rawValue: typeStr),
+              let uuid = resolveTrackUUID(trackIdStr),
+              let track = project.tracks.first(where: { $0.id == uuid }) else { return }
+
+        let enabled = payload["enabled"] as? Bool ?? true
+        let pointsPayload = payload["points"] as? [[String: Any]] ?? []
+        let points = pointsPayload.compactMap { pointData -> AutomationPoint? in
+            guard let barRaw = pointData["bar"],
+                  let valueRaw = pointData["value"] else { return nil }
+            let bar = (barRaw as? Double) ?? (barRaw as? NSNumber)?.doubleValue ?? Double("\(barRaw)")
+            let value = (valueRaw as? Double) ?? (valueRaw as? NSNumber)?.doubleValue ?? Double("\(valueRaw)")
+            guard let bar, let value else { return nil }
+            return AutomationPoint(bar: max(1.0, bar), value: Float(max(0.0, min(1.0, value))))
+        }
+
+        track.automation.removeAll { $0.type == type }
+        if !points.isEmpty {
+            let laneID = "\(uuid.uuidString)-\(type.rawValue)"
+            let lane = TrackAutomationLane(id: laneID, type: type, points: points, enabled: enabled)
+            track.automation.append(lane)
+        }
+        track.automation.sort { $0.type.rawValue < $1.type.rawValue }
+
+        if !audioEngine.isPlaying {
+            restoreBaseTrackMixState()
+        }
+    }
+
     // MARK: - Effects Chain Handlers
 
     private func handleAddEffect(_ payload: [String: Any]) {
@@ -2357,6 +3464,125 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    private func handlePluginSyncGraph() {
+        pluginValidateAndNotify()
+        pluginSendGraphToJS()
+    }
+
+    private func handlePluginLoadTemplate(_ templateId: String) {
+        pluginGraph = pluginTemplateGraph(templateId)
+        pluginRebuildPreview()
+        pluginValidateAndNotify()
+        pluginSendGraphToJS()
+    }
+
+    private func pluginTemplateGraph(_ templateId: String) -> NodeGraphDefinition {
+        func makeNode(_ type: String, _ id: String, _ x: Double, _ y: Double, _ params: [String: Double] = [:]) -> NodeDefinition {
+            guard let template = DSPNodeRegistry.template(for: type) else {
+                return NodeDefinition(id: id, type: type, parameters: [], position: CGPoint(x: x, y: y))
+            }
+            var node = template.instantiate(id: id, position: CGPoint(x: x, y: y))
+            for (key, value) in params {
+                node.setParameter(key, value: value)
+            }
+            return node
+        }
+
+        switch templateId {
+        case "basic-synth":
+            return NodeGraphDefinition(
+                nodes: [
+                    makeNode("oscillator", "osc1", 140, 180, [
+                        "waveform": 1,
+                        "amplitude": 0.72,
+                        "detune": 3,
+                    ]),
+                    makeNode("lowpass", "filter1", 470, 180, [
+                        "cutoff": 2400,
+                        "resonance": 0.18,
+                    ]),
+                    makeNode("output", "output", 820, 180, [
+                        "gain": 0.85,
+                    ]),
+                ],
+                connections: [
+                    ConnectionDefinition(fromNode: "osc1", fromPort: "audio", toNode: "filter1", toPort: "audio"),
+                    ConnectionDefinition(fromNode: "filter1", fromPort: "audio", toNode: "output", toPort: "audio"),
+                ],
+                metadata: NodeGraphMetadata(
+                    name: "Basic Synth",
+                    author: "",
+                    description: "Starter subtractive synth graph",
+                    category: .instrument,
+                    version: "1.0"
+                )
+            )
+        case "bass-voice":
+            return NodeGraphDefinition(
+                nodes: [
+                    makeNode("oscillator", "osc1", 120, 145, [
+                        "waveform": 2,
+                        "amplitude": 0.86,
+                        "detune": 0,
+                    ]),
+                    makeNode("distortion", "drive1", 430, 145, [
+                        "drive": 0.22,
+                        "mix": 0.32,
+                    ]),
+                    makeNode("lowpass", "filter1", 710, 145, [
+                        "cutoff": 920,
+                        "resonance": 0.26,
+                    ]),
+                    makeNode("output", "output", 980, 145, [
+                        "gain": 0.9,
+                    ]),
+                ],
+                connections: [
+                    ConnectionDefinition(fromNode: "osc1", fromPort: "audio", toNode: "drive1", toPort: "audio"),
+                    ConnectionDefinition(fromNode: "drive1", fromPort: "audio", toNode: "filter1", toPort: "audio"),
+                    ConnectionDefinition(fromNode: "filter1", fromPort: "audio", toNode: "output", toPort: "audio"),
+                ],
+                metadata: NodeGraphMetadata(
+                    name: "Bass Voice",
+                    author: "",
+                    description: "Starter mono bass voice graph",
+                    category: .instrument,
+                    version: "1.0"
+                )
+            )
+        case "noise-fx":
+            return NodeGraphDefinition(
+                nodes: [
+                    makeNode("noise", "noise1", 120, 260, [
+                        "amplitude": 0.5,
+                        "noiseType": 1,
+                    ]),
+                    makeNode("delay", "delay1", 430, 260, [
+                        "time": 420,
+                        "feedback": 0.38,
+                        "mix": 0.44,
+                    ]),
+                    makeNode("output", "output", 780, 260, [
+                        "gain": 0.8,
+                    ]),
+                ],
+                connections: [
+                    ConnectionDefinition(fromNode: "noise1", fromPort: "audio", toNode: "delay1", toPort: "audio"),
+                    ConnectionDefinition(fromNode: "delay1", fromPort: "audio", toNode: "output", toPort: "audio"),
+                ],
+                metadata: NodeGraphMetadata(
+                    name: "Noise FX",
+                    author: "",
+                    description: "Starter noise and delay effect source",
+                    category: .instrument,
+                    version: "1.0"
+                )
+            )
+        default:
+            return NodeGraphDefinition.empty(name: "Untitled Plugin")
+        }
+    }
+
     private func pluginValidateAndNotify() {
         let errors = pluginGraph.validate()
         let errorDicts = errors.map { ["message": $0.description] as [String: Any] }
@@ -2412,15 +3638,20 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func pluginRebuildPreview() {
-        let g = DSPGraph()
-        for nd in pluginGraph.nodes {
-            if let dn = pluginMakeDSPNode(nd) { g.addNode(dn) }
+        previewGraph = PluginDSPFactory.buildGraph(from: pluginGraph)
+        pluginPreviewSynth.loadGraph(pluginGraph)
+    }
+
+    private func pluginPreviewInputPort(_ port: String, for nodeType: String?) -> String {
+        guard port == "audio", let nodeType else { return port }
+        switch nodeType {
+        case "lowpass", "highpass", "bandpass", "notch", "comb",
+             "delay", "reverb", "chorus", "distortion", "bitcrusher",
+             "phaser", "flanger", "clamp", "scale", "output":
+            return "input"
+        default:
+            return port
         }
-        for c in pluginGraph.connections {
-            g.connect(from: c.fromNode, fromPort: c.fromPort, to: c.toNode, toPort: c.toPort)
-        }
-        if let out = pluginGraph.nodes.first(where: { $0.type == "output" }) { g.outputNode = out.id }
-        previewGraph = g
     }
 
     private func pluginMakeDSPNode(_ def: NodeDefinition) -> (any DSPNode)? {
@@ -2475,18 +3706,156 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     // MARK: - Plugin Export (AUv3)
 
     private func handleExportAUv3() async {
+        let outputDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Desktop").appendingPathComponent("MagicDAW Plugins")
         sendEvent("plugin_export_progress", data: ["stage": "compiling", "message": "Compiling node graph..."])
         do {
+            try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
             let plugin = try pluginCompiler.compile(pluginGraph)
             sendEvent("plugin_export_progress", data: ["stage": "building", "message": "Building AUv3 bundle..."])
-            let outputDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Desktop").appendingPathComponent("MagicDAW Plugins")
-            try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
             let appexURL = try await pluginCompiler.buildPlugin(plugin, outputDir: outputDir)
-            sendEvent("plugin_export_result", data: ["success": true, "path": appexURL.path])
+            let successMessage = "Export succeeded.\nBundle: \(appexURL.path)"
+            let logURL = writePluginExportLog(in: outputDir, contents: successMessage)
+            sendEvent("plugin_export_result", data: [
+                "success": true,
+                "path": appexURL.path,
+                "message": successMessage,
+                "logPath": logURL?.path ?? "",
+            ])
         } catch {
-            sendEvent("plugin_export_result", data: ["success": false, "error": error.localizedDescription])
+            let failureMessage = error.localizedDescription
+            let logURL = writePluginExportLog(in: outputDir, contents: failureMessage)
+            sendEvent("plugin_export_result", data: [
+                "success": false,
+                "error": failureMessage,
+                "logPath": logURL?.path ?? "",
+            ])
         }
+    }
+
+    private func writePluginExportLog(in directory: URL, contents: String) -> URL? {
+        let logURL = directory.appendingPathComponent("last-plugin-export.log")
+        let stamped = "[\(ISO8601DateFormatter().string(from: Date()))]\n\(contents)\n"
+        do {
+            try stamped.write(to: logURL, atomically: true, encoding: .utf8)
+            return logURL
+        } catch {
+            return nil
+        }
+    }
+
+    private func handlePreviewCurrentPluginGraph(note: UInt8) {
+        pluginPreviewSynth.loadGraph(pluginGraph)
+        pluginPreviewSynth.noteOn(note: note, velocity: 104)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.pluginPreviewSynth.noteOff(note: note)
+        }
+    }
+
+    private func handleSaveCurrentPluginGraph(_ payload: [String: Any]) {
+        let requestedName = (payload["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let savedURL = try pluginGraphLibrary.saveGraph(pluginGraph, named: requestedName)
+            sendEvent("plugin_saved", data: pluginGraphSummaryDict(for: savedURL))
+            handleListSavedPluginGraphs()
+        } catch {
+            sendEvent("plugin_export_result", data: [
+                "success": false,
+                "error": error.localizedDescription,
+                "logPath": "",
+            ])
+        }
+    }
+
+    private func handleListSavedPluginGraphs() {
+        let graphs = pluginGraphLibrary.listGraphs().map { summary -> [String: Any] in
+            [
+                "name": summary.name,
+                "path": summary.path,
+                "category": summary.category,
+                "description": summary.description,
+                "version": summary.version,
+                "modifiedAt": ISO8601DateFormatter().string(from: summary.modifiedAt),
+            ]
+        }
+        sendEvent("plugin_saved_list", data: ["graphs": graphs])
+    }
+
+    private func handleLoadSavedPluginGraph(path: String) {
+        do {
+            pluginGraph = try pluginGraphLibrary.loadGraph(at: URL(fileURLWithPath: path))
+            pluginRebuildPreview()
+            pluginValidateAndNotify()
+            pluginSendGraphToJS()
+        } catch {
+            sendEvent("plugin_export_result", data: [
+                "success": false,
+                "error": error.localizedDescription,
+                "logPath": "",
+            ])
+        }
+    }
+
+    private func handleAssignCurrentPluginGraphToTrack(trackIdStr: String?) {
+        do {
+            let savedURL = try pluginGraphLibrary.saveGraph(pluginGraph)
+            handleAssignSavedPluginGraphToTrack(path: savedURL.path, trackIdStr: trackIdStr)
+            handleListSavedPluginGraphs()
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
+    }
+
+    private func handleAssignSavedPluginGraphToTrack(path: String, trackIdStr: String?) {
+        guard let trackIdStr,
+              let uuid = resolveTrackUUID(trackIdStr),
+              let track = currentProject?.tracks.first(where: { $0.id == uuid }) else {
+            sendEvent("instrument_error", data: ["error": "No target track selected"])
+            return
+        }
+        guard track.type == .midi else {
+            sendEvent("instrument_error", data: ["error": "Graph synths can only be assigned to MIDI tracks right now"])
+            return
+        }
+
+        do {
+            let graph = try pluginGraphLibrary.loadGraph(at: URL(fileURLWithPath: path))
+            guard graph.metadata.category == .instrument else {
+                sendEvent("instrument_error", data: ["error": "Only instrument graphs can be assigned to MIDI tracks right now"])
+                return
+            }
+
+            track.instrument = InstrumentRef(
+                type: .synth,
+                name: graph.metadata.name,
+                path: path,
+                gmProgram: nil,
+                bankMSB: nil,
+                presetId: nil
+            )
+            refreshTrackInstrument(for: track)
+            sendTracksUpdated()
+            sendEvent("instrument_assigned", data: [
+                "trackId": trackIdStr,
+                "name": graph.metadata.name,
+                "path": path,
+                "type": "plugin-graph",
+            ])
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
+    }
+
+    private func pluginGraphSummaryDict(for url: URL) -> [String: Any] {
+        let graph = (try? pluginGraphLibrary.loadGraph(at: url)) ?? pluginGraph
+        return [
+            "name": graph.metadata.name,
+            "path": url.path,
+            "category": graph.metadata.category.rawValue,
+            "description": graph.metadata.description,
+            "version": graph.metadata.version,
+            "modifiedAt": ISO8601DateFormatter().string(from: Date()),
+        ]
     }
 
     // MARK: - AI Instrument Sound Design
@@ -2573,20 +3942,130 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
 
         let result = await soundDesignService.suggestSampleMappingWithFallback(samples: sampleInfos)
 
-        // Apply zone mappings
-        let zones = result.zones.map { zone -> [String: Any] in
-            [
-                "sampleFile": zone.sampleFile,
-                "rootNote": Int(zone.rootNote),
-                "lowNote": Int(zone.lowNote),
-                "highNote": Int(zone.highNote),
-                "lowVelocity": Int(zone.lowVelocity),
-                "highVelocity": Int(zone.highVelocity),
-            ]
+        do {
+            let mappedZones = result.zones.map { zone in
+                SampleZone(
+                    sampleFile: zone.sampleFile,
+                    trigger: .attack,
+                    rootNote: zone.rootNote,
+                    lowNote: zone.lowNote,
+                    highNote: zone.highNote,
+                    lowVelocity: zone.lowVelocity,
+                    highVelocity: zone.highVelocity,
+                    loopStart: nil,
+                    loopEnd: nil,
+                    tuning: 0.0
+                )
+            }
+            try sampler.applyZoneMappings(mappedZones)
+            sendInstrumentZones()
+            sendEvent("instrument_ai_status", data: ["status": "done", "message": result.explanation])
+        } catch {
+            sendEvent("instrument_ai_status", data: ["status": "error", "message": error.localizedDescription])
+        }
+    }
+
+    private func handleSaveCurrentSamplerInstrument(_ payload: [String: Any]) {
+        let providedName = (payload["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackName = providedName?.isEmpty == false ? providedName! : "Sample Rack"
+        guard let exported = sampler.exportPreviewInstrument(named: fallbackName) else {
+            sendEvent("instrument_error", data: ["error": "No sampler rack loaded"])
+            return
         }
 
-        sendEvent("instrument_zones", data: ["zones": zones, "explanation": result.explanation])
-        sendEvent("instrument_ai_status", data: ["status": "done"])
+        do {
+            let savedURL = try instrumentLibrary.saveSampleInstrument(
+                name: exported.definition.name,
+                definition: exported.definition,
+                sampleSources: exported.sources
+            )
+            sendEvent("instrument_assigned", data: [
+                "name": exported.definition.name,
+                "path": savedURL.path,
+                "type": "sample-rack",
+            ])
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
+    }
+
+    private func handleAssignPreviewRackToTrack(_ payload: [String: Any]) {
+        guard let trackIdStr = payload["trackId"] as? String,
+              let trackID = resolveTrackUUID(trackIdStr),
+              let track = currentProject?.tracks.first(where: { $0.id == trackID }) else {
+            sendEvent("instrument_error", data: ["error": "No target track selected"])
+            return
+        }
+
+        let providedName = (payload["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackName = providedName?.isEmpty == false ? providedName! : track.name + " Rack"
+        guard let exported = sampler.exportPreviewInstrument(named: fallbackName) else {
+            sendEvent("instrument_error", data: ["error": "No sampler rack loaded"])
+            return
+        }
+
+        do {
+            let savedURL = try instrumentLibrary.saveSampleInstrument(
+                name: exported.definition.name,
+                definition: exported.definition,
+                sampleSources: exported.sources
+            )
+            track.instrument = InstrumentRef(
+                type: .sampler,
+                name: exported.definition.name,
+                path: savedURL.path,
+                gmProgram: nil,
+                bankMSB: nil,
+                presetId: nil
+            )
+            refreshTrackInstrument(for: track)
+            sendTracksUpdated()
+            sendEvent("instrument_assigned", data: [
+                "trackId": trackIdStr,
+                "name": exported.definition.name,
+                "path": savedURL.path,
+                "type": "sample-rack",
+            ])
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
+    }
+
+    private func detectMIDINoteFromFilename(_ filename: String) -> UInt8? {
+        let pattern = #"(?i)([A-G])([#b]?)(-?\d)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(filename.startIndex..<filename.endIndex, in: filename)
+        guard let match = regex.firstMatch(in: filename, options: [], range: range),
+              let noteRange = Range(match.range(at: 1), in: filename),
+              let accidentalRange = Range(match.range(at: 2), in: filename),
+              let octaveRange = Range(match.range(at: 3), in: filename) else { return nil }
+
+        let noteName = String(filename[noteRange]).uppercased()
+        let accidental = String(filename[accidentalRange])
+        let octave = Int(filename[octaveRange]) ?? 4
+
+        let basePitchClass: Int
+        switch noteName {
+        case "C": basePitchClass = 0
+        case "D": basePitchClass = 2
+        case "E": basePitchClass = 4
+        case "F": basePitchClass = 5
+        case "G": basePitchClass = 7
+        case "A": basePitchClass = 9
+        case "B": basePitchClass = 11
+        default: return nil
+        }
+
+        let accidentalOffset: Int
+        switch accidental {
+        case "#": accidentalOffset = 1
+        case "b", "B": accidentalOffset = -1
+        default: accidentalOffset = 0
+        }
+
+        let midiNote = (octave + 1) * 12 + basePitchClass + accidentalOffset
+        guard midiNote >= 0, midiNote <= 127 else { return nil }
+        return UInt8(midiNote)
     }
 
     // MARK: - Instrument Factory (GM Presets)
@@ -2630,14 +4109,24 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     private func handleAssignPresetToTrack(presetId: UUID, trackIdStr: String?) {
         do {
             let preset = try instrumentLibrary.loadPreset(id: presetId)
-            sampler.applyPreset(preset)
-
-            // Update track instrument ref in the project if a trackId was provided
             if let trackIdStr = trackIdStr,
                let uuid = resolveTrackUUID(trackIdStr),
                let track = currentProject?.tracks.first(where: { $0.id == uuid }) {
-                track.instrument = InstrumentRef(type: .sampler, name: preset.name, path: nil)
+                track.instrument = InstrumentRef(
+                    type: .sampler,
+                    name: preset.name,
+                    path: nil,
+                    gmProgram: preset.gmProgram,
+                    bankMSB: preset.bankMSB,
+                    presetId: preset.id
+                )
+                refreshTrackInstrument(for: track)
+                if let trackSampler = trackSamplers[track.id] ?? ensureTrackSampler(for: track) {
+                    trackSampler.applyPreset(preset)
+                }
                 sendTracksUpdated()
+            } else {
+                sampler.applyPreset(preset)
             }
 
             sendEvent("instrument_assigned", data: [
@@ -2651,24 +4140,56 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
     }
 
     /// Assign a GM program directly to the sampler (no preset ID needed).
-    private func handleAssignGMProgram(_ program: UInt8, trackIdStr: String?) {
-        sampler.setGMProgram(program)
+    private func handleAssignGMProgram(_ program: UInt8, trackIdStr: String?, name: String?) {
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedName = (trimmedName?.isEmpty == false) ? trimmedName! : "Program \(Int(program) + 1)"
 
-        let name = trackIdStr != nil ? "GM \(program)" : "GM \(program)"
-
-        // Update track instrument ref
         if let trackIdStr = trackIdStr,
            let uuid = resolveTrackUUID(trackIdStr),
            let track = currentProject?.tracks.first(where: { $0.id == uuid }) {
-            track.instrument = InstrumentRef(type: .sampler, name: name, path: nil)
+            track.instrument = InstrumentRef(type: .sampler, name: resolvedName, path: nil, gmProgram: program, bankMSB: 0x79, presetId: nil)
+            refreshTrackInstrument(for: track)
             sendTracksUpdated()
+        } else {
+            sampler.setGMProgram(program)
         }
 
         sendEvent("instrument_assigned", data: [
             "gmProgram": Int(program),
             "trackId": trackIdStr ?? "",
-            "name": name,
+            "name": resolvedName,
         ])
+    }
+
+    private func handleAssignSavedRackToTrack(path: String, trackIdStr: String?) {
+        guard let trackIdStr,
+              let uuid = resolveTrackUUID(trackIdStr),
+              let track = currentProject?.tracks.first(where: { $0.id == uuid }) else {
+            sendEvent("instrument_error", data: ["error": "No target track selected"])
+            return
+        }
+
+        do {
+            let definition = try instrumentLibrary.loadSampleInstrumentDefinition(at: URL(fileURLWithPath: path))
+            track.instrument = InstrumentRef(
+                type: .sampler,
+                name: definition.name,
+                path: path,
+                gmProgram: nil,
+                bankMSB: nil,
+                presetId: nil
+            )
+            refreshTrackInstrument(for: track)
+            sendTracksUpdated()
+            sendEvent("instrument_assigned", data: [
+                "trackId": trackIdStr,
+                "name": definition.name,
+                "path": path,
+                "type": "sample-rack",
+            ])
+        } catch {
+            sendEvent("instrument_error", data: ["error": error.localizedDescription])
+        }
     }
 
     /// Preview a preset: apply it to the sampler and play a note.
@@ -2713,29 +4234,118 @@ final class WebViewBridge: NSObject, WKScriptMessageHandler {
         var newGraph = NodeGraphDefinition.empty(name: patch.name)
         newGraph.nodes.removeAll()
         for (i, spec) in patch.nodes.enumerated() {
-            let mapped: String
-            switch spec.type.lowercased() {
-            case "filter": mapped = "lowpass"
-            case "mixer": mapped = "mix"
-            case "envelope": mapped = "adsr"
-            default: mapped = spec.type
-            }
+            let mapped = normalizedAIGraphNodeType(for: spec)
             guard let tmpl = DSPNodeRegistry.template(for: mapped) else { continue }
             var node = tmpl.instantiate(id: spec.id, position: CGPoint(x: Double(100 + i * 220), y: Double(100 + (i % 3) * 180)))
-            for (k, v) in spec.parameters { node.setParameter(k, value: v) }
+            for (k, v) in spec.parameters {
+                if let normalized = normalizedAIGraphParameterName(k, for: mapped) {
+                    node.setParameter(normalized, value: normalizedAIGraphParameterValue(v, parameter: normalized, nodeType: mapped))
+                }
+            }
             newGraph.nodes.append(node)
         }
         for c in patch.connections {
-            newGraph.connections.append(ConnectionDefinition(fromNode: c.from, fromPort: c.fromPort, toNode: c.to, toPort: c.toPort))
+            newGraph.connections.append(ConnectionDefinition(
+                fromNode: c.from,
+                fromPort: normalizedAIGraphOutputPort(c.fromPort),
+                toNode: c.to,
+                toPort: normalizedAIGraphInputPort(c.toPort)
+            ))
         }
         if !newGraph.nodes.contains(where: { $0.type == "output" }) {
             let ot = DSPNodeRegistry.template(for: "output")!
             newGraph.nodes.append(ot.instantiate(id: "output", position: CGPoint(x: 800, y: 200)))
         }
+        newGraph.metadata = NodeGraphMetadata(
+            name: patch.name,
+            author: "Ollama",
+            description: patch.description,
+            category: .instrument,
+            version: "1.0"
+        )
+        newGraph = PluginDSPFactory.normalizedDefinitionForInternalPlayback(from: newGraph)
         pluginGraph = newGraph
         pluginRebuildPreview()
         pluginValidateAndNotify()
         pluginSendGraphToJS()
         sendEvent("plugin_ai_result", data: ["success": true])
+    }
+
+    private func normalizedAIGraphNodeType(for spec: SynthNodeSpec) -> String {
+        switch spec.type.lowercased() {
+        case "filter":
+            let filterType = Int(spec.parameters["type"] ?? 0)
+            switch filterType {
+            case 1: return "highpass"
+            case 2: return "bandpass"
+            case 3: return "notch"
+            default: return "lowpass"
+            }
+        case "mixer":
+            return "mix"
+        case "envelope":
+            return "adsr"
+        default:
+            return spec.type
+        }
+    }
+
+    private func normalizedAIGraphParameterName(_ name: String, for nodeType: String) -> String? {
+        switch (nodeType, name) {
+        case ("oscillator", "level"), ("noise", "level"), ("wavetable", "level"), ("subOscillator", "level"):
+            return "amplitude"
+        case ("output", "level"):
+            return "gain"
+        case ("reverb", "size"):
+            return "roomSize"
+        case ("noise", "color"):
+            return "noiseType"
+        case ("mix", "level"):
+            return "mix"
+        case (_, "type"):
+            return nodeType == "lowpass" || nodeType == "highpass" || nodeType == "bandpass" || nodeType == "notch" ? nil : name
+        default:
+            return name
+        }
+    }
+
+    private func normalizedAIGraphParameterValue(_ value: Double, parameter: String, nodeType: String) -> Double {
+        switch (nodeType, parameter) {
+        case ("delay", "time"):
+            return value < 10.0 ? value * 1000.0 : value
+        case ("lowpass", "cutoff"), ("highpass", "cutoff"), ("bandpass", "cutoff"), ("notch", "cutoff"), ("comb", "frequency"):
+            if value <= 1.0 {
+                return 20.0 + (value * 19_980.0)
+            }
+            return value
+        default:
+            return value
+        }
+    }
+
+    private func normalizedAIGraphInputPort(_ port: String) -> String {
+        switch port {
+        case "audio":
+            return "input"
+        case "input1":
+            return "input1"
+        case "input2":
+            return "input2"
+        case "input3":
+            return "input3"
+        case "pitch":
+            return "frequency"
+        default:
+            return port
+        }
+    }
+
+    private func normalizedAIGraphOutputPort(_ port: String) -> String {
+        switch port {
+        case "output":
+            return "audio"
+        default:
+            return port
+        }
     }
 }

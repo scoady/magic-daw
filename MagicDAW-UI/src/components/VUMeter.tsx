@@ -37,7 +37,8 @@ export const VUMeter: React.FC<VUMeterProps> = ({
       style={{
         width: isVertical ? width : height,
         height: isVertical ? height : width,
-        background: 'rgba(0, 0, 0, 0.3)',
+        background: 'rgba(255, 255, 255, 0.04)',
+        border: '1px solid rgba(255, 255, 255, 0.05)',
       }}
     >
       {/* Level fill */}
@@ -52,6 +53,7 @@ export const VUMeter: React.FC<VUMeterProps> = ({
                 height: `${level * 100}%`,
                 transition: 'height 0.05s linear',
                 opacity: 0.85,
+                background: 'linear-gradient(to top, #7d838b 0%, #b8bec6 55%, #eceff3 100%)',
               }
             : {
                 top: 0,
@@ -61,7 +63,7 @@ export const VUMeter: React.FC<VUMeterProps> = ({
                 transition: 'width 0.05s linear',
                 opacity: 0.85,
                 background:
-                  'linear-gradient(to right, var(--green), var(--teal), var(--gold), var(--orange), var(--pink))',
+                  'linear-gradient(to right, #676c73, #9aa1aa, #d3d8df, #f2f4f7)',
               }
         }
       />
@@ -77,7 +79,7 @@ export const VUMeter: React.FC<VUMeterProps> = ({
                   left: 0,
                   right: 0,
                   height: 1.5,
-                  background: 'var(--pink)',
+                  background: 'rgba(255,255,255,0.9)',
                   opacity: 0.9,
                 }
               : {
@@ -85,7 +87,7 @@ export const VUMeter: React.FC<VUMeterProps> = ({
                   top: 0,
                   bottom: 0,
                   width: 1.5,
-                  background: 'var(--pink)',
+                  background: 'rgba(255,255,255,0.9)',
                   opacity: 0.9,
                 }
           }

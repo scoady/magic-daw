@@ -635,10 +635,10 @@ enum AIPrompts {
     {
       "name": "Warm Pad",
       "nodes": [
-        {"id": "osc1", "type": "oscillator", "parameters": {"waveform": 1, "detune": 5.0, "level": 0.8}},
+        {"id": "osc1", "type": "oscillator", "parameters": {"waveform": 1, "detune": 5.0, "amplitude": 0.8}},
         {"id": "flt1", "type": "filter", "parameters": {"cutoff": 2000.0, "resonance": 0.3, "type": 0}},
         {"id": "env1", "type": "envelope", "parameters": {"attack": 0.5, "decay": 0.3, "sustain": 0.7, "release": 1.5}},
-        {"id": "out", "type": "output", "parameters": {"level": 0.7}}
+        {"id": "out", "type": "output", "parameters": {"gain": 0.7}}
       ],
       "connections": [
         {"from": "osc1", "from_port": "output", "to": "flt1", "to_port": "input"},
@@ -651,7 +651,13 @@ enum AIPrompts {
     Node types: oscillator, filter, envelope, lfo, delay, reverb, distortion, chorus, mixer, output
     Oscillator waveforms: 0=sine, 1=saw, 2=square, 3=triangle, 4=noise
     Filter types: 0=lowpass, 1=highpass, 2=bandpass, 3=notch
-    All parameter values should be reasonable for audio synthesis.
+    Use these parameter names when possible:
+    - oscillator: frequency, amplitude, detune, waveform
+    - filter: cutoff (Hz), resonance, type
+    - envelope: attack/decay/release in seconds, sustain 0-1
+    - mixer: input1, input2, input3... as destination ports
+    - output: gain
+    Keep a direct audible path from oscillator(s) to output. Do not rely on modulators as the only reason a graph becomes audible.
     """
 
     static let synthPatch = """
@@ -679,6 +685,9 @@ enum AIPrompts {
     - Always include at least one envelope
     - Connect modulators (LFO, envelope) to parameters for movement
     - Keep signal flow logical: oscillators -> processing -> output
+    - Use `amplitude` for oscillator level and `gain` for output level
+    - Use destination port `input` for processors and `input1` / `input2` / `input3` for mixer inputs
+    - Keep filter cutoff values in audible Hz ranges, not normalized 0-1 values
     """
 
     static let sampleMapping = """

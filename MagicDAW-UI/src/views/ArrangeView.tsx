@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import { Player } from '@remotion/player';
-import { ZoomIn, ZoomOut, Plus, Upload, Music, ExternalLink } from 'lucide-react';
-import type { Track, Clip, ViewId } from '../types/daw';
+import { ZoomIn, ZoomOut, Plus, Upload, Music, SlidersHorizontal, ChevronDown, ChevronUp } from 'lucide-react';
+import type { Track, Clip, ViewId, AutomationLaneType, AutomationPoint } from '../types/daw';
 import { sendToSwift, onSwiftMessage, BridgeMessages } from '../bridge';
 import { LiveArrange } from '../compositions/LiveArrange';
 import type { LiveArrangeProps } from '../compositions/LiveArrange';
@@ -16,14 +16,17 @@ interface ArrangeViewProps {
   playing: boolean;
   recording?: boolean;
   transportPosition?: { bar: number; beat: number; timeMs: number };
+  selectedTrackId?: string | null;
   onSwitchView?: (view: ViewId, clipId?: string) => void;
+  onSelectTrack?: (trackId: string) => void;
   onToggleMute?: (trackId: string) => void;
   onToggleSolo?: (trackId: string) => void;
   onToggleArm?: (trackId: string) => void;
   onAddTrack?: (type: 'midi' | 'audio') => void;
   onDeleteTrack?: (trackId: string) => void;
   onRenameTrack?: (trackId: string, name: string) => void;
-  onChangeInstrument?: (trackId: string) => void;
+  onChangeInstrument?: (trackId: string, anchor?: { x: number; y: number }) => void;
+  onAutomationChange?: (trackId: string, type: AutomationLaneType, points: AutomationPoint[]) => void;
 }
 
 const MIN_BARS = 32;
@@ -37,6 +40,8 @@ const ENERGY_H = 24;
 const TRACK_H = 60;
 const RESIZE_HANDLE_W = 8; // pixels for right-edge resize handle
 const SNAP_BARS = 1; // snap to 1-bar grid
+const AUTOMATION_LANE_H = 14;
+const EXPANDED_AUTOMATION_LANE_H = 22;
 
 type DragMode = 'idle' | 'selecting' | 'moving' | 'resizing' | 'duplicating' | 'playhead-scrub' | 'loop-handle';
 
@@ -69,15 +74,63 @@ function snapToBar(bar: number): number {
   return Math.round(bar / SNAP_BARS) * SNAP_BARS;
 }
 
-export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, recording, transportPosition, onSwitchView, onToggleMute, onToggleSolo, onToggleArm, onAddTrack, onDeleteTrack, onRenameTrack, onChangeInstrument }) => {
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getFallbackAutomationValue(track: Track, type: AutomationLaneType): number {
+  return type === 'volume'
+    ? clamp(track.volume, 0, 1)
+    : clamp((track.pan + 1) / 2, 0, 1);
+}
+
+function getAutomationPoints(track: Track, totalBars: number, type: AutomationLaneType): AutomationPoint[] {
+  const lane = track.automation?.find((candidate) => candidate.type === type && candidate.enabled !== false && candidate.points.length > 0);
+  if (lane) {
+    return [...lane.points].sort((a, b) => a.bar - b.bar);
+  }
+
+  const value = getFallbackAutomationValue(track, type);
+  const boundaries = new Set<number>([1, totalBars + 1]);
+  track.clips.forEach((clip) => {
+    boundaries.add(clip.startBar);
+    boundaries.add(clip.startBar + clip.lengthBars);
+  });
+  return Array.from(boundaries)
+    .sort((a, b) => a - b)
+    .map((bar) => ({ bar, value }));
+}
+
+export const ArrangeView: React.FC<ArrangeViewProps> = ({
+  tracks,
+  bpm,
+  playing,
+  recording,
+  transportPosition,
+  selectedTrackId: selectedTrackIdProp,
+  onSwitchView,
+  onSelectTrack,
+  onToggleMute,
+  onToggleSolo,
+  onToggleArm,
+  onAddTrack,
+  onDeleteTrack,
+  onRenameTrack,
+  onChangeInstrument,
+  onAutomationChange,
+}) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
   const [scrollOffset, setScrollOffset] = useState(0);
   const [playheadBeat, setPlayheadBeat] = useState(0);
   const [selectedClipIds, setSelectedClipIds] = useState<Set<string>>(new Set());
-  const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
+  const [internalSelectedTrackId, setInternalSelectedTrackId] = useState<string | null>(null);
   const [containerSize, setContainerSize] = useState({ width: 800, height: 400 });
   const [selectionRect, setSelectionRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [showAutomation, setShowAutomation] = useState(true);
+  const [automationMode, setAutomationMode] = useState<AutomationLaneType>('volume');
+  const [expandedAutomationTrackId, setExpandedAutomationTrackId] = useState<string | null>(null);
+  const [selectedAutomationPoint, setSelectedAutomationPoint] = useState<{ trackId: string; pointIndex: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
     visible: false, x: 0, y: 0, clipId: null, trackId: null, bar: 0,
   });
@@ -94,6 +147,19 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
   });
   const dragRef = useRef(drag);
   dragRef.current = drag;
+  const selectedTrackId = selectedTrackIdProp ?? internalSelectedTrackId;
+  const selectTrack = useCallback((trackId: string) => {
+    onSelectTrack?.(trackId);
+    if (selectedTrackIdProp === undefined) {
+      setInternalSelectedTrackId(trackId);
+    }
+  }, [onSelectTrack, selectedTrackIdProp]);
+
+  const automationDragRef = useRef<{ trackId: string | null; pointIndex: number; active: boolean }>({
+    trackId: null,
+    pointIndex: -1,
+    active: false,
+  });
 
   // Dynamic timeline: extend beyond last clip + margin
   const totalBars = useMemo(() => {
@@ -183,6 +249,61 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
     [],
   );
 
+  const getAutomationLaneMetrics = useCallback((trackId: string, trackIdx: number) => {
+    const laneHeight = expandedAutomationTrackId === trackId ? EXPANDED_AUTOMATION_LANE_H : AUTOMATION_LANE_H;
+    const top = RULER_H + ENERGY_H + trackIdx * TRACK_H + TRACK_H - laneHeight - 3;
+    return { top, height: laneHeight };
+  }, [expandedAutomationTrackId]);
+
+  const updateAutomationPoint = useCallback((trackId: string, pointIndex: number, clientX: number, clientY: number) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const trackIdx = tracks.findIndex((track) => track.id === trackId);
+    if (trackIdx < 0) return;
+    const track = tracks[trackIdx];
+    const currentPoints = getAutomationPoints(track, totalBars, automationMode);
+    const { top, height } = getAutomationLaneMetrics(trackId, trackIdx);
+    const localY = clientY - rect.top;
+    const normalizedValue = clamp(1 - ((localY - top - 2) / Math.max(4, height - 4)), 0, 1);
+    const bar = Math.max(1, Math.min(totalBars + 1, snapToBar(xToBar(clientX))));
+    const nextPoints = currentPoints.map((point, idx) =>
+      idx === pointIndex ? { bar, value: normalizedValue } : point,
+    );
+    onAutomationChange?.(trackId, automationMode, nextPoints);
+  }, [tracks, totalBars, automationMode, getAutomationLaneMetrics, xToBar, onAutomationChange]);
+
+  const hitTestAutomation = useCallback((clientX: number, clientY: number): { trackId: string; trackIdx: number; pointIndex: number | null } | null => {
+    if (!showAutomation) return null;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    const trackIdx = yToTrackIdx(clientY);
+    if (trackIdx < 0 || trackIdx >= tracks.length) return null;
+    const track = tracks[trackIdx];
+    const { top, height } = getAutomationLaneMetrics(track.id, trackIdx);
+    const localY = clientY - rect.top;
+    const localX = clientX - rect.left;
+    if (localX <= HEADER_W || localY < top || localY > top + height) return null;
+
+    const points = getAutomationPoints(track, totalBars, automationMode);
+    let nearestIndex: number | null = null;
+    let nearestDistance = Infinity;
+    points.forEach((point, index) => {
+      const px = HEADER_W + (point.bar - 1 - scrollOffset) * barW;
+      const py = top + (1 - clamp(point.value, 0, 1)) * (height - 4) + 2;
+      const distance = Math.hypot(localX - px, localY - py);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    });
+
+    return {
+      trackId: track.id,
+      trackIdx,
+      pointIndex: nearestDistance <= 8 ? nearestIndex : null,
+    };
+  }, [showAutomation, yToTrackIdx, tracks, getAutomationLaneMetrics, totalBars, automationMode, scrollOffset, barW]);
+
   // Find clip under mouse, also return if on resize handle
   const hitTest = useCallback(
     (clientX: number, clientY: number): { clipId: string | null; trackId: string | null; trackIdx: number; bar: number; onResizeEdge: boolean } => {
@@ -216,6 +337,18 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
   // ── Keyboard shortcuts ──────────────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.key === 'Backspace' || e.key === 'Delete') && selectedAutomationPoint) {
+        e.preventDefault();
+        const track = tracks.find((candidate) => candidate.id === selectedAutomationPoint.trackId);
+        if (track) {
+          const nextPoints = getAutomationPoints(track, totalBars, automationMode)
+            .filter((_, index) => index !== selectedAutomationPoint.pointIndex);
+          onAutomationChange?.(track.id, automationMode, nextPoints);
+          setSelectedAutomationPoint(null);
+        }
+        return;
+      }
+
       // Delete / Backspace — delete selected clips
       if ((e.key === 'Backspace' || e.key === 'Delete') && selectedClipIds.size > 0) {
         e.preventDefault();
@@ -248,13 +381,14 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
       // Escape — deselect
       if (e.key === 'Escape') {
         setSelectedClipIds(new Set());
+        setSelectedAutomationPoint(null);
         setContextMenu((prev) => ({ ...prev, visible: false }));
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedClipIds, tracks, showToast]);
+  }, [selectedClipIds, selectedAutomationPoint, tracks, totalBars, automationMode, onAutomationChange, showToast]);
 
   // Context menu state is maintained for backward compat with handleMouseDown checks
 
@@ -291,6 +425,38 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
 
       // ── Track grid area ──
       if (relX > HEADER_W && relY > RULER_H + ENERGY_H) {
+        const automationHit = hitTestAutomation(e.clientX, e.clientY);
+        if (automationHit && selectedTrackId === automationHit.trackId) {
+          selectTrack(automationHit.trackId);
+          setExpandedAutomationTrackId(automationHit.trackId);
+          if (automationHit.pointIndex !== null) {
+            setSelectedAutomationPoint({ trackId: automationHit.trackId, pointIndex: automationHit.pointIndex });
+            automationDragRef.current = {
+              trackId: automationHit.trackId,
+              pointIndex: automationHit.pointIndex,
+              active: true,
+            };
+            return;
+          }
+
+          const track = tracks[automationHit.trackIdx];
+          const nextPoint = {
+            bar: Math.max(1, Math.min(totalBars + 1, snapToBar(hitTest(e.clientX, e.clientY).bar))),
+            value: clamp(1 - ((relY - getAutomationLaneMetrics(track.id, automationHit.trackIdx).top - 2) / Math.max(4, getAutomationLaneMetrics(track.id, automationHit.trackIdx).height - 4)), 0, 1),
+          };
+          const currentPoints = getAutomationPoints(track, totalBars, automationMode);
+          const nextPoints = [...currentPoints, nextPoint].sort((a, b) => a.bar - b.bar);
+          onAutomationChange?.(track.id, automationMode, nextPoints);
+          const createdIndex = nextPoints.findIndex((point) => point.bar === nextPoint.bar && Math.abs(point.value - nextPoint.value) < 0.0001);
+          setSelectedAutomationPoint({ trackId: track.id, pointIndex: Math.max(0, createdIndex) });
+          automationDragRef.current = {
+            trackId: track.id,
+            pointIndex: Math.max(0, createdIndex),
+            active: true,
+          };
+          return;
+        }
+
         const hit = hitTest(e.clientX, e.clientY);
 
         if (hit.clipId) {
@@ -331,7 +497,8 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
           }
           // Set selected track
           if (hit.trackId) {
-            setSelectedTrackId(hit.trackId);
+            selectTrack(hit.trackId);
+            setSelectedAutomationPoint(null);
           }
         }
         return;
@@ -341,11 +508,11 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
       if (relX <= HEADER_W && relY > RULER_H + ENERGY_H) {
         const trackIdx = yToTrackIdx(e.clientY);
         if (trackIdx >= 0 && trackIdx < tracks.length) {
-          setSelectedTrackId(tracks[trackIdx].id);
+          selectTrack(tracks[trackIdx].id);
         }
       }
     },
-    [xToBar, hitTest, yToTrackIdx, selectedClipIds, tracks, contextMenu.visible],
+    [xToBar, hitTest, hitTestAutomation, yToTrackIdx, selectedClipIds, tracks, contextMenu.visible, selectedTrackId, totalBars, automationMode, onAutomationChange, getAutomationLaneMetrics, selectTrack],
   );
 
   // ── Double-click ────────────────────────────────────────────────────────
@@ -492,6 +659,16 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
   // ── Mouse move — drag handling ──────────────────────────────────────────
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
+      if (automationDragRef.current.active && automationDragRef.current.trackId) {
+        updateAutomationPoint(
+          automationDragRef.current.trackId,
+          automationDragRef.current.pointIndex,
+          e.clientX,
+          e.clientY,
+        );
+        return;
+      }
+
       const d = dragRef.current;
       if (d.mode === 'idle') return;
 
@@ -520,12 +697,17 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
         hasMoved,
       }));
     },
-    [xToBar, barW],
+    [xToBar, barW, updateAutomationPoint],
   );
 
   // ── Mouse up — commit drag ──────────────────────────────────────────────
   const handleMouseUp = useCallback(
     (e: React.MouseEvent) => {
+      if (automationDragRef.current.active) {
+        automationDragRef.current = { trackId: null, pointIndex: -1, active: false };
+        return;
+      }
+
       const d = dragRef.current;
 
       if (d.mode === 'playhead-scrub') {
@@ -666,14 +848,58 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
       dragOffsetTracks: drag.hasMoved ? drag.deltaTrack : 0,
       dragMode: drag.mode,
       selectedClipIds: Array.from(selectedClipIds),
+      showAutomation,
+      automationMode,
+      expandedAutomationTrackId,
+      selectedAutomationPoint,
     }),
-    [tracks, playheadBeat, playing, bpm, visibleBars, scrollOffset, selectedClipIdStr, selectedTrackId, drag, selectedClipIds],
+    [tracks, playheadBeat, playing, bpm, visibleBars, scrollOffset, selectedClipIdStr, selectedTrackId, drag, selectedClipIds, showAutomation, automationMode, expandedAutomationTrackId, selectedAutomationPoint],
   );
 
   return (
     <div className="flex flex-col h-full relative" ref={containerRef}>
       {/* Zoom controls overlay */}
       <div className="absolute top-2 right-3 flex gap-1 z-20">
+        <button
+          className="glass-button flex items-center justify-center gap-1"
+          style={{
+            height: 20,
+            padding: '0 8px',
+            background: showAutomation ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
+            borderColor: showAutomation ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)',
+            color: showAutomation ? 'var(--text)' : 'var(--text-dim)',
+          }}
+          onClick={() => setShowAutomation((prev) => !prev)}
+          title="Toggle automation read lanes"
+        >
+          <SlidersHorizontal size={10} />
+          <span style={{ fontSize: 8, fontWeight: 600 }}>Auto</span>
+        </button>
+        {showAutomation && (
+          <>
+            {(['volume', 'pan'] as AutomationLaneType[]).map((mode) => (
+              <button
+                key={mode}
+                className="glass-button flex items-center justify-center"
+                style={{
+                  height: 20,
+                  padding: '0 8px',
+                  fontSize: 8,
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.06em',
+                  background: automationMode === mode ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
+                  borderColor: automationMode === mode ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.08)',
+                  color: automationMode === mode ? 'var(--text)' : 'var(--text-dim)',
+                }}
+                onClick={() => setAutomationMode(mode)}
+                title={`Show ${mode} automation lanes`}
+              >
+                {mode === 'volume' ? 'Vol' : 'Pan'}
+              </button>
+            ))}
+          </>
+        )}
         <button
           className="glass-button flex items-center justify-center"
           style={{ width: 24, height: 20 }}
@@ -722,6 +948,84 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
           }}
         />
 
+        {tracks.length === 0 && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              pointerEvents: 'none',
+              zIndex: 8,
+            }}
+          >
+            <div
+              className="glass-panel"
+              style={{
+                width: 360,
+                maxWidth: 'calc(100% - 48px)',
+                padding: 18,
+                borderRadius: 18,
+                background: 'rgba(9, 12, 16, 0.84)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                boxShadow: '0 24px 60px rgba(0,0,0,0.34)',
+                textAlign: 'center',
+                pointerEvents: 'auto',
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  color: 'var(--text-muted)',
+                  letterSpacing: '0.12em',
+                  textTransform: 'uppercase',
+                }}
+              >
+                Empty Project
+              </div>
+              <div
+                style={{
+                  marginTop: 10,
+                  fontSize: 22,
+                  color: 'var(--text)',
+                  fontFamily: 'var(--font-display)',
+                }}
+              >
+                Start with a blank arrange slate
+              </div>
+              <div
+                style={{
+                  marginTop: 8,
+                  fontSize: 11,
+                  lineHeight: 1.5,
+                  color: 'var(--text-dim)',
+                  fontFamily: 'var(--font-mono)',
+                }}
+              >
+                Use the project menu in the top bar to open or save a project,
+                or create your first track here.
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 14 }}>
+                <button
+                  className="glass-button"
+                  style={{ padding: '8px 12px', fontSize: 10 }}
+                  onClick={() => onAddTrack?.('midi')}
+                >
+                  Add MIDI Track
+                </button>
+                <button
+                  className="glass-button"
+                  style={{ padding: '8px 12px', fontSize: 10 }}
+                  onClick={() => onAddTrack?.('audio')}
+                >
+                  Add Audio Track
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Interactive overlay — captures all mouse events on the grid area */}
         <div
           style={{
@@ -755,18 +1059,34 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
           {tracks.map((track, i) => (
             <div
               key={track.id}
-              onClick={() => setSelectedTrackId(track.id)}
+              onClick={() => {
+                selectTrack(track.id);
+                setSelectedAutomationPoint(null);
+              }}
               style={{
                 height: TRACK_H,
                 display: 'flex',
                 flexDirection: 'column',
                 justifyContent: 'center',
-                padding: '0 6px',
+                padding: '0 8px',
                 cursor: 'default',
                 position: 'relative',
-                background: selectedTrackId === track.id ? 'rgba(103,232,249,0.06)' : 'transparent',
+                background: selectedTrackId === track.id ? 'rgba(255,255,255,0.05)' : 'transparent',
+                borderLeft: selectedTrackId === track.id ? '1px solid rgba(255,255,255,0.14)' : '1px solid transparent',
               }}
             >
+              <div
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: 8,
+                  bottom: 8,
+                  width: 2,
+                  borderRadius: 999,
+                  background: track.color,
+                  opacity: 0.8,
+                }}
+              />
               {/* Recording indicator */}
               {recording && track.armed && (
                 <div style={{
@@ -777,15 +1097,29 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
                   position: 'absolute', top: 4, right: 6,
                 }} />
               )}
+              <div
+                style={{
+                  fontSize: 10,
+                  color: 'var(--text)',
+                  fontWeight: 700,
+                  lineHeight: 1.1,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  paddingLeft: 6,
+                }}
+              >
+                {track.name}
+              </div>
               {/* Mute / Solo / Arm row */}
-              <div style={{ display: 'flex', gap: 3, marginTop: 2 }}>
+              <div style={{ display: 'flex', gap: 4, marginTop: 5, paddingLeft: 6 }}>
                 <button
                   onClick={(e) => { e.stopPropagation(); onToggleMute?.(track.id); }}
                   style={{
                     width: 18, height: 14, fontSize: 8, fontWeight: 700,
-                    border: 'none', borderRadius: 3, cursor: 'pointer',
-                    background: track.muted ? 'rgba(251,191,36,0.25)' : 'rgba(255,255,255,0.06)',
-                    color: track.muted ? '#fbbf24' : 'rgba(255,255,255,0.3)',
+                    border: '1px solid rgba(255,255,255,0.08)', borderRadius: 3, cursor: 'pointer',
+                    background: track.muted ? 'rgba(214,190,138,0.2)' : 'rgba(255,255,255,0.04)',
+                    color: track.muted ? 'var(--warning)' : 'rgba(255,255,255,0.45)',
                   }}
                   title="Mute"
                 >M</button>
@@ -793,9 +1127,9 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
                   onClick={(e) => { e.stopPropagation(); onToggleSolo?.(track.id); }}
                   style={{
                     width: 18, height: 14, fontSize: 8, fontWeight: 700,
-                    border: 'none', borderRadius: 3, cursor: 'pointer',
-                    background: track.soloed ? 'rgba(52,211,153,0.25)' : 'rgba(255,255,255,0.06)',
-                    color: track.soloed ? '#34d399' : 'rgba(255,255,255,0.3)',
+                    border: '1px solid rgba(255,255,255,0.08)', borderRadius: 3, cursor: 'pointer',
+                    background: track.soloed ? 'rgba(141,212,180,0.2)' : 'rgba(255,255,255,0.04)',
+                    color: track.soloed ? 'var(--success)' : 'rgba(255,255,255,0.45)',
                   }}
                   title="Solo"
                 >S</button>
@@ -804,7 +1138,7 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
                     onClick={(e) => { e.stopPropagation(); onToggleArm?.(track.id); }}
                     style={{
                       width: 18, height: 14, fontSize: 8, fontWeight: 700,
-                      border: 'none', borderRadius: 3, cursor: 'pointer',
+                      border: '1px solid rgba(255,255,255,0.08)', borderRadius: 3, cursor: 'pointer',
                       background: track.armed ? 'rgba(239,68,68,0.25)' : 'rgba(255,255,255,0.06)',
                       color: track.armed ? '#ef4444' : 'rgba(255,255,255,0.3)',
                     }}
@@ -814,19 +1148,81 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
               </div>
               {track.type === 'midi' && (
                 <div
-                  onClick={(e) => { e.stopPropagation(); onChangeInstrument?.(track.id); }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onChangeInstrument?.(track.id, { x: e.clientX, y: e.clientY });
+                  }}
                   style={{
                     fontSize: 7,
-                    color: track.instrumentPresetName ? 'rgba(167,139,250,0.8)' : 'rgba(255,255,255,0.2)',
+                    color: track.instrumentPresetName ? 'var(--text-dim)' : 'var(--text-muted)',
                     cursor: 'pointer',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
-                    marginTop: 2,
+                    marginTop: 5,
+                    marginLeft: 6,
+                    padding: '2px 6px',
+                    borderRadius: 999,
+                    background: 'rgba(255,255,255,0.035)',
+                    border: '1px solid rgba(255,255,255,0.06)',
+                    maxWidth: 'fit-content',
                   }}
                   title={track.instrumentPresetName || 'Click to assign instrument'}
                 >
                   {track.instrumentPresetName || '+ instrument'}
+                </div>
+              )}
+              {showAutomation && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 4, marginLeft: 6 }}>
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      selectTrack(track.id);
+                    }}
+                    style={{
+                      padding: '2px 6px',
+                      borderRadius: 999,
+                      background: 'rgba(255,255,255,0.03)',
+                      border: '1px solid rgba(255,255,255,0.06)',
+                      color: selectedTrackId === track.id ? 'var(--text)' : 'var(--text-dim)',
+                      fontSize: 6.5,
+                      fontWeight: 700,
+                      letterSpacing: '0.08em',
+                      textTransform: 'uppercase',
+                      maxWidth: 'fit-content',
+                      cursor: 'pointer',
+                    }}
+                    title={automationMode === 'volume'
+                      ? `Track volume ${Math.round(track.volume * 100)}%`
+                      : `Track pan ${track.pan === 0 ? 'center' : track.pan < 0 ? `L${Math.round(Math.abs(track.pan) * 100)}` : `R${Math.round(track.pan * 100)}`}`}
+                  >
+                    {automationMode === 'volume'
+                      ? `Vol ${Math.round(track.volume * 100)}%`
+                      : `Pan ${track.pan === 0 ? 'C' : track.pan < 0 ? `L${Math.round(Math.abs(track.pan) * 100)}` : `R${Math.round(track.pan * 100)}`}`}
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      selectTrack(track.id);
+                      setExpandedAutomationTrackId((prev) => prev === track.id ? null : track.id);
+                    }}
+                    style={{
+                      width: 16,
+                      height: 16,
+                      borderRadius: 4,
+                      border: '1px solid rgba(255,255,255,0.08)',
+                      background: expandedAutomationTrackId === track.id ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.035)',
+                      color: expandedAutomationTrackId === track.id ? 'var(--text)' : 'var(--text-dim)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      padding: 0,
+                      cursor: 'pointer',
+                    }}
+                    title={expandedAutomationTrackId === track.id ? 'Collapse automation lane' : 'Expand automation lane'}
+                  >
+                    {expandedAutomationTrackId === track.id ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+                  </button>
                 </div>
               )}
             </div>
@@ -851,9 +1247,9 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
               onClick={() => sendToSwift(BridgeMessages.IMPORT_AUDIO_FILE)}
               style={{
                 width: 24, height: 24, borderRadius: '50%',
-                border: '1px solid rgba(167,139,250,0.2)',
-                background: 'rgba(167,139,250,0.06)',
-                color: 'rgba(167,139,250,0.6)',
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'rgba(255,255,255,0.04)',
+                color: 'rgba(255,255,255,0.48)',
                 cursor: 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}
@@ -865,9 +1261,9 @@ export const ArrangeView: React.FC<ArrangeViewProps> = ({ tracks, bpm, playing, 
               onClick={() => sendToSwift(BridgeMessages.OPEN_URL, { url: 'https://suno.com' })}
               style={{
                 width: 24, height: 24, borderRadius: '50%',
-                border: '1px solid rgba(251,191,36,0.2)',
-                background: 'rgba(251,191,36,0.06)',
-                color: 'rgba(251,191,36,0.6)',
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'rgba(255,255,255,0.04)',
+                color: 'rgba(255,255,255,0.48)',
                 cursor: 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}

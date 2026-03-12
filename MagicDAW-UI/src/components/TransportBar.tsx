@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Rewind,
   Square,
@@ -8,9 +8,13 @@ import {
   Repeat,
   Music,
   Timer,
+  ChevronDown,
+  FolderOpen,
+  FilePlus2,
+  Save,
+  SaveAll,
 } from 'lucide-react';
 import { VUMeter } from './VUMeter';
-import { aurora } from '../mockData';
 
 interface TransportBarProps {
   bpm: number;
@@ -39,6 +43,10 @@ interface TransportBarProps {
   onCountInToggle?: (enabled: boolean) => void;
   projectDirty?: boolean;
   projectName?: string;
+  onNewProject?: () => void;
+  onOpenProject?: () => void;
+  onSaveProject?: () => void;
+  onSaveProjectAs?: () => void;
 }
 
 export const TransportBar: React.FC<TransportBarProps> = ({
@@ -67,12 +75,29 @@ export const TransportBar: React.FC<TransportBarProps> = ({
   onLoopRegionChange,
   onCountInToggle,
   projectDirty = false,
+  projectName = 'Untitled',
+  onNewProject,
+  onOpenProject,
+  onSaveProject,
+  onSaveProjectAs,
 }) => {
   const [editingBpm, setEditingBpm] = useState(false);
   const [bpmInput, setBpmInput] = useState(String(bpm));
   const [editingLoop, setEditingLoop] = useState(false);
   const [loopStartInput, setLoopStartInput] = useState(String(loopStart));
   const [loopEndInput, setLoopEndInput] = useState(String(loopEnd));
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const projectMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handlePointerDown = (event: MouseEvent) => {
+      if (projectMenuRef.current && !projectMenuRef.current.contains(event.target as Node)) {
+        setProjectMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, []);
 
   const formatTime = (ms: number) => {
     const s = Math.floor(ms / 1000);
@@ -104,42 +129,152 @@ export const TransportBar: React.FC<TransportBarProps> = ({
     height: 28,
     ...(active
       ? {
-          background: 'rgba(52, 211, 153, 0.15)',
-          borderColor: 'rgba(52, 211, 153, 0.4)',
-          boxShadow: '0 0 10px rgba(52, 211, 153, 0.15)',
+          background: 'rgba(141, 212, 180, 0.14)',
+          borderColor: 'rgba(141, 212, 180, 0.34)',
+          boxShadow: 'none',
         }
       : {}),
   });
 
+  const projectMenuItemStyle: React.CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    width: '100%',
+    padding: '9px 10px',
+    borderRadius: 10,
+    border: '1px solid transparent',
+    background: 'transparent',
+    color: 'var(--text)',
+    fontSize: 11,
+    fontFamily: 'var(--font-mono)',
+    cursor: 'pointer',
+    textAlign: 'left',
+  };
+
+  const hasDetectedKey = keySignature.key.trim().length > 0;
+
   return (
-    <div className="transport-bar flex items-center px-4 gap-4 select-none">
-      {/* Logo + unsaved indicator */}
+    <div className="transport-bar flex items-center px-4 gap-4 select-none relative">
+      {/* Logo + project menu */}
       <div className="flex items-center gap-2 mr-2">
         <span
           style={{
             fontFamily: 'var(--font-display)',
             fontSize: 18,
-            color: aurora.cyan,
+            color: 'var(--text)',
             letterSpacing: '0.05em',
           }}
-          className="text-glow-cyan"
         >
           Magic DAW
         </span>
-        {projectDirty && (
-          <div
-            title="Unsaved changes"
+        <div ref={projectMenuRef} className="relative">
+          <button
+            className="glass-button flex items-center gap-2"
             style={{
-              width: 7,
-              height: 7,
-              borderRadius: '50%',
-              background: aurora.gold,
-              boxShadow: `0 0 8px ${aurora.gold}`,
-              flexShrink: 0,
-              animation: 'pulse 2s ease-in-out infinite',
+              minWidth: 152,
+              height: 28,
+              padding: '0 10px',
+              borderRadius: 12,
+              background: projectMenuOpen ? 'rgba(255,255,255,0.06)' : undefined,
             }}
-          />
-        )}
+            onClick={() => setProjectMenuOpen((open) => !open)}
+            title="Project"
+          >
+            <span
+              style={{
+                fontSize: 11,
+                color: 'var(--text)',
+                fontFamily: 'var(--font-mono)',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                maxWidth: 120,
+              }}
+            >
+              {projectName || 'Untitled'}
+            </span>
+            {projectDirty && (
+              <div
+                title="Unsaved changes"
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  background: 'var(--warning)',
+                  boxShadow: '0 0 8px rgba(214, 190, 138, 0.28)',
+                  flexShrink: 0,
+                }}
+              />
+            )}
+            <ChevronDown size={12} style={{ color: 'var(--text-muted)' }} />
+          </button>
+          {projectMenuOpen && (
+            <div
+              className="glass-panel"
+              style={{
+                position: 'absolute',
+                top: 34,
+                left: 0,
+                width: 220,
+                padding: 8,
+                borderRadius: 14,
+                zIndex: 30,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4,
+                background: 'rgba(8, 11, 15, 0.94)',
+                border: '1px solid rgba(255,255,255,0.10)',
+                boxShadow: '0 18px 42px rgba(0,0,0,0.42)',
+              }}
+            >
+              <div
+                style={{
+                  padding: '2px 4px 8px',
+                  borderBottom: '1px solid rgba(255,255,255,0.06)',
+                  marginBottom: 4,
+                }}
+              >
+                <div style={{ fontSize: 9, letterSpacing: '0.12em', color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                  Project
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--text)', fontFamily: 'var(--font-mono)', marginTop: 4 }}>
+                  {projectName || 'Untitled'}
+                </div>
+              </div>
+              {[
+                { label: 'New Project', hint: 'Cmd+N', icon: <FilePlus2 size={13} />, action: onNewProject },
+                { label: 'Open Project...', hint: 'Cmd+O', icon: <FolderOpen size={13} />, action: onOpenProject },
+                { label: 'Save', hint: 'Cmd+S', icon: <Save size={13} />, action: onSaveProject },
+                { label: 'Save As...', hint: 'Shift+Cmd+S', icon: <SaveAll size={13} />, action: onSaveProjectAs },
+              ].map((item) => (
+                <button
+                  key={item.label}
+                  onClick={() => {
+                    setProjectMenuOpen(false);
+                    item.action?.();
+                  }}
+                  style={projectMenuItemStyle}
+                  onMouseEnter={(event) => {
+                    event.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+                    event.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)';
+                  }}
+                  onMouseLeave={(event) => {
+                    event.currentTarget.style.background = 'transparent';
+                    event.currentTarget.style.borderColor = 'transparent';
+                  }}
+                >
+                  <span className="flex items-center gap-2">
+                    <span style={{ color: 'var(--text-muted)' }}>{item.icon}</span>
+                    <span>{item.label}</span>
+                  </span>
+                  <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>{item.hint}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Divider */}
@@ -161,8 +296,8 @@ export const TransportBar: React.FC<TransportBarProps> = ({
               width: 44,
               height: 22,
               background: 'rgba(0,0,0,0.4)',
-              border: '1px solid var(--cyan)',
-              color: 'var(--cyan)',
+              border: '1px solid var(--accent-border)',
+              color: 'var(--text)',
               fontFamily: 'var(--font-mono)',
               fontSize: 14,
               fontWeight: 700,
@@ -178,11 +313,10 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             style={{
               fontSize: 16,
               fontWeight: 700,
-              color: aurora.gold,
+              color: 'var(--warning)',
               cursor: 'pointer',
               fontFamily: 'var(--font-mono)',
             }}
-            className="text-glow-teal"
           >
             {bpm}
           </span>
@@ -194,21 +328,29 @@ export const TransportBar: React.FC<TransportBarProps> = ({
         className="glass-panel flex items-center gap-1.5 px-2 py-1"
         style={{ borderRadius: 20 }}
       >
-        <span style={{ fontSize: 12, fontWeight: 700, color: aurora.cyan }}>
-          {keySignature.key}
-        </span>
-        <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
-          {keySignature.scale}
-        </span>
-        <span
-          style={{
-            fontSize: 8,
-            color: keySignature.confidence > 0.8 ? aurora.green : aurora.gold,
-            opacity: 0.8,
-          }}
-        >
-          {Math.round(keySignature.confidence * 100)}%
-        </span>
+        {hasDetectedKey ? (
+          <>
+            <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)' }}>
+              {keySignature.key}
+            </span>
+            <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+              {keySignature.scale}
+            </span>
+            <span
+              style={{
+                fontSize: 8,
+                color: keySignature.confidence > 0.8 ? 'var(--success)' : 'var(--warning)',
+                opacity: 0.8,
+              }}
+            >
+              {Math.round(keySignature.confidence * 100)}%
+            </span>
+          </>
+        ) : (
+          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+            No key
+          </span>
+        )}
       </div>
 
       {/* Time Signature */}
@@ -247,16 +389,16 @@ export const TransportBar: React.FC<TransportBarProps> = ({
               ? {
                   background: 'rgba(52, 211, 153, 0.15)',
                   borderColor: 'rgba(52, 211, 153, 0.4)',
-                  boxShadow: '0 0 16px rgba(52, 211, 153, 0.2)',
+                  boxShadow: 'none',
                 }
               : {}),
           }}
           onClick={onPlay}
         >
           {playing ? (
-            <Pause size={14} style={{ color: aurora.green }} />
+            <Pause size={14} style={{ color: 'var(--success)' }} />
           ) : (
-            <Play size={14} style={{ color: aurora.green }} />
+            <Play size={14} style={{ color: 'var(--success)' }} />
           )}
         </button>
         <button
@@ -296,7 +438,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
       >
         <Music
           size={12}
-          style={{ color: metronomeEnabled ? aurora.green : 'var(--text-dim)' }}
+          style={{ color: metronomeEnabled ? 'var(--success)' : 'var(--text-dim)' }}
         />
       </button>
 
@@ -309,7 +451,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
       >
         <Timer
           size={12}
-          style={{ color: countInEnabled ? aurora.green : 'var(--text-dim)' }}
+          style={{ color: countInEnabled ? 'var(--success)' : 'var(--text-dim)' }}
         />
       </button>
 
@@ -323,7 +465,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
         >
           <Repeat
             size={12}
-            style={{ color: loopEnabled ? aurora.green : 'var(--text-dim)' }}
+            style={{ color: loopEnabled ? 'var(--success)' : 'var(--text-dim)' }}
           />
         </button>
         {loopEnabled && (
@@ -338,8 +480,8 @@ export const TransportBar: React.FC<TransportBarProps> = ({
                   width: 28,
                   height: 20,
                   background: 'rgba(0,0,0,0.4)',
-                  border: '1px solid var(--cyan)',
-                  color: 'var(--cyan)',
+                  border: '1px solid var(--accent-border)',
+                  color: 'var(--text)',
                   fontFamily: 'var(--font-mono)',
                   fontSize: 10,
                   outline: 'none',
@@ -357,8 +499,8 @@ export const TransportBar: React.FC<TransportBarProps> = ({
                   width: 28,
                   height: 20,
                   background: 'rgba(0,0,0,0.4)',
-                  border: '1px solid var(--cyan)',
-                  color: 'var(--cyan)',
+                  border: '1px solid var(--accent-border)',
+                  color: 'var(--text)',
                   fontFamily: 'var(--font-mono)',
                   fontSize: 10,
                   outline: 'none',
@@ -374,7 +516,7 @@ export const TransportBar: React.FC<TransportBarProps> = ({
               }}
               style={{
                 fontSize: 10,
-                color: aurora.cyan,
+                color: 'var(--text)',
                 cursor: 'pointer',
                 fontFamily: 'var(--font-mono)',
               }}
@@ -391,12 +533,12 @@ export const TransportBar: React.FC<TransportBarProps> = ({
         style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
       >
         <span style={{ color: 'var(--text-dim)' }}>Bar</span>
-        <span style={{ color: aurora.text, fontWeight: 700, minWidth: 20, textAlign: 'right' }}>
+        <span style={{ color: 'var(--text)', fontWeight: 700, minWidth: 20, textAlign: 'right' }}>
           {position.bar}
         </span>
         <span style={{ color: 'var(--text-muted)' }}>|</span>
         <span style={{ color: 'var(--text-dim)' }}>Beat</span>
-        <span style={{ color: aurora.text, fontWeight: 700, minWidth: 12, textAlign: 'right' }}>
+        <span style={{ color: 'var(--text)', fontWeight: 700, minWidth: 12, textAlign: 'right' }}>
           {position.beat}
         </span>
         <span style={{ color: 'var(--text-muted)' }}>|</span>
@@ -429,8 +571,8 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             width: 7,
             height: 7,
             borderRadius: '50%',
-            background: midiInputActive ? aurora.teal : 'var(--text-muted)',
-            boxShadow: midiInputActive ? `0 0 8px ${aurora.teal}` : 'none',
+            background: midiInputActive ? 'var(--success)' : 'var(--text-muted)',
+            boxShadow: midiInputActive ? '0 0 8px rgba(141, 212, 180, 0.35)' : 'none',
           }}
         />
         <span style={{ fontSize: 8, color: 'var(--text-muted)' }}>MIDI</span>
@@ -443,9 +585,9 @@ export const TransportBar: React.FC<TransportBarProps> = ({
             width: 7,
             height: 7,
             borderRadius: '50%',
-            background: ollamaConnected ? aurora.green : '#ef4444',
+            background: ollamaConnected ? 'var(--success)' : 'var(--danger)',
             boxShadow: ollamaConnected
-              ? `0 0 8px ${aurora.green}`
+              ? '0 0 8px rgba(141, 212, 180, 0.35)'
               : '0 0 8px rgba(239,68,68,0.5)',
           }}
         />

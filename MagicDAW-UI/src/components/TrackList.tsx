@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Music, Volume2, Waves, Plus, Trash2, ChevronDown } from 'lucide-react';
 import { VUMeter } from './VUMeter';
 import type { Track } from '../types/daw';
-import { aurora, seededRandom } from '../mockData';
+import { seededRandom } from '../mockData';
 import { useContextMenu } from './ContextMenu';
 import type { ContextMenuEntry } from './ContextMenu';
 
@@ -113,7 +113,7 @@ const AddTrackDropdown: React.FC<{ onAdd: (type: 'midi' | 'audio' | 'bus') => vo
                 transition: 'background 0.15s, color 0.15s',
               }}
               onMouseEnter={(e) => {
-                e.currentTarget.style.background = 'rgba(103, 232, 249, 0.1)';
+                e.currentTarget.style.background = 'rgba(255, 255, 255, 0.06)';
                 e.currentTarget.style.color = 'var(--text)';
               }}
               onMouseLeave={(e) => {
@@ -172,7 +172,7 @@ const DeleteConfirm: React.FC<{ onConfirm: () => void; onCancel: () => void }> =
       style={{
         fontSize: 8,
         color: 'var(--text-muted)',
-        background: 'rgba(120, 200, 220, 0.06)',
+        background: 'rgba(255, 255, 255, 0.04)',
         border: '1px solid var(--border)',
         borderRadius: 3,
         padding: '1px 5px',
@@ -292,20 +292,20 @@ const TrackItem: React.FC<TrackItemProps> = ({
         gap: 8,
         borderLeft: `3px solid ${track.color}`,
         background: isDragOver
-          ? 'rgba(103, 232, 249, 0.12)'
+          ? 'rgba(255, 255, 255, 0.08)'
           : isSelected
-            ? 'rgba(103, 232, 249, 0.08)'
+            ? 'rgba(255, 255, 255, 0.05)'
             : 'transparent',
         border: isDragOver
-          ? `1px solid ${aurora.cyan}`
+          ? '1px solid rgba(255,255,255,0.12)'
           : isSelected
-            ? `1px solid ${aurora.borderBright}`
+            ? '1px solid rgba(255,255,255,0.1)'
             : '1px solid transparent',
         borderLeftWidth: 3,
         borderLeftColor: track.color,
         cursor: 'grab',
         transition: 'background 0.15s, border-color 0.15s, box-shadow 0.15s',
-        ...(isSelected ? { boxShadow: `0 0 12px ${track.color}22` } : {}),
+        ...(isSelected ? { boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.03)' } : {}),
       }}
       draggable
       onDragStart={(e) => {
@@ -355,7 +355,7 @@ const TrackItem: React.FC<TrackItemProps> = ({
             fontSize: 11,
             fontWeight: 600,
             color: 'var(--text)',
-            background: 'rgba(103, 232, 249, 0.08)',
+            background: 'rgba(255, 255, 255, 0.06)',
             border: '1px solid var(--border)',
             borderRadius: 3,
             padding: '0 4px',
@@ -395,7 +395,7 @@ const TrackItem: React.FC<TrackItemProps> = ({
             fontSize: 7,
             fontWeight: 700,
             fontFamily: 'var(--font-mono)',
-            background: track.muted ? 'rgba(239, 68, 68, 0.25)' : 'rgba(120, 200, 220, 0.06)',
+            background: track.muted ? 'rgba(239, 68, 68, 0.25)' : 'rgba(255, 255, 255, 0.04)',
             border: `1px solid ${track.muted ? 'rgba(239, 68, 68, 0.5)' : 'var(--border)'}`,
             color: track.muted ? '#ef4444' : 'var(--text-muted)',
             cursor: 'pointer',
@@ -413,9 +413,9 @@ const TrackItem: React.FC<TrackItemProps> = ({
             fontSize: 7,
             fontWeight: 700,
             fontFamily: 'var(--font-mono)',
-            background: track.soloed ? 'rgba(251, 191, 36, 0.25)' : 'rgba(120, 200, 220, 0.06)',
-            border: `1px solid ${track.soloed ? 'rgba(251, 191, 36, 0.5)' : 'var(--border)'}`,
-            color: track.soloed ? aurora.gold : 'var(--text-muted)',
+            background: track.soloed ? 'rgba(214, 190, 138, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+            border: `1px solid ${track.soloed ? 'rgba(214, 190, 138, 0.4)' : 'var(--border)'}`,
+            color: track.soloed ? 'var(--warning)' : 'var(--text-muted)',
             cursor: 'pointer',
           }}
           onClick={(e) => { e.stopPropagation(); onToggleSolo(); }}
@@ -432,7 +432,7 @@ const TrackItem: React.FC<TrackItemProps> = ({
               fontSize: 7,
               fontWeight: 700,
               fontFamily: 'var(--font-mono)',
-              background: track.armed ? 'rgba(239, 68, 68, 0.3)' : 'rgba(120, 200, 220, 0.06)',
+              background: track.armed ? 'rgba(239, 68, 68, 0.3)' : 'rgba(255, 255, 255, 0.04)',
               border: `1px solid ${track.armed ? 'rgba(239, 68, 68, 0.6)' : 'var(--border)'}`,
               color: track.armed ? '#ef4444' : 'var(--text-muted)',
               cursor: 'pointer',
@@ -523,7 +523,7 @@ export const TrackList: React.FC<TrackListProps> = ({
       className="flex flex-col h-full"
       style={{
         width: 200,
-        background: 'rgba(8, 14, 24, 0.6)',
+        background: 'rgba(10, 10, 11, 0.82)',
         borderRight: '1px solid var(--border)',
       }}
     >

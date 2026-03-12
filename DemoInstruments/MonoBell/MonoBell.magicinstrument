@@ -1,0 +1,38 @@
+{
+  "envelope": {
+    "attack": 0.01,
+    "decay": 0.12,
+    "release": 0.2,
+    "sustain": 0.85
+  },
+  "filter": {
+    "cutoff": 14000,
+    "envAmount": 0,
+    "keyTracking": 0,
+    "resonance": 0.04,
+    "type": "lowpass"
+  },
+  "name": "Mono Bell Test",
+  "pitchBendRange": 2,
+  "polyphony": 8,
+  "portamento": null,
+  "roundRobin": false,
+  "type": "sampler",
+  "velocityLayers": 1,
+  "version": 1,
+  "zones": [
+    {
+      "highNote": 127,
+      "highVelocity": 127,
+      "id": "5A4C4E73-5B61-4E0A-8A68-A0A0E4D3C101",
+      "loopEnd": null,
+      "loopStart": null,
+      "lowNote": 0,
+      "lowVelocity": 0,
+      "rootNote": 60,
+      "sampleFile": "samples/bell_c4.wav",
+      "trigger": "attack",
+      "tuning": 0
+    }
+  ]
+}

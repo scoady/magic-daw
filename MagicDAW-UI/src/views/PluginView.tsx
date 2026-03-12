@@ -18,12 +18,10 @@ import {
 import { Player } from '@remotion/player';
 import {
   aurora,
-  mockPluginNodes,
-  mockPluginConnections,
-  hexToRgba,
 } from '../mockData';
 import { sendToSwift, onSwiftMessage, BridgeMessages } from '../bridge';
 import type { PluginNode, PluginConnection } from '../types/daw';
+import type { SavedPluginGraphSummary } from '../bridge';
 import { LiveNodeGraph } from '../compositions/LiveNodeGraph';
 
 const NODE_WIDTH = 200;
@@ -49,6 +47,13 @@ const NODE_TYPE_ICONS: Record<string, React.ReactNode> = {
   math: <Calculator size={12} />,
   output: <Speaker size={12} />,
 };
+
+const STARTER_TEMPLATES: { id: string; label: string; description: string }[] = [
+  { id: 'basic-synth', label: 'Basic Synth', description: 'Oscillator into filter into output.' },
+  { id: 'bass-voice', label: 'Bass Voice', description: 'Tighter mono bass chain with drive.' },
+  { id: 'noise-fx', label: 'Noise FX', description: 'Noise source through delay for risers and sweeps.' },
+  { id: 'empty', label: 'Empty Graph', description: 'Clean slate with just an output node.' },
+];
 
 // Maps palette items to Swift-side DSP node types
 const PALETTE_ITEMS: { type: string; name: string; items: { label: string; nodeType: string; defaults: Record<string, number> }[] }[] = [
@@ -117,18 +122,26 @@ interface ExportState {
   status: 'idle' | 'compiling' | 'building' | 'done' | 'error';
   message: string;
   outputPath?: string;
+  logPath?: string;
 }
 
-export const PluginView: React.FC = () => {
+interface PluginViewProps {
+  selectedTrackId?: string | null;
+}
+
+export const PluginView: React.FC<PluginViewProps> = ({ selectedTrackId = null }) => {
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
-  const [nodes, setNodes] = useState<PluginNode[]>(mockPluginNodes);
-  const [connections, setConnections] = useState<PluginConnection[]>(mockPluginConnections);
+  const [nodes, setNodes] = useState<PluginNode[]>([]);
+  const [connections, setConnections] = useState<PluginConnection[]>([]);
   const [validationErrors, setValidationErrors] = useState<ValidationError[]>([]);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [previewLevels, setPreviewLevels] = useState({ left: 0, right: 0 });
   const [exportState, setExportState] = useState<ExportState>({ status: 'idle', message: '' });
+  const [exportLogCopied, setExportLogCopied] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [savedGraphs, setSavedGraphs] = useState<SavedPluginGraphSummary[]>([]);
+  const [saveMessage, setSaveMessage] = useState<string>('');
 
   // Connection drawing state
   const [connectingFrom, setConnectingFrom] = useState<{ nodeId: string; port: string } | null>(null);
@@ -162,12 +175,22 @@ export const PluginView: React.FC = () => {
         setExportState({ status: data.stage as ExportState['status'], message: data.message });
       }),
       onSwiftMessage(BridgeMessages.PLUGIN_EXPORT_RESULT, (payload: unknown) => {
-        const data = payload as { success: boolean; path?: string; error?: string };
+        const data = payload as { success: boolean; path?: string; error?: string; message?: string; logPath?: string };
         if (data.success) {
-          setExportState({ status: 'done', message: `Exported to ${data.path}`, outputPath: data.path });
+          setExportState({
+            status: 'done',
+            message: data.message ?? `Exported to ${data.path}`,
+            outputPath: data.path,
+            logPath: data.logPath,
+          });
         } else {
-          setExportState({ status: 'error', message: data.error ?? 'Export failed' });
+          setExportState({
+            status: 'error',
+            message: data.error ?? 'Export failed',
+            logPath: data.logPath,
+          });
         }
+        setExportLogCopied(false);
       }),
       onSwiftMessage(BridgeMessages.PLUGIN_AI_RESULT, (payload: unknown) => {
         const data = payload as { nodes: PluginNode[]; connections: PluginConnection[]; error?: string };
@@ -179,8 +202,22 @@ export const PluginView: React.FC = () => {
           if (data.connections) setConnections(data.connections);
         }
       }),
+      onSwiftMessage(BridgeMessages.PLUGIN_SAVED_LIST, (payload: unknown) => {
+        const data = payload as { graphs?: SavedPluginGraphSummary[] };
+        setSavedGraphs(data.graphs ?? []);
+      }),
+      onSwiftMessage(BridgeMessages.PLUGIN_SAVED, (payload: unknown) => {
+        const data = payload as { name?: string };
+        setSaveMessage(data.name ? `Saved ${data.name}` : 'Graph saved');
+      }),
     ];
+    sendToSwift(BridgeMessages.PLUGIN_SYNC_GRAPH, {});
+    sendToSwift(BridgeMessages.PLUGIN_LIST_SAVED, {});
     return () => unsubs.forEach((u) => u());
+  }, []);
+
+  useEffect(() => () => {
+    sendToSwift(BridgeMessages.PLUGIN_PREVIEW_STOP, {});
   }, []);
 
   // Handle adding a node from palette
@@ -376,11 +413,54 @@ export const PluginView: React.FC = () => {
     }
   }, [isPreviewing]);
 
+  const handleLoadTemplate = useCallback((templateId: string) => {
+    setSelectedNodeId(null);
+    setConnectingFrom(null);
+    setExportState({ status: 'idle', message: '' });
+    setExportLogCopied(false);
+    setSaveMessage('');
+    sendToSwift(BridgeMessages.PLUGIN_LOAD_TEMPLATE, { templateId });
+  }, []);
+
+  const handlePreviewNote = useCallback(() => {
+    sendToSwift(BridgeMessages.PLUGIN_PREVIEW_NOTE, { note: 60 });
+  }, []);
+
+  const handleSaveGraph = useCallback(() => {
+    setSaveMessage('Saving graph...');
+    sendToSwift(BridgeMessages.PLUGIN_SAVE_GRAPH, {});
+  }, []);
+
+  const handleAssignToTrack = useCallback(() => {
+    if (!selectedTrackId) return;
+    sendToSwift(BridgeMessages.PLUGIN_ASSIGN_TO_TRACK, { trackId: selectedTrackId });
+    setSaveMessage('Saved and assigned to selected track');
+  }, [selectedTrackId]);
+
+  const handleLoadSavedGraph = useCallback((path: string) => {
+    setSelectedNodeId(null);
+    setConnectingFrom(null);
+    setSaveMessage('');
+    sendToSwift(BridgeMessages.PLUGIN_LOAD_SAVED, { path });
+  }, []);
+
   // Handle export
   const handleExport = useCallback(() => {
+    setExportLogCopied(false);
     setExportState({ status: 'compiling', message: 'Compiling node graph...' });
     sendToSwift(BridgeMessages.EXPORT_AUV3, {});
   }, []);
+
+  const handleCopyExportLog = useCallback(async () => {
+    if (!exportState.message) return;
+    try {
+      await navigator.clipboard.writeText(exportState.message);
+      setExportLogCopied(true);
+      window.setTimeout(() => setExportLogCopied(false), 1600);
+    } catch {
+      setExportLogCopied(false);
+    }
+  }, [exportState.message]);
 
   // Handle AI generate
   const handleAIGenerate = useCallback(() => {
@@ -424,6 +504,98 @@ export const PluginView: React.FC = () => {
           borderRight: '1px solid var(--border)',
         }}
       >
+        <div
+          className="glass-panel"
+          style={{
+            padding: 8,
+            marginBottom: 8,
+            background: 'rgba(255,255,255,0.03)',
+            borderColor: 'rgba(255,255,255,0.08)',
+          }}
+        >
+          <div
+            style={{
+              fontSize: 8,
+              color: 'var(--text-muted)',
+              letterSpacing: '0.1em',
+              textTransform: 'uppercase',
+              marginBottom: 6,
+            }}
+          >
+            Quick Start
+          </div>
+          <div style={{ fontSize: 8, color: 'var(--text-dim)', lineHeight: 1.45, marginBottom: 8 }}>
+            Start with a template, then tweak node params and connections. Export writes an AUv3 bundle to your Desktop.
+          </div>
+          <div className="flex flex-col gap-1">
+            {STARTER_TEMPLATES.map((template) => (
+              <button
+                key={template.id}
+                className="glass-panel glass-panel-hover text-left"
+                style={{
+                  padding: '6px 8px',
+                  borderRadius: 6,
+                  borderColor: 'rgba(255,255,255,0.08)',
+                }}
+                onClick={() => handleLoadTemplate(template.id)}
+                title={template.description}
+              >
+                <div style={{ fontSize: 8.5, color: 'var(--text)', fontWeight: 600 }}>{template.label}</div>
+                <div style={{ fontSize: 7.5, color: 'var(--text-muted)', marginTop: 1 }}>{template.description}</div>
+              </button>
+            ))}
+          </div>
+          {saveMessage && (
+            <div style={{ fontSize: 7.5, color: 'var(--text-muted)', marginTop: 8 }}>
+              {saveMessage}
+            </div>
+          )}
+        </div>
+
+        {savedGraphs.length > 0 && (
+          <div
+            className="glass-panel"
+            style={{
+              padding: 8,
+              marginBottom: 8,
+              background: 'rgba(255,255,255,0.03)',
+              borderColor: 'rgba(255,255,255,0.08)',
+            }}
+          >
+            <div
+              style={{
+                fontSize: 8,
+                color: 'var(--text-muted)',
+                letterSpacing: '0.1em',
+                textTransform: 'uppercase',
+                marginBottom: 6,
+              }}
+            >
+              Saved Graphs
+            </div>
+            <div className="flex flex-col gap-1">
+              {savedGraphs.slice(0, 6).map((graph) => (
+                <button
+                  key={graph.path}
+                  className="glass-panel glass-panel-hover text-left"
+                  style={{
+                    padding: '6px 8px',
+                    borderRadius: 6,
+                    borderColor: 'rgba(255,255,255,0.08)',
+                  }}
+                  onClick={() => handleLoadSavedGraph(graph.path)}
+                  title={graph.description || graph.name}
+                >
+                  <div style={{ fontSize: 8.5, color: 'var(--text)', fontWeight: 600 }}>{graph.name}</div>
+                  <div style={{ fontSize: 7.5, color: 'var(--text-muted)', marginTop: 1 }}>
+                    {graph.category === 'instrument' ? 'Graph synth' : 'Effect graph'}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <span
           style={{
             fontSize: 8,
@@ -516,20 +688,35 @@ export const PluginView: React.FC = () => {
 
           {/* Preview toggle */}
           <button
-            className="glass-button flex items-center justify-center"
+            className="glass-button flex items-center gap-1.5 px-2 py-1"
             style={{
-              width: 32,
-              height: 28,
               background: isPreviewing ? 'rgba(248,113,113,0.15)' : 'rgba(52,211,153,0.15)',
               borderColor: isPreviewing ? 'rgba(248,113,113,0.3)' : 'rgba(52,211,153,0.3)',
             }}
             onClick={handlePreviewToggle}
+            title="The current preview meters the graph state. It is not a full audible audition path yet."
           >
             {isPreviewing ? (
               <Square size={10} style={{ color: '#f87171' }} />
             ) : (
               <Play size={12} style={{ color: aurora.green }} />
             )}
+            <span style={{ fontSize: 8, color: isPreviewing ? '#f87171' : aurora.green }}>
+              {isPreviewing ? 'Stop Meter' : 'Meter Preview'}
+            </span>
+          </button>
+
+          <button
+            className="glass-button flex items-center gap-1.5 px-2 py-1"
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              borderColor: 'rgba(255,255,255,0.12)',
+              color: 'var(--text)',
+            }}
+            onClick={handlePreviewNote}
+          >
+            <Play size={10} />
+            <span style={{ fontSize: 8 }}>Audition C3</span>
           </button>
 
           <div style={{ width: 1, height: 20, background: 'var(--border)' }} />
@@ -546,6 +733,34 @@ export const PluginView: React.FC = () => {
               <CheckCircle size={12} style={{ color: aurora.green }} />
               <span style={{ fontSize: 8, color: aurora.green }}>Valid</span>
             </div>
+          )}
+
+          <button
+            className="glass-button flex items-center gap-1.5 px-2 py-1"
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              borderColor: 'rgba(255,255,255,0.12)',
+              color: 'var(--text)',
+            }}
+            onClick={handleSaveGraph}
+          >
+            <Download size={10} />
+            <span style={{ fontSize: 8 }}>Save Synth</span>
+          </button>
+
+          {selectedTrackId && (
+            <button
+              className="glass-button flex items-center gap-1.5 px-2 py-1"
+              style={{
+                background: 'rgba(216,219,225,0.12)',
+                borderColor: 'rgba(216,219,225,0.18)',
+                color: 'var(--text)',
+              }}
+              onClick={handleAssignToTrack}
+            >
+              <CheckCircle size={10} />
+              <span style={{ fontSize: 8 }}>Use On Selected Track</span>
+            </button>
           )}
 
           <button
@@ -583,20 +798,75 @@ export const PluginView: React.FC = () => {
         {/* Export status message */}
         {exportState.status !== 'idle' && exportState.message && (
           <div
-            className="px-3 py-1"
             style={{
-              fontSize: 8,
-              fontFamily: 'var(--font-mono)',
-              color: exportState.status === 'error' ? '#f87171' :
-                     exportState.status === 'done' ? aurora.green :
-                     aurora.gold,
-              background: 'rgba(0,0,0,0.2)',
+              background: 'rgba(0,0,0,0.22)',
               borderBottom: '1px solid var(--border)',
             }}
           >
-            {exportState.message}
+            <div
+              className="flex items-center justify-between gap-2 px-3 py-1"
+              style={{
+                fontSize: 8,
+                fontFamily: 'var(--font-mono)',
+                color: exportState.status === 'error' ? '#f87171' :
+                       exportState.status === 'done' ? aurora.green :
+                       aurora.gold,
+              }}
+            >
+              <span>
+                {exportState.status === 'error' ? 'Export failed. Full log below.' : exportState.message.split('\n')[0]}
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  className="glass-button px-2 py-1"
+                  style={{ fontSize: 8 }}
+                  onClick={handleCopyExportLog}
+                >
+                  {exportLogCopied ? 'Copied' : 'Copy Log'}
+                </button>
+                {exportState.logPath && (
+                  <span style={{ color: 'var(--text-muted)' }}>{exportState.logPath}</span>
+                )}
+              </div>
+            </div>
+            <textarea
+              readOnly
+              value={exportState.message}
+              spellCheck={false}
+              style={{
+                width: '100%',
+                minHeight: exportState.status === 'error' ? 140 : 64,
+                maxHeight: 220,
+                resize: 'vertical',
+                overflow: 'auto',
+                padding: '8px 12px',
+                background: 'rgba(0,0,0,0.38)',
+                color: exportState.status === 'error' ? '#fca5a5' : 'var(--text)',
+                border: 'none',
+                outline: 'none',
+                borderTop: '1px solid rgba(255,255,255,0.05)',
+                fontSize: 8,
+                lineHeight: 1.45,
+                fontFamily: 'var(--font-mono)',
+                userSelect: 'text',
+                WebkitUserSelect: 'text',
+              }}
+            />
           </div>
         )}
+
+        <div
+          className="px-3 py-1.5"
+          style={{
+            fontSize: 8,
+            fontFamily: 'var(--font-mono)',
+            color: 'var(--text-muted)',
+            background: 'rgba(255,255,255,0.02)',
+            borderBottom: '1px solid rgba(255,255,255,0.06)',
+          }}
+        >
+          Use a starter graph or AI prompt first. `Audition C3` plays the current graph internally, `Save Synth` stores it for reuse, and `Use On Selected Track` pushes it into Arrange.
+        </div>
 
         {/* Remotion Player + Interactive Overlay */}
         <div

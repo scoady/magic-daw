@@ -1061,7 +1061,7 @@ export const EditView: React.FC<EditViewProps> = ({
             >
               {t.icon}
               <span style={{ fontSize: 8 }}>{t.label}</span>
-              <span style={{ fontSize: 7, color: 'var(--text-muted)', opacity: 0.6 }}>{shortcutKey}</span>
+              <span style={{ fontSize: 9, color: 'var(--text-muted)', opacity: 0.6 }}>{shortcutKey}</span>
             </button>
           );
         })}

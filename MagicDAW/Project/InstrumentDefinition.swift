@@ -4,8 +4,8 @@ import Foundation
 
 /// Represents a complete instrument definition stored as a .magicinstrument file
 /// within the project bundle's instruments/ directory.
-struct InstrumentDefinition: Codable {
-    let name: String
+struct InstrumentDefinition: Codable, Sendable {
+    var name: String
     let type: InstrumentType
     let version: Int
 
@@ -23,6 +23,8 @@ struct InstrumentDefinition: Codable {
     var polyphony: Int
     var portamento: Float?          // glide time in ms (0 = off)
     var pitchBendRange: UInt8       // semitones
+    var outputGain: Float
+    var outputPan: Float
 
     init(name: String, type: InstrumentType) {
         self.name = name
@@ -37,6 +39,8 @@ struct InstrumentDefinition: Codable {
         self.polyphony = 16
         self.portamento = nil
         self.pitchBendRange = 2
+        self.outputGain = 1.0
+        self.outputPan = 0.0
     }
 
     // MARK: - Save / Load
@@ -69,6 +73,7 @@ struct InstrumentDefinition: Codable {
     mutating func addSingleKeyZone(sampleFile: String, note: UInt8) {
         let zone = SampleZone(
             sampleFile: sampleFile,
+            trigger: .attack,
             rootNote: note,
             lowNote: note,
             highNote: note,
@@ -86,6 +91,7 @@ struct InstrumentDefinition: Codable {
     mutating func addRangeZone(sampleFile: String, rootNote: UInt8, lowNote: UInt8, highNote: UInt8) {
         let zone = SampleZone(
             sampleFile: sampleFile,
+            trigger: .attack,
             rootNote: rootNote,
             lowNote: lowNote,
             highNote: highNote,
@@ -102,10 +108,11 @@ struct InstrumentDefinition: Codable {
 
 // MARK: - SampleZone
 
-struct SampleZone: Codable, Identifiable {
+struct SampleZone: Codable, Identifiable, Sendable {
     var id: UUID = UUID()
 
-    let sampleFile: String   // relative path within instruments/ directory
+    var sampleFile: String   // relative path within instruments/ directory
+    var trigger: SampleTrigger = .attack
     let rootNote: UInt8      // the note at which the sample plays at original pitch
     let lowNote: UInt8       // lowest note in the zone range
     let highNote: UInt8      // highest note in the zone range
@@ -115,6 +122,51 @@ struct SampleZone: Codable, Identifiable {
     var loopEnd: Int?        // loop end point in samples
     var tuning: Double       // fine tuning in cents (-100 to +100)
 
+    enum CodingKeys: String, CodingKey {
+        case id, sampleFile, trigger, rootNote, lowNote, highNote, lowVelocity, highVelocity, loopStart, loopEnd, tuning
+    }
+
+    init(
+        id: UUID = UUID(),
+        sampleFile: String,
+        trigger: SampleTrigger = .attack,
+        rootNote: UInt8,
+        lowNote: UInt8,
+        highNote: UInt8,
+        lowVelocity: UInt8,
+        highVelocity: UInt8,
+        loopStart: Int?,
+        loopEnd: Int?,
+        tuning: Double
+    ) {
+        self.id = id
+        self.sampleFile = sampleFile
+        self.trigger = trigger
+        self.rootNote = rootNote
+        self.lowNote = lowNote
+        self.highNote = highNote
+        self.lowVelocity = lowVelocity
+        self.highVelocity = highVelocity
+        self.loopStart = loopStart
+        self.loopEnd = loopEnd
+        self.tuning = tuning
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        sampleFile = try container.decode(String.self, forKey: .sampleFile)
+        trigger = try container.decodeIfPresent(SampleTrigger.self, forKey: .trigger) ?? .attack
+        rootNote = try container.decode(UInt8.self, forKey: .rootNote)
+        lowNote = try container.decode(UInt8.self, forKey: .lowNote)
+        highNote = try container.decode(UInt8.self, forKey: .highNote)
+        lowVelocity = try container.decode(UInt8.self, forKey: .lowVelocity)
+        highVelocity = try container.decode(UInt8.self, forKey: .highVelocity)
+        loopStart = try container.decodeIfPresent(Int.self, forKey: .loopStart)
+        loopEnd = try container.decodeIfPresent(Int.self, forKey: .loopEnd)
+        tuning = try container.decodeIfPresent(Double.self, forKey: .tuning) ?? 0.0
+    }
+
     /// Pitch ratio needed to play this sample at a given MIDI note
     func pitchRatio(forNote note: UInt8) -> Double {
         let semitones = Double(Int(note) - Int(rootNote)) + (tuning / 100.0)
@@ -122,9 +174,14 @@ struct SampleZone: Codable, Identifiable {
     }
 }
 
+enum SampleTrigger: String, Codable, CaseIterable, Sendable {
+    case attack
+    case release
+}
+
 // MARK: - ADSRParameters
 
-struct ADSRParameters: Codable, Hashable {
+struct ADSRParameters: Codable, Hashable, Sendable {
     var attack: Float    // seconds (0.001 - 10.0)
     var decay: Float     // seconds (0.001 - 10.0)
     var sustain: Float   // level 0.0 - 1.0
@@ -146,7 +203,7 @@ struct ADSRParameters: Codable, Hashable {
 
 // MARK: - FilterParameters
 
-struct FilterParameters: Codable, Hashable {
+struct FilterParameters: Codable, Hashable, Sendable {
     var type: FilterType
     var cutoff: Float       // Hz (20 - 20000)
     var resonance: Float    // 0.0 - 1.0 (maps to Q factor)

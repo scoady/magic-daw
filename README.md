@@ -139,6 +139,13 @@ The Swift app provides the audio engine, MIDI handling, and AI client. The UI is
 
 ---
 
+## Planning Docs
+
+- [Production Roadmap](docs/PRODUCTION_ROADMAP.md)
+- [Active Implementation Plan](docs/ACTIVE_IMPLEMENTATION_PLAN.md)
+
+---
+
 ## License
 
 MIT

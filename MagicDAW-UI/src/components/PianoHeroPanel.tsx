@@ -845,9 +845,9 @@ export const PianoHeroPanel: React.FC = () => {
                 onKeyDown={e => e.key === 'Enter' && handleAiGenerate()}
                 placeholder="Describe a melody..."
                 style={{
-                  flex: 1, background: 'rgba(15,25,40,0.8)', color: '#e2e8f0',
+                  flex: 1, background: 'rgba(15,25,40,0.8)', color: 'var(--text)',
                   border: '1px solid rgba(103,232,249,0.15)', borderRadius: 4,
-                  padding: '4px 8px', fontSize: 10, fontFamily: 'monospace',
+                  padding: '4px 8px', fontSize: 10, fontFamily: 'var(--font-mono)',
                   outline: 'none',
                 }}
               />
@@ -856,9 +856,9 @@ export const PianoHeroPanel: React.FC = () => {
                 disabled={aiGenerating || !aiPrompt.trim()}
                 style={{
                   background: aiGenerating ? 'rgba(103,232,249,0.05)' : 'rgba(103,232,249,0.12)',
-                  color: '#67e8f9', border: '1px solid rgba(103,232,249,0.2)',
+                  color: 'var(--cyan)', border: '1px solid rgba(103,232,249,0.2)',
                   borderRadius: 4, padding: '4px 8px', fontSize: 9,
-                  fontFamily: 'monospace', fontWeight: 700, cursor: 'pointer',
+                  fontFamily: 'var(--font-mono)', fontWeight: 700, cursor: 'pointer',
                   opacity: aiGenerating ? 0.5 : 1,
                   whiteSpace: 'nowrap',
                 }}
@@ -868,18 +868,18 @@ export const PianoHeroPanel: React.FC = () => {
             </div>
             <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
               <button onClick={handleImportFile} style={{
-                flex: 1, background: 'rgba(15,25,40,0.6)', color: '#94a3b8',
+                flex: 1, background: 'rgba(15,25,40,0.6)', color: 'var(--text-dim)',
                 border: '1px solid rgba(120,200,220,0.1)', borderRadius: 4,
-                padding: '3px 6px', fontSize: 8, fontFamily: 'monospace',
+                padding: '3px 6px', fontSize: 8, fontFamily: 'var(--font-mono)',
                 cursor: 'pointer',
               }}>
                 Import File
               </button>
               <button onClick={handleAiVariation} disabled={!selectedSong || aiGenerating}
                 style={{
-                  flex: 1, background: 'rgba(167,139,250,0.08)', color: '#a78bfa',
+                  flex: 1, background: 'rgba(167,139,250,0.08)', color: 'var(--purple)',
                   border: '1px solid rgba(167,139,250,0.15)', borderRadius: 4,
-                  padding: '3px 6px', fontSize: 8, fontFamily: 'monospace',
+                  padding: '3px 6px', fontSize: 8, fontFamily: 'var(--font-mono)',
                   cursor: 'pointer', opacity: !selectedSong || aiGenerating ? 0.4 : 1,
                 }}>
                 AI Variation
@@ -889,15 +889,15 @@ export const PianoHeroPanel: React.FC = () => {
               <button onClick={handleBrowseMuseScore}
                 style={{
                   display: 'block', width: '100%', textAlign: 'center',
-                  background: 'rgba(45,212,191,0.06)', color: '#2dd4bf',
+                  background: 'rgba(45,212,191,0.06)', color: 'var(--teal)',
                   border: '1px solid rgba(45,212,191,0.12)', borderRadius: 4,
-                  padding: '3px 6px', fontSize: 8, fontFamily: 'monospace',
+                  padding: '3px 6px', fontSize: 8, fontFamily: 'var(--font-mono)',
                   cursor: 'pointer',
                 }}>
                 Browse MuseScore.com →
               </button>
               <div style={{
-                color: '#64748b', fontSize: 7, fontFamily: 'monospace',
+                color: 'var(--text-muted)', fontSize: 9, fontFamily: 'var(--font-mono)',
                 textAlign: 'center', marginTop: 2, opacity: 0.6,
               }}>
                 Download MIDI or MusicXML, then Import
@@ -909,8 +909,8 @@ export const PianoHeroPanel: React.FC = () => {
           <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
             {/* Built-in header */}
             <div style={{
-              padding: '4px 10px', color: '#64748b', fontSize: 8,
-              fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em',
+              padding: '4px 10px', color: 'var(--text-muted)', fontSize: 8,
+              fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.1em',
             }}>
               Built-in Songs
             </div>
@@ -922,8 +922,8 @@ export const PianoHeroPanel: React.FC = () => {
             {userSongs.length > 0 && (
               <>
                 <div style={{
-                  padding: '8px 10px 4px', color: '#64748b', fontSize: 8,
-                  fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em',
+                  padding: '8px 10px 4px', color: 'var(--text-muted)', fontSize: 8,
+                  fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.1em',
                 }}>
                   My Songs
                 </div>
@@ -966,7 +966,7 @@ export const PianoHeroPanel: React.FC = () => {
         }}>
           {/* Toggle sidebar */}
           <button onClick={() => setShowTrackList(prev => !prev)} style={{
-            background: 'none', border: 'none', color: '#64748b',
+            background: 'none', border: 'none', color: 'var(--text-muted)',
             fontSize: 14, cursor: 'pointer', padding: '2px 4px',
           }} title="Toggle track list">
             {showTrackList ? '◀' : '▶'}
@@ -976,7 +976,7 @@ export const PianoHeroPanel: React.FC = () => {
           <button onClick={handleRestart} style={{
             background: 'rgba(248,113,113,0.1)', color: '#f87171',
             border: '1px solid rgba(248,113,113,0.2)', borderRadius: 4,
-            padding: '4px 10px', fontSize: 11, fontFamily: 'monospace',
+            padding: '4px 10px', fontSize: 11, fontFamily: 'var(--font-mono)',
             fontWeight: 700, cursor: 'pointer',
           }}>
             ↺
@@ -985,10 +985,10 @@ export const PianoHeroPanel: React.FC = () => {
           {/* Play/Pause */}
           <button onClick={handlePlay} style={{
             background: isPlaying ? 'rgba(251,191,36,0.12)' : 'rgba(103,232,249,0.12)',
-            color: isPlaying ? '#fbbf24' : '#67e8f9',
+            color: isPlaying ? 'var(--gold)' : 'var(--cyan)',
             border: `1px solid ${isPlaying ? 'rgba(251,191,36,0.3)' : 'rgba(103,232,249,0.3)'}`,
             borderRadius: 4, padding: '4px 18px', fontSize: 12,
-            fontFamily: 'monospace', fontWeight: 800, cursor: 'pointer',
+            fontFamily: 'var(--font-mono)', fontWeight: 700, cursor: 'pointer',
           }}>
             {isPlaying ? 'Pause' : 'Play'}
           </button>
@@ -996,13 +996,13 @@ export const PianoHeroPanel: React.FC = () => {
           {/* Song info */}
           <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
             <span style={{
-              color: '#e2e8f0', fontSize: 11, fontFamily: 'monospace', fontWeight: 700,
+              color: 'var(--text)', fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700,
             }}>
               {selectedSong?.title ?? 'No song'}
             </span>
             {selectedSong && (
               <span style={{
-                color: '#64748b', fontSize: 9, fontFamily: 'monospace', marginLeft: 8,
+                color: 'var(--text-muted)', fontSize: 9, fontFamily: 'var(--font-mono)', marginLeft: 8,
               }}>
                 {selectedSong.artist} · {selectedSong.bpm} BPM ·{' '}
                 <span style={{ color: diffColor(selectedSong.difficulty) }}>
@@ -1017,10 +1017,10 @@ export const PianoHeroPanel: React.FC = () => {
             onClick={() => setKeyRange(prev => prev === 41 ? 88 : 41)}
             style={{
               background: 'rgba(167,139,250,0.1)',
-              color: '#a78bfa',
+              color: 'var(--purple)',
               border: '1px solid rgba(167,139,250,0.2)',
               borderRadius: 4, padding: '3px 8px', fontSize: 9,
-              fontFamily: 'monospace', fontWeight: 700, cursor: 'pointer',
+              fontFamily: 'var(--font-mono)', fontWeight: 700, cursor: 'pointer',
               whiteSpace: 'nowrap',
             }}
             title={`Switch to ${keyRange === 41 ? '88' : '41'}-key keyboard`}
@@ -1030,7 +1030,7 @@ export const PianoHeroPanel: React.FC = () => {
 
           {/* Timeline */}
           <span style={{
-            color: '#94a3b8', fontSize: 10, fontFamily: 'monospace', opacity: 0.6,
+            color: 'var(--text-dim)', fontSize: 10, fontFamily: 'var(--font-mono)', opacity: 0.6,
           }}>
             {formatTime(currentTime)} / {formatTime(songDuration)}
           </span>
@@ -1038,7 +1038,7 @@ export const PianoHeroPanel: React.FC = () => {
           {/* Score summary */}
           {score.total > 0 && (
             <span style={{
-              color: '#fbbf24', fontSize: 11, fontFamily: 'monospace', fontWeight: 700,
+              color: 'var(--gold)', fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700,
             }}>
               {Math.round(score.hits / score.total * 100)}%
             </span>
@@ -1073,27 +1073,27 @@ const SongRow: React.FC<{
     >
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{
-          color: selected ? '#e2e8f0' : '#94a3b8',
-          fontSize: 10, fontFamily: 'monospace', fontWeight: selected ? 700 : 500,
+          color: selected ? 'var(--text)' : 'var(--text-dim)',
+          fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: selected ? 700 : 500,
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}>
           {song.title}
         </div>
         <div style={{
-          color: '#64748b', fontSize: 8, fontFamily: 'monospace',
+          color: 'var(--text-muted)', fontSize: 8, fontFamily: 'var(--font-mono)',
           display: 'flex', gap: 6,
         }}>
           <span>{song.artist}</span>
           <span style={{ color: diffColor }}>{song.difficulty}</span>
           <span>{song.notes.length} notes</span>
-          {song.aiGenerated && <span style={{ color: '#a78bfa' }}>AI</span>}
+          {song.aiGenerated && <span style={{ color: 'var(--purple)' }}>AI</span>}
         </div>
       </div>
       {onDelete && (
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(song.id); }}
           style={{
-            background: 'none', border: 'none', color: '#64748b',
+            background: 'none', border: 'none', color: 'var(--text-muted)',
             fontSize: 10, cursor: 'pointer', padding: '0 2px',
             opacity: 0.4,
           }}

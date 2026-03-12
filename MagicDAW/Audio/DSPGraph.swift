@@ -47,6 +47,12 @@ class DSPGraph {
         nodes[node.id] = node
     }
 
+    func setParameter(nodeId: String, name: String, value: Float) {
+        guard var node = nodes[nodeId] else { return }
+        node.parameters[name] = value
+        nodes[nodeId] = node
+    }
+
     func connect(from: String, fromPort: String, to: String, toPort: String) {
         let conn = DSPConnection(fromNode: from, fromPort: fromPort, toNode: to, toPort: toPort)
         connections.append(conn)
@@ -450,7 +456,9 @@ struct DelayNode: DSPNode {
         }
 
         var output = [Float](repeating: 0.0, count: frameCount)
-        let delayTimeSamples = min(maxDelaySamples - 1, max(1, Int(Double(parameters["time", default: 0.25]) * sampleRate)))
+        let rawTime = Double(parameters["time", default: 0.25])
+        let delayTimeSeconds = rawTime > 10.0 ? rawTime / 1000.0 : rawTime
+        let delayTimeSamples = min(maxDelaySamples - 1, max(1, Int(delayTimeSeconds * sampleRate)))
         let feedback = max(0.0, min(0.99, parameters["feedback", default: 0.4]))
         let mix = parameters["mix", default: 0.5]
 
@@ -524,9 +532,32 @@ struct MixNode: DSPNode {
 
     mutating func process(frameCount: Int, sampleRate: Double) -> [Float] {
         var output = [Float](repeating: 0.0, count: frameCount)
-        let crossfade = parameters["crossfade", default: 0.5]
-        let inputA = inputs["inputA"] ?? [Float](repeating: 0.0, count: frameCount)
-        let inputB = inputs["inputB"] ?? [Float](repeating: 0.0, count: frameCount)
+        let crossfade = parameters["crossfade"] ?? parameters["mix"] ?? 0.5
+        let inputA = inputs["inputA"] ?? inputs["input1"] ?? [Float](repeating: 0.0, count: frameCount)
+        let inputB = inputs["inputB"] ?? inputs["input2"] ?? [Float](repeating: 0.0, count: frameCount)
+
+        let numberedInputs = inputs
+            .filter { $0.key.hasPrefix("input") && $0.key != "inputA" && $0.key != "inputB" }
+            .sorted { $0.key < $1.key }
+
+        if !numberedInputs.isEmpty {
+            let activeInputs = numberedInputs.map(\.value).filter { !$0.isEmpty }
+            guard !activeInputs.isEmpty else {
+                return output
+            }
+
+            for signal in activeInputs {
+                let count = min(frameCount, signal.count)
+                for i in 0..<count {
+                    output[i] += signal[i]
+                }
+            }
+
+            let normalization = 1.0 / Float(activeInputs.count)
+            var gain = normalization
+            vDSP_vsmul(output, 1, &gain, &output, 1, vDSP_Length(frameCount))
+            return output
+        }
 
         // Use vDSP for efficient mixing
         var scaledA = [Float](repeating: 0.0, count: frameCount)

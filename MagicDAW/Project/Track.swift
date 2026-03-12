@@ -27,6 +27,9 @@ class Track: Codable, Identifiable {
     // Instrument (MIDI tracks only)
     var instrument: InstrumentRef?
 
+    // Automation lanes
+    var automation: [TrackAutomationLane]
+
     // Output routing (nil = master bus)
     var outputBusId: UUID?
 
@@ -41,6 +44,7 @@ class Track: Codable, Identifiable {
         self.effects = []
         self.sends = []
         self.instrument = nil
+        self.automation = []
         self.outputBusId = nil
     }
 
@@ -49,7 +53,7 @@ class Track: Codable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, name, type, color, clips, volume, pan
         case isMuted, isSoloed, isArmed, height
-        case effects, sends, instrument, outputBusId
+        case effects, sends, instrument, automation, outputBusId
     }
 
     required init(from decoder: Decoder) throws {
@@ -68,6 +72,7 @@ class Track: Codable, Identifiable {
         effects = try container.decodeIfPresent([EffectSlot].self, forKey: .effects) ?? []
         sends = try container.decodeIfPresent([SendLevel].self, forKey: .sends) ?? []
         instrument = try container.decodeIfPresent(InstrumentRef.self, forKey: .instrument)
+        automation = try container.decodeIfPresent([TrackAutomationLane].self, forKey: .automation) ?? []
         outputBusId = try container.decodeIfPresent(UUID.self, forKey: .outputBusId)
     }
 
@@ -87,6 +92,7 @@ class Track: Codable, Identifiable {
         try container.encode(effects, forKey: .effects)
         try container.encode(sends, forKey: .sends)
         try container.encodeIfPresent(instrument, forKey: .instrument)
+        try container.encode(automation, forKey: .automation)
         try container.encodeIfPresent(outputBusId, forKey: .outputBusId)
     }
 
@@ -183,6 +189,57 @@ class Track: Codable, Identifiable {
         let angle = (Double(pan) + 1.0) * .pi / 4.0
         return linearGain * Float(sin(angle))
     }
+
+    func automationValue(for type: TrackAutomationLane.AutomationType, atBar bar: Double) -> Float? {
+        guard let lane = automation.first(where: { $0.type == type && $0.enabled && !$0.points.isEmpty }) else {
+            return nil
+        }
+        return lane.value(atBar: bar)
+    }
+}
+
+struct TrackAutomationLane: Codable, Identifiable {
+    enum AutomationType: String, Codable, Sendable {
+        case volume
+        case pan
+    }
+
+    let id: String
+    var type: AutomationType
+    var points: [AutomationPoint]
+    var enabled: Bool
+
+    init(id: String, type: AutomationType, points: [AutomationPoint], enabled: Bool = true) {
+        self.id = id
+        self.type = type
+        self.points = points.sorted { $0.bar < $1.bar }
+        self.enabled = enabled
+    }
+
+    func value(atBar bar: Double) -> Float? {
+        let sortedPoints = points.sorted { $0.bar < $1.bar }
+        guard let first = sortedPoints.first else { return nil }
+        if bar <= first.bar { return first.value }
+        guard let last = sortedPoints.last else { return first.value }
+        if bar >= last.bar { return last.value }
+
+        for index in 0..<(sortedPoints.count - 1) {
+            let left = sortedPoints[index]
+            let right = sortedPoints[index + 1]
+            if bar >= left.bar && bar <= right.bar {
+                let span = max(0.0001, right.bar - left.bar)
+                let fraction = Float((bar - left.bar) / span)
+                return left.value + (right.value - left.value) * fraction
+            }
+        }
+
+        return last.value
+    }
+}
+
+struct AutomationPoint: Codable, Hashable, Sendable {
+    var bar: Double
+    var value: Float
 }
 
 // MARK: - TrackType
@@ -351,6 +408,9 @@ struct InstrumentRef: Codable {
     var type: InstrumentType
     var name: String
     var path: String?   // relative path to .magicinstrument file within project bundle
+    var gmProgram: UInt8?
+    var bankMSB: UInt8?
+    var presetId: UUID?
 }
 
 // MARK: - InstrumentType

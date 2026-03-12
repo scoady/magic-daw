@@ -6,6 +6,10 @@ class MIDIPlayer {
     /// The sampler to trigger notes on.
     weak var sampler: Sampler?
 
+    /// Optional per-track note routing, used when playback should respect track instruments.
+    var onTrackNoteOn: ((UInt8, UInt8, UInt8, UUID) -> Void)?
+    var onTrackNoteOff: ((UInt8, UInt8, UUID) -> Void)?
+
     /// The MIDI manager for sending notes to external devices.
     weak var midiManager: MIDIManager?
 
@@ -138,7 +142,7 @@ class MIDIPlayer {
 
         for (key, scheduled) in activePlaybackNotes {
             if currentBeat >= scheduled.offBeat {
-                triggerNoteOff(note: scheduled.note, channel: scheduled.channel)
+                triggerNoteOff(note: scheduled.note, channel: scheduled.channel, trackID: key.trackID)
                 keysToRemove.append(key)
             }
         }
@@ -149,8 +153,11 @@ class MIDIPlayer {
     }
 
     private func triggerNoteOn(note: UInt8, velocity: UInt8, channel: UInt8, trackID: UUID) {
-        // Play through sampler
-        sampler?.noteOn(note: note, velocity: velocity)
+        if let onTrackNoteOn {
+            onTrackNoteOn(note, velocity, channel, trackID)
+        } else {
+            sampler?.noteOn(note: note, velocity: velocity)
+        }
 
         // Send to external MIDI output if configured
         if let dest = midiOutputDestination {
@@ -158,9 +165,12 @@ class MIDIPlayer {
         }
     }
 
-    private func triggerNoteOff(note: UInt8, channel: UInt8) {
-        // Stop sampler note
-        sampler?.noteOff(note: note)
+    private func triggerNoteOff(note: UInt8, channel: UInt8, trackID: UUID? = nil) {
+        if let trackID, let onTrackNoteOff {
+            onTrackNoteOff(note, channel, trackID)
+        } else {
+            sampler?.noteOff(note: note)
+        }
 
         // Send to external MIDI output if configured
         if let dest = midiOutputDestination {
@@ -169,8 +179,8 @@ class MIDIPlayer {
     }
 
     private func releaseAllNotes() {
-        for (_, scheduled) in activePlaybackNotes {
-            triggerNoteOff(note: scheduled.note, channel: scheduled.channel)
+        for (key, scheduled) in activePlaybackNotes {
+            triggerNoteOff(note: scheduled.note, channel: scheduled.channel, trackID: key.trackID)
         }
         activePlaybackNotes.removeAll()
     }

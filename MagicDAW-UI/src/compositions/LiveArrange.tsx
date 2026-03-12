@@ -6,7 +6,7 @@ import {
   spring,
   useVideoConfig,
 } from 'remotion';
-import type { Track, Clip } from '../types/daw';
+import type { Track, Clip, AutomationLaneType, AutomationPoint } from '../types/daw';
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -29,26 +29,30 @@ export interface LiveArrangeProps {
   dragOffsetTracks?: number;
   dragMode?: string;
   selectedClipIds?: string[];
+  showAutomation?: boolean;
+  automationMode?: AutomationLaneType;
+  expandedAutomationTrackId?: string | null;
+  selectedAutomationPoint?: { trackId: string; pointIndex: number } | null;
 }
 
 // ── Theme ────────────────────────────────────────────────────────────────────
 
 const A = {
-  bg: '#0d1520',
-  bgDeep: '#080e18',
-  teal: '#2dd4bf',
-  green: '#34d399',
-  cyan: '#67e8f9',
-  purple: '#a78bfa',
-  pink: '#f472b6',
-  gold: '#fbbf24',
-  orange: '#fb923c',
-  text: '#e2e8f0',
-  textDim: '#94a3b8',
-  textMuted: '#64748b',
-  glass: 'rgba(120,200,220,0.06)',
-  glassBorder: 'rgba(120,200,220,0.12)',
-  glassBright: 'rgba(120,200,220,0.25)',
+  bg: '#0b0b0c',
+  bgDeep: '#060607',
+  teal: '#b4bbc4',
+  green: '#8dd4b4',
+  cyan: '#d8dbe1',
+  purple: '#aeb4bd',
+  pink: '#c7ccd4',
+  gold: '#d6be8a',
+  orange: '#c89e76',
+  text: '#f1f3f5',
+  textDim: '#b0b5bc',
+  textMuted: '#6f757d',
+  glass: 'rgba(255,255,255,0.035)',
+  glassBorder: 'rgba(255,255,255,0.08)',
+  glassBright: 'rgba(255,255,255,0.16)',
 };
 
 // ── Layout constants ─────────────────────────────────────────────────────────
@@ -57,6 +61,7 @@ const HEADER_W = 120;
 const RULER_H = 32;
 const TRACK_H = 60;
 const ENERGY_H = 24;
+const AUTOMATION_LANE_H = 14;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -80,13 +85,47 @@ function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
+function formatClipBarRange(startBar: number, lengthBars: number): string {
+  const endBar = startBar + lengthBars - 1;
+  return lengthBars <= 1 ? `Bar ${startBar}` : `Bars ${startBar}-${endBar}`;
+}
+
+function getFallbackAutomationValue(track: Track, type: AutomationLaneType): number {
+  return type === 'volume'
+    ? clamp(track.volume, 0, 1)
+    : clamp((track.pan + 1) / 2, 0, 1);
+}
+
+function getAutomationPoints(track: Track, totalBars: number, type: AutomationLaneType): AutomationPoint[] {
+  const lane = track.automation?.find((candidate) => candidate.type === type && candidate.enabled !== false && candidate.points.length > 0);
+  if (lane) {
+    return [...lane.points].sort((a, b) => a.bar - b.bar);
+  }
+
+  const value = getFallbackAutomationValue(track, type);
+  const boundaries = new Set<number>([1, totalBars + 1]);
+  track.clips.forEach((clip) => {
+    boundaries.add(clip.startBar);
+    boundaries.add(clip.startBar + clip.lengthBars);
+  });
+
+  return Array.from(boundaries)
+    .sort((a, b) => a - b)
+    .map((bar) => ({ bar, value }));
+}
+
+function getAutomationLaneHeight(showAutomation: boolean, expandedAutomationTrackId: string | null, trackId: string): number {
+  if (!showAutomation) return 0;
+  return expandedAutomationTrackId === trackId ? 22 : AUTOMATION_LANE_H;
+}
+
 // ── Section markers (default if none provided via props.markers) ─────────
 
 const DEFAULT_SECTIONS = [
-  { position: 1, label: 'INTRO', color: A.teal },
-  { position: 9, label: 'VERSE', color: A.green },
+  { position: 1, label: 'INTRO', color: A.textMuted },
+  { position: 9, label: 'VERSE', color: A.textDim },
   { position: 17, label: 'CHORUS', color: A.cyan },
-  { position: 25, label: 'BRIDGE', color: A.purple },
+  { position: 25, label: 'BRIDGE', color: A.gold },
 ];
 
 // ── Constellation background dots (reduced count for perf) ──────────────
@@ -142,18 +181,41 @@ function renderMidiContent(
 
     return (
       <g>
+        {Array.from({ length: 4 }, (_, i) => {
+          const guideY = contentY + (i / 3) * Math.max(2, contentH - 3);
+          return (
+            <line
+              key={`mg-${i}`}
+              x1={x + 4}
+              y1={guideY}
+              x2={x + w - 4}
+              y2={guideY}
+              stroke="rgba(255,255,255,0.04)"
+              strokeWidth={0.5}
+            />
+          );
+        })}
         {notes.map((note, i) => {
           const nx = x + 3 + ((note.start) / totalBeats) * (w - 6);
           const nw = Math.max(2, (note.duration / totalBeats) * (w - 6));
           const ny = contentY + (1 - (note.pitch - minPitch) / pitchRange) * (contentH - 3);
           const nh = Math.max(1.5, 3);
           return (
-            <rect
-              key={`mn-${i}`}
-              x={nx} y={ny} width={nw} height={nh}
-              rx={0.75}
-              fill={hexToRgba(color, 0.6 + (note.velocity / 127) * 0.3)}
-            />
+            <g key={`mn-${i}`}>
+              <rect
+                x={nx} y={ny} width={nw} height={nh}
+                rx={0.75}
+                fill={hexToRgba(color, 0.6 + (note.velocity / 127) * 0.24)}
+              />
+              <rect
+                x={nx}
+                y={ny}
+                width={Math.max(1, Math.min(2, nw * 0.18))}
+                height={nh}
+                rx={0.75}
+                fill="rgba(255,255,255,0.28)"
+              />
+            </g>
           );
         })}
       </g>
@@ -195,21 +257,48 @@ function renderAudioContent(
 
   let topPath = `M ${x + 3} ${midY}`;
   let bottomPath = `M ${x + 3} ${midY}`;
+  const topPoints: Array<[number, number]> = [];
+  const bottomPoints: Array<[number, number]> = [];
   for (let i = 0; i <= steps; i++) {
     const px = x + 3 + (i / steps) * (w - 6);
     const envelope = Math.sin((i / steps) * Math.PI) * 0.8 + 0.2;
     const noise = rng();
     const amp = noise * envelope * (contentH * 0.4);
+    topPoints.push([px, midY - amp]);
+    bottomPoints.push([px, midY + amp]);
     topPath += ` L ${px} ${midY - amp}`;
     bottomPath += ` L ${px} ${midY + amp}`;
   }
   topPath += ` L ${x + w - 3} ${midY}`;
   bottomPath += ` L ${x + w - 3} ${midY}`;
+  const areaPath = [
+    `M ${x + 3} ${midY}`,
+    ...topPoints.map(([px, py]) => `L ${px} ${py}`),
+    ...bottomPoints.slice().reverse().map(([px, py]) => `L ${px} ${py}`),
+    'Z',
+  ].join(' ');
 
   return (
     <g>
-      <path d={topPath} fill={hexToRgba(color, 0.2)} stroke={hexToRgba(color, 0.5)} strokeWidth={0.8} />
-      <path d={bottomPath} fill={hexToRgba(color, 0.15)} stroke={hexToRgba(color, 0.35)} strokeWidth={0.6} />
+      <rect
+        x={x + 4}
+        y={contentY + 1}
+        width={Math.max(0, w - 8)}
+        height={Math.max(0, contentH - 2)}
+        rx={2}
+        fill="rgba(255,255,255,0.015)"
+      />
+      <line
+        x1={x + 4}
+        y1={midY}
+        x2={x + w - 4}
+        y2={midY}
+        stroke="rgba(255,255,255,0.06)"
+        strokeWidth={0.5}
+      />
+      <path d={areaPath} fill={hexToRgba(color, 0.14)} opacity={0.95} />
+      <path d={topPath} fill="none" stroke={hexToRgba(color, 0.62)} strokeWidth={0.9} />
+      <path d={bottomPath} fill="none" stroke={hexToRgba(color, 0.32)} strokeWidth={0.6} />
     </g>
   );
 }
@@ -220,13 +309,22 @@ function renderBusContent(
 ): React.ReactNode {
   const midY = y + h / 2;
   return (
-    <line
-      x1={x + 4} y1={midY + h * 0.15}
-      x2={x + w - 4} y2={midY - h * 0.18}
-      stroke={hexToRgba(color, 0.4)}
-      strokeWidth={1.5}
-      strokeDasharray="4 3"
-    />
+    <g>
+      <line
+        x1={x + 4} y1={midY + h * 0.15}
+        x2={x + w - 4} y2={midY - h * 0.18}
+        stroke={hexToRgba(color, 0.4)}
+        strokeWidth={1.5}
+        strokeDasharray="4 3"
+      />
+      <line
+        x1={x + 4} y1={midY - h * 0.12}
+        x2={x + w - 4} y2={midY + h * 0.1}
+        stroke="rgba(255,255,255,0.08)"
+        strokeWidth={0.8}
+        strokeDasharray="3 4"
+      />
+    </g>
   );
 }
 
@@ -269,7 +367,7 @@ const Ruler = React.memo<{
 
   return (
     <g>
-      <rect x={0} y={0} width={W} height={RULER_H} fill="rgba(8,14,24,0.9)" opacity={entrance} />
+      <rect x={0} y={0} width={W} height={RULER_H} fill="rgba(7,7,8,0.94)" opacity={entrance} />
       <line x1={0} y1={RULER_H} x2={W} y2={RULER_H} stroke={A.glassBorder} strokeWidth={0.5} />
       {Array.from({ length: Math.ceil(visibleBars) + 1 }, (_, i) => {
         const bar = Math.floor(scrollOffsetBars) + i + 1;
@@ -287,12 +385,9 @@ const Ruler = React.memo<{
             <text
               x={x + barW / 2} y={14}
               textAnchor="middle"
-              fill={isPlayheadBar ? A.cyan : A.textMuted}
+              fill={isPlayheadBar ? A.text : A.textMuted}
               fontSize={9}
               fontWeight={isPlayheadBar ? 'bold' : 'normal'}
-              style={isPlayheadBar
-                ? { filter: 'drop-shadow(0 0 4px rgba(103,232,249,0.6))' }
-                : undefined}
             >
               {bar}
             </text>
@@ -303,7 +398,7 @@ const Ruler = React.memo<{
                   key={`tick-${bar}-${bi}`}
                   x1={tickX} y1={bi === 0 ? 20 : 26}
                   x2={tickX} y2={RULER_H}
-                  stroke={bi === 0 ? 'rgba(120,200,220,0.25)' : 'rgba(120,200,220,0.08)'}
+                  stroke={bi === 0 ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.06)'}
                   strokeWidth={bi === 0 ? 0.8 : 0.4}
                 />
               );
@@ -359,7 +454,7 @@ const GridLines = React.memo<{
             <rect
               x={HEADER_W} y={ly}
               width={gridW} height={TRACK_H}
-              fill={`rgba(120,200,220,${laneAlpha})`}
+              fill={`rgba(255,255,255,${laneAlpha})`}
             />
             {activeLanes.has(track.id) && isPlaying && (
               <rect
@@ -372,13 +467,13 @@ const GridLines = React.memo<{
               <rect
                 x={HEADER_W} y={ly}
                 width={gridW} height={TRACK_H}
-                fill="rgba(8,14,24,0.4)"
+                fill="rgba(0,0,0,0.28)"
               />
             )}
             <line
               x1={HEADER_W} y1={ly + TRACK_H}
               x2={W} y2={ly + TRACK_H}
-              stroke="rgba(120,200,220,0.06)"
+              stroke="rgba(255,255,255,0.05)"
               strokeWidth={0.5}
             />
           </g>
@@ -398,7 +493,7 @@ const GridLines = React.memo<{
             key={`vl-${bar}`}
             x1={x} y1={contentTop}
             x2={x} y2={contentTop + tracks.length * TRACK_H}
-            stroke={`rgba(120,200,220,${isSection ? spotlightAlpha * 2 : spotlightAlpha})`}
+            stroke={`rgba(255,255,255,${isSection ? spotlightAlpha * 1.5 : spotlightAlpha})`}
             strokeWidth={0.5}
           />
         );
@@ -428,6 +523,10 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
     dragOffsetTracks = 0,
     dragMode = 'idle',
     selectedClipIds = [],
+    showAutomation = false,
+    automationMode = 'volume',
+    expandedAutomationTrackId = null,
+    selectedAutomationPoint = null,
   } = props;
 
   const frame = useCurrentFrame();
@@ -473,6 +572,33 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
   // Selected clip ID set for fast lookup
   const selectedSet = useMemo(() => new Set(selectedClipIds), [selectedClipIds]);
   const isDragging = dragMode === 'moving' || dragMode === 'resizing' || dragMode === 'duplicating';
+  const automationLanes = useMemo(() => {
+    if (!showAutomation) return [];
+
+    return tracks.map((track, trackIdx) => {
+      const laneHeight = getAutomationLaneHeight(showAutomation, expandedAutomationTrackId, track.id);
+      const laneY = contentTop + trackIdx * TRACK_H + TRACK_H - laneHeight - 3;
+      const points = getAutomationPoints(track, totalBars, automationMode);
+      const path = points
+        .map((point, pointIdx) => {
+          const px = HEADER_W + (point.bar - 1 - scrollOffsetBars) * barW;
+          const normalizedValue = clamp(point.value, 0, 1);
+          const py = laneY + (1 - normalizedValue) * (laneHeight - 4) + 2;
+          return `${pointIdx === 0 ? 'M' : 'L'} ${px} ${py}`;
+        })
+        .join(' ');
+
+      const label = automationMode === 'volume'
+        ? `${Math.round(track.volume * 100)}%`
+        : track.pan === 0
+          ? 'C'
+          : track.pan < 0
+            ? `L${Math.round(Math.abs(track.pan) * 100)}`
+            : `R${Math.round(track.pan * 100)}`;
+
+      return { track, trackIdx, laneY, laneHeight, points, path, label };
+    });
+  }, [showAutomation, tracks, contentTop, totalBars, automationMode, scrollOffsetBars, barW, expandedAutomationTrackId]);
 
   // Pre-compute clip layout positions (memoized)
   const clipLayouts = useMemo(() => {
@@ -511,9 +637,9 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
               track,
               trackIdx,
               cx: HEADER_W + (clip.startBar - 1 - scrollOffsetBars) * barW,
-              cy: contentTop + trackIdx * TRACK_H + 3,
+              cy: contentTop + trackIdx * TRACK_H + (showAutomation ? 4 : 3),
               cw: clip.lengthBars * barW - 2,
-              ch: TRACK_H - 6,
+              ch: TRACK_H - (getAutomationLaneHeight(showAutomation, expandedAutomationTrackId, track.id) + (showAutomation ? 8 : 6)),
               isSelected: false,
               isGhost: false,
             });
@@ -526,9 +652,9 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
 
         const clipBarStart = effectiveStartBar - 1 - scrollOffsetBars;
         const cx = HEADER_W + clipBarStart * barW;
-        const cy = contentTop + effectiveTrackIdx * TRACK_H + 3;
+        const cy = contentTop + effectiveTrackIdx * TRACK_H + (showAutomation ? 4 : 3);
         const cw = effectiveLengthBars * barW - 2;
-        const ch = TRACK_H - 6;
+        const ch = TRACK_H - (getAutomationLaneHeight(showAutomation, expandedAutomationTrackId, track.id) + (showAutomation ? 8 : 6));
 
         // Off-screen culling
         if (cx + cw >= HEADER_W && cx <= W) {
@@ -544,7 +670,7 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
       });
     });
     return layouts;
-  }, [tracks, selectedSet, selectedClipId, isDragging, dragOffsetBars, dragOffsetTracks, dragMode, scrollOffsetBars, barW, contentTop, W]);
+  }, [tracks, selectedSet, selectedClipId, isDragging, dragOffsetBars, dragOffsetTracks, dragMode, scrollOffsetBars, barW, contentTop, W, showAutomation, expandedAutomationTrackId]);
 
   return (
     <AbsoluteFill style={{ backgroundColor: 'transparent', overflow: 'hidden' }}>
@@ -565,22 +691,18 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
             </feMerge>
           </filter>
           <linearGradient id="la-energy-grad" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor={A.teal} />
-            <stop offset="25%" stopColor={A.cyan} />
-            <stop offset="50%" stopColor={A.purple} />
-            <stop offset="75%" stopColor={A.pink} />
-            <stop offset="100%" stopColor={A.gold} />
+            <stop offset="0%" stopColor="#737a82" />
+            <stop offset="50%" stopColor="#bcc3cb" />
+            <stop offset="100%" stopColor="#f1f3f5" />
           </linearGradient>
           <linearGradient id="la-played-tint" x1="0" y1="0" x2="1" y2="0">
             <stop offset="0%" stopColor={A.cyan} stopOpacity={0} />
-            <stop offset="90%" stopColor={A.cyan} stopOpacity={0.03} />
-            <stop offset="100%" stopColor={A.cyan} stopOpacity={0.06} />
+            <stop offset="90%" stopColor={A.cyan} stopOpacity={0.02} />
+            <stop offset="100%" stopColor={A.cyan} stopOpacity={0.05} />
           </linearGradient>
           <linearGradient id="la-prism" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor={A.teal} stopOpacity={0.6} />
-            <stop offset="33%" stopColor={A.cyan} stopOpacity={0.4} />
-            <stop offset="66%" stopColor={A.purple} stopOpacity={0.5} />
-            <stop offset="100%" stopColor={A.pink} stopOpacity={0.4} />
+            <stop offset="0%" stopColor="#d9dde3" stopOpacity={0.8} />
+            <stop offset="100%" stopColor="#7f8790" stopOpacity={0.5} />
           </linearGradient>
         </defs>
 
@@ -597,20 +719,11 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
               <ellipse
                 cx={playheadX}
                 cy={contentTop + (tracks.length * TRACK_H) / 2}
-                rx={200 + localEnergy * 150}
-                ry={100 + localEnergy * 80}
-                fill={A.teal}
-                opacity={waveOpacity + Math.sin(frame * 0.05) * 0.02}
-                style={{ filter: 'blur(60px)' }}
-              />
-              <ellipse
-                cx={playheadX + 80}
-                cy={contentTop + (tracks.length * TRACK_H) / 3}
-                rx={120 + localEnergy * 100}
-                ry={80 + localEnergy * 50}
-                fill={A.purple}
-                opacity={waveOpacity * 0.7 + Math.sin(frame * 0.06 + 1) * 0.015}
-                style={{ filter: 'blur(50px)' }}
+                rx={180 + localEnergy * 120}
+                ry={90 + localEnergy * 60}
+                fill="#c8cdd4"
+                opacity={waveOpacity * 0.45 + Math.sin(frame * 0.05) * 0.01}
+                style={{ filter: 'blur(70px)' }}
               />
             </g>
           );
@@ -755,6 +868,104 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
           sections={sections}
         />
 
+        {/* ── Automation read lanes ─────────────────────────────────────── */}
+        {showAutomation && automationLanes.map(({ track, trackIdx, laneY, laneHeight, points, path, label }) => {
+          const isSelectedTrack = track.id === selectedTrackId;
+          const isExpanded = expandedAutomationTrackId === track.id;
+          const laneOpacity = isSelectedTrack ? 0.9 : 0.66;
+          const stroke = isSelectedTrack ? A.text : A.textDim;
+          const fill = hexToRgba(track.color, isSelectedTrack ? 0.06 : 0.03);
+          return (
+            <g key={`auto-${track.id}`} opacity={entrance * laneOpacity}>
+              <rect
+                x={HEADER_W + 1}
+                y={laneY}
+                width={gridW - 2}
+                height={laneHeight}
+                rx={3}
+                fill={fill}
+                stroke={isExpanded ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.05)'}
+                strokeWidth={isExpanded ? 0.7 : 0.5}
+              />
+              <text
+                x={HEADER_W + 8}
+                y={laneY + 9}
+                fill={A.textMuted}
+                fontSize={6}
+                fontWeight="700"
+                letterSpacing="0.08em"
+                textAnchor="start"
+              >
+                {automationMode === 'volume' ? 'VOL' : 'PAN'}
+              </text>
+              <text
+                x={HEADER_W + gridW - 8}
+                y={laneY + 9}
+                fill={isSelectedTrack ? A.textDim : A.textMuted}
+                fontSize={6}
+                fontWeight="700"
+                textAnchor="end"
+              >
+                {label}
+              </text>
+              <path
+                d={path}
+                fill="none"
+                stroke={stroke}
+                strokeWidth={1.1}
+                opacity={0.8}
+              />
+              {points.map((point, pointIdx) => {
+                const px = HEADER_W + (point.bar - 1 - scrollOffsetBars) * barW;
+                if (px < HEADER_W - 4 || px > W + 4) return null;
+                const normalizedValue = clamp(point.value, 0, 1);
+                const py = laneY + (1 - normalizedValue) * (laneHeight - 4) + 2;
+                const isSelectedPoint = selectedAutomationPoint?.trackId === track.id && selectedAutomationPoint.pointIndex === pointIdx;
+                return (
+                  <g key={`auto-pt-${track.id}-${pointIdx}`}>
+                    {isSelectedPoint && (
+                      <circle
+                        cx={px}
+                        cy={py}
+                        r={5}
+                        fill="rgba(255,255,255,0.06)"
+                        stroke="rgba(255,255,255,0.18)"
+                        strokeWidth={0.7}
+                      />
+                    )}
+                    <circle
+                      cx={px}
+                      cy={py}
+                      r={isSelectedPoint ? 2.8 : (isSelectedTrack ? 1.8 : 1.4)}
+                      fill={isSelectedPoint ? A.text : stroke}
+                      opacity={0.92}
+                    />
+                  </g>
+                );
+              })}
+              <line
+                x1={HEADER_W + 1}
+                y1={laneY + laneHeight / 2}
+                x2={HEADER_W + gridW - 1}
+                y2={laneY + laneHeight / 2}
+                stroke="rgba(255,255,255,0.035)"
+                strokeWidth={0.5}
+                strokeDasharray="2 3"
+              />
+              {trackIdx < tracks.length - 1 && (
+                <line
+                  x1={HEADER_W}
+                  y1={laneY + laneHeight + 3}
+                  x2={W}
+                  y2={laneY + laneHeight + 3}
+                  stroke="rgba(255,255,255,0.035)"
+                  strokeWidth={0.4}
+                />
+              )}
+            </g>
+          );
+        })}
+
         {/* ── Played-area tint ───────────────────────────────────────────── */}
         {isPlaying && playheadX > HEADER_W && (
           <rect
@@ -820,6 +1031,14 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
 
           const showDetail = barW > 25;
           const ghostOpacity = isGhost ? 0.5 : 1;
+          const showMeta = cw > 96;
+          const typeLabel = track.type === 'midi' ? 'MIDI' : track.type === 'audio' ? 'AUDIO' : 'BUS';
+          const rangeLabel = formatClipBarRange(clip.startBar, clip.lengthBars);
+          const secondaryLabel = track.type === 'midi'
+            ? `${clip.notes?.length ?? 0} notes`
+            : track.type === 'audio'
+              ? 'Audio region'
+              : 'Signal route';
 
           return (
             <g key={isGhost ? `ghost-${clip.id}` : clip.id} opacity={clipEntrance * ghostOpacity}>
@@ -830,9 +1049,8 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
                   width={cw + 4} height={ch + 4}
                   rx={6}
                   fill="none"
-                  stroke={hexToRgba(track.color, 0.5 + pulse * 0.3)}
-                  strokeWidth={1.5}
-                  filter="url(#la-clip-glow)"
+                  stroke={hexToRgba(A.cyan, 0.55 + pulse * 0.12)}
+                  strokeWidth={1.2}
                 />
               )}
 
@@ -843,7 +1061,7 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
                   width={cw} height={ch}
                   rx={4}
                   fill="none"
-                  stroke={hexToRgba(track.color, 0.5)}
+                  stroke={hexToRgba(A.textDim, 0.55)}
                   strokeWidth={1}
                   strokeDasharray="4 2"
                 />
@@ -854,11 +1072,19 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
                 x={cx} y={cy}
                 width={cw} height={ch}
                 rx={4}
-                fill={hexToRgba(track.color, isSelected ? 0.18 : 0.1)}
+                fill={isSelected ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.045)'}
                 stroke={isSelected
                   ? 'url(#la-prism)'
-                  : hexToRgba(track.color, track.muted ? 0.12 : 0.25)}
-                strokeWidth={isSelected ? 1.2 : 0.6}
+                  : (track.muted ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.09)')}
+                strokeWidth={isSelected ? 1.1 : 0.8}
+              />
+              <rect
+                x={cx + 1}
+                y={cy + 1}
+                width={Math.max(0, cw - 2)}
+                height={11}
+                rx={3}
+                fill={isSelected ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.035)'}
               />
 
               {/* Left edge refraction */}
@@ -866,14 +1092,14 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
                 x={cx} y={cy}
                 width={2} height={ch}
                 rx={1}
-                fill={hexToRgba(track.color, 0.4)}
+                fill={hexToRgba(track.color, 0.7)}
               />
               {/* Right edge — resize handle indicator for selected clips */}
               <rect
                 x={cx + cw - 1.5} y={cy}
                 width={1.5} height={ch}
                 rx={0.75}
-                fill={hexToRgba(isSelected ? A.teal : A.cyan, isSelected ? 0.35 : 0.15)}
+                fill={isSelected ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.12)'}
               />
 
               {/* Clip content */}
@@ -894,14 +1120,66 @@ export const LiveArrange: React.FC<LiveArrangeProps> = (props) => {
 
               {/* Clip name */}
               {showDetail && (
-                <text
-                  x={cx + 6} y={cy + 11}
-                  fill={hexToRgba(track.color, track.muted ? 0.4 : 0.75)}
-                  fontSize={8}
-                  fontWeight="500"
-                >
-                  {clip.name}
-                </text>
+                <>
+                  <text
+                    x={cx + 6} y={cy + 11}
+                    fill={track.muted ? A.textMuted : A.text}
+                    fontSize={8}
+                    fontWeight="600"
+                  >
+                    {clip.name}
+                  </text>
+                  {showMeta && (
+                    <text
+                      x={cx + 6} y={cy + 21}
+                      fill={A.textMuted}
+                      fontSize={6.5}
+                      fontWeight="500"
+                    >
+                      {secondaryLabel} • {rangeLabel}
+                    </text>
+                  )}
+                  {cw > 70 && (
+                    <>
+                      <rect
+                        x={cx + cw - 34}
+                        y={cy + 4}
+                        width={28}
+                        height={8}
+                        rx={4}
+                        fill="rgba(0,0,0,0.22)"
+                        stroke="rgba(255,255,255,0.08)"
+                        strokeWidth={0.5}
+                      />
+                      <text
+                        x={cx + cw - 20}
+                        y={cy + 10}
+                        fill={isSelected ? A.text : A.textDim}
+                        fontSize={5.8}
+                        fontWeight="700"
+                        letterSpacing="0.08em"
+                        textAnchor="middle"
+                      >
+                        {typeLabel}
+                      </text>
+                    </>
+                  )}
+                  {cw > 120 && (
+                    <text
+                      x={cx + 6}
+                      y={cy + ch - 5}
+                      fill="rgba(255,255,255,0.42)"
+                      fontSize={6}
+                      fontWeight="600"
+                    >
+                      {track.type === 'midi'
+                        ? `${track.name} lane`
+                        : track.type === 'audio'
+                          ? 'Waveform preview'
+                          : 'Routing region'}
+                    </text>
+                  )}
+                </>
               )}
             </g>
           );

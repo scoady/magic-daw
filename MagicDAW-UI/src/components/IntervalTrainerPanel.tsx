@@ -451,8 +451,8 @@ export const IntervalTrainerPanel: React.FC = () => {
     background: active ? `${color}18` : 'rgba(15,25,40,0.6)',
     border: `1px solid ${active ? color + '44' : 'rgba(120,200,220,0.1)'}`,
     borderRadius: 12,
-    color: active ? color : '#94a3b8',
-    fontSize: 9, fontFamily: 'monospace', fontWeight: active ? 700 : 500,
+    color: active ? color : 'var(--text-dim)',
+    fontSize: 9, fontFamily: 'var(--font-mono)', fontWeight: active ? 700 : 500,
     cursor: 'pointer', transition: 'all 0.15s ease',
     textTransform: 'uppercase' as const, letterSpacing: '0.05em',
     whiteSpace: 'nowrap' as const,
@@ -465,7 +465,7 @@ export const IntervalTrainerPanel: React.FC = () => {
     borderRadius: 4,
     padding: small ? '2px 8px' : '4px 14px',
     fontSize: small ? 9 : 11,
-    fontFamily: 'monospace', fontWeight: 700,
+    fontFamily: 'var(--font-mono)', fontWeight: 700,
     cursor: 'pointer',
   });
 
@@ -479,7 +479,7 @@ export const IntervalTrainerPanel: React.FC = () => {
         flexShrink: 0, flexWrap: 'wrap',
       }}>
         <span style={{
-          color: '#94a3b8', fontSize: 8, fontFamily: 'monospace',
+          color: 'var(--text-dim)', fontSize: 8, fontFamily: 'var(--font-mono)',
           textTransform: 'uppercase', letterSpacing: '0.1em', marginRight: 4, opacity: 0.5,
         }}>
           DRILL
@@ -496,7 +496,7 @@ export const IntervalTrainerPanel: React.FC = () => {
               {d.label}
               {d.type !== 'intervals' && (
                 <span style={{
-                  fontSize: 7, opacity: 0.6, color: completed > 0 ? d.color : '#64748b',
+                  fontSize: 9, opacity: 0.7, color: completed > 0 ? d.color : 'var(--text-muted)',
                 }}>
                   {completed}/12
                 </span>
@@ -537,9 +537,9 @@ export const IntervalTrainerPanel: React.FC = () => {
             value={rootNote}
             onChange={(e) => { setRootNote(e.target.value); setCorrectIntervals([]); }}
             style={{
-              background: 'rgba(15,25,40,0.8)', color: '#67e8f9',
+              background: 'rgba(15,25,40,0.8)', color: 'var(--cyan)',
               border: '1px solid rgba(103,232,249,0.2)', borderRadius: 4,
-              padding: '3px 8px', fontSize: 11, fontFamily: 'monospace',
+              padding: '3px 8px', fontSize: 11, fontFamily: 'var(--font-mono)',
             }}
           >
             {ALL_KEYS.map(k => <option key={k} value={k}>{k}</option>)}
@@ -549,16 +549,16 @@ export const IntervalTrainerPanel: React.FC = () => {
             value={scaleMode}
             onChange={(e) => { setScaleMode(e.target.value); setCorrectIntervals([]); setQuizTarget(null); }}
             style={{
-              background: 'rgba(15,25,40,0.8)', color: '#a78bfa',
+              background: 'rgba(15,25,40,0.8)', color: 'var(--purple)',
               border: '1px solid rgba(167,139,250,0.2)', borderRadius: 4,
-              padding: '3px 8px', fontSize: 11, fontFamily: 'monospace',
+              padding: '3px 8px', fontSize: 11, fontFamily: 'var(--font-mono)',
             }}
           >
             {Object.entries(MODES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
           </select>
 
           <span style={{
-            color: '#94a3b8', fontSize: 10, fontFamily: 'monospace',
+            color: 'var(--text-dim)', fontSize: 10, fontFamily: 'var(--font-mono)',
             opacity: 0.6, flex: 1, minWidth: 100,
           }}>
             {mode.description}
@@ -574,10 +574,10 @@ export const IntervalTrainerPanel: React.FC = () => {
                     background: correctIntervals.includes(i)
                       ? 'rgba(45,212,191,0.2)'
                       : 'rgba(15,25,40,0.8)',
-                    color: correctIntervals.includes(i) ? '#2dd4bf' : '#e2e8f0',
+                    color: correctIntervals.includes(i) ? 'var(--teal)' : 'var(--text)',
                     border: `1px solid ${correctIntervals.includes(i) ? 'rgba(45,212,191,0.3)' : 'rgba(120,200,220,0.15)'}`,
                     borderRadius: 4, padding: '2px 6px', fontSize: 9,
-                    fontFamily: 'monospace', cursor: 'pointer',
+                    fontFamily: 'var(--font-mono)', cursor: 'pointer',
                   }}
                   title={INTERVAL_NAMES[i]}
                 >
@@ -589,7 +589,7 @@ export const IntervalTrainerPanel: React.FC = () => {
 
           {gameMode === 'quiz' && quizTarget !== null && (
             <span style={{
-              color: '#fbbf24', fontSize: 12, fontFamily: 'monospace', fontWeight: 700,
+              color: 'var(--gold)', fontSize: 12, fontFamily: 'var(--font-mono)', fontWeight: 700,
             }}>
               Play the {INTERVAL_NAMES[quizTarget]}
             </span>
@@ -597,8 +597,8 @@ export const IntervalTrainerPanel: React.FC = () => {
 
           {message && (
             <span style={{
-              color: message.startsWith('Correct') || message.startsWith('Perfect') ? '#2dd4bf' : '#f87171',
-              fontSize: 11, fontFamily: 'monospace', fontWeight: 700,
+              color: message.startsWith('Correct') || message.startsWith('Perfect') ? 'var(--teal)' : '#f87171',
+              fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700,
             }}>
               {message}
             </span>
@@ -608,10 +608,10 @@ export const IntervalTrainerPanel: React.FC = () => {
             onClick={gameMode === 'explore' ? startQuiz : resetToExplore}
             style={{
               background: gameMode === 'quiz' ? 'rgba(248,113,113,0.15)' : 'rgba(251,191,36,0.15)',
-              color: gameMode === 'quiz' ? '#f87171' : '#fbbf24',
+              color: gameMode === 'quiz' ? '#f87171' : 'var(--gold)',
               border: `1px solid ${gameMode === 'quiz' ? 'rgba(248,113,113,0.3)' : 'rgba(251,191,36,0.3)'}`,
               borderRadius: 4, padding: '3px 10px', fontSize: 11,
-              fontFamily: 'monospace', fontWeight: 700, cursor: 'pointer',
+              fontFamily: 'var(--font-mono)', fontWeight: 700, cursor: 'pointer',
             }}
           >
             {gameMode === 'quiz' ? 'Stop Quiz' : 'Quiz Me'}
@@ -627,7 +627,7 @@ export const IntervalTrainerPanel: React.FC = () => {
         }}>
           {/* Key label */}
           <span style={{
-            color: drill.color, fontSize: 14, fontFamily: 'monospace', fontWeight: 800,
+            color: drill.color, fontSize: 14, fontFamily: 'var(--font-mono)', fontWeight: 800,
             minWidth: 80,
           }}>
             {drillRoot.name} {drill.label}
@@ -636,8 +636,8 @@ export const IntervalTrainerPanel: React.FC = () => {
           {/* Matching progress */}
           <span style={{
             color: matchedUpTo >= drill.semitones.length && drill.semitones.length > 0
-              ? '#2dd4bf' : '#94a3b8',
-            fontSize: 10, fontFamily: 'monospace', opacity: 0.7,
+              ? 'var(--teal)' : 'var(--text-dim)',
+            fontSize: 10, fontFamily: 'var(--font-mono)', opacity: 0.7,
           }}>
             {matchedUpTo}/{drill.semitones.length} notes · key {drillKeyIndex + 1}/12
           </span>

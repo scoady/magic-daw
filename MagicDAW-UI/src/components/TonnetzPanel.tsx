@@ -9,51 +9,11 @@ import {
 import type { TonnetzTriangle, PathStep } from '../lib/tonnetz';
 import { GRID_Q_MIN, GRID_Q_MAX, GRID_R_MIN, GRID_R_MAX } from '../lib/tonnetzLayout';
 import { chordToMidiNotes } from '../compositions/CircleOfFifths1';
+import { ALL_KEYS, inferDiatonicChord } from '../lib/musicTheory';
+import type { ChordDetectedPayload } from '../lib/musicTheory';
 import { onSwiftMessage, onMidiStateChange, BridgeMessages, previewNote } from '../bridge';
 import { TONNETZ_LESSONS } from '../lib/tonnetzLessons';
 import type { TonnetzLesson, LessonStep } from '../lib/tonnetzLessons';
-
-// ── Bridge payload types ──────────────────────────────────────────────────
-
-interface ChordDetectedPayload {
-  chord: string | null;
-  root?: string;
-  quality?: string;
-  notes?: number[];
-}
-
-// ── Music theory helpers ──────────────────────────────────────────────────
-
-const CHROMATIC = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const ENHARMONIC: Record<string, string> = {
-  'C#': 'Db', 'D#': 'Eb', 'G#': 'Ab', 'A#': 'Bb', 'Gb': 'F#',
-  'Cb': 'B', 'Fb': 'E', 'B#': 'C', 'E#': 'F',
-};
-const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
-const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];
-const MAJOR_QUALITIES = ['', 'm', 'm', '', '', 'm', 'dim'] as const;
-const MINOR_QUALITIES = ['m', 'dim', '', 'm', 'm', '', ''] as const;
-const FLAT_KEYS = new Set(['F', 'Bb', 'Eb', 'Ab', 'Db']);
-const ALL_KEYS = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F'];
-
-function normalizeRoot(n: string): string { return ENHARMONIC[n] ?? n; }
-function rootToChroma(root: string): number { return CHROMATIC.indexOf(normalizeRoot(root)); }
-
-function inferDiatonicChord(midiNote: number, key: string, mode: 'major' | 'minor'): string {
-  const rootChroma = rootToChroma(key);
-  const noteChroma = midiNote % 12;
-  const useFlats = FLAT_KEYS.has(key);
-  const chordRoot = useFlats
-    ? ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'][noteChroma]
-    : CHROMATIC[noteChroma];
-  if (rootChroma < 0) return chordRoot;
-  const interval = ((noteChroma - rootChroma) % 12 + 12) % 12;
-  const scaleIntervals = mode === 'major' ? MAJOR_SCALE : MINOR_SCALE;
-  const qualities = mode === 'major' ? MAJOR_QUALITIES : MINOR_QUALITIES;
-  const degreeIdx = scaleIntervals.indexOf(interval);
-  if (degreeIdx < 0) return chordRoot;
-  return chordRoot + qualities[degreeIdx];
-}
 
 // ── Example progressions ──────────────────────────────────────────────────
 
@@ -499,7 +459,7 @@ export const TonnetzPanel: React.FC = () => {
   const btnStyle = (active: boolean, color = '#67e8f9'): React.CSSProperties => ({
     padding: '5px 12px',
     fontSize: 11,
-    fontFamily: "'SF Mono', 'Fira Code', monospace",
+    fontFamily: 'var(--font-mono)',
     fontWeight: active ? 700 : 500,
     background: active ? `${color}20` : 'rgba(120, 200, 220, 0.04)',
     border: `1px solid ${active ? `${color}66` : 'rgba(120, 200, 220, 0.1)'}`,
@@ -557,7 +517,7 @@ export const TonnetzPanel: React.FC = () => {
           {ALL_KEYS.map((k) => (
             <button key={k} onClick={() => setActiveKey(k)} style={{
               padding: '3px 7px', fontSize: 11,
-              fontFamily: "'SF Mono', 'Fira Code', monospace",
+              fontFamily: 'var(--font-mono)',
               fontWeight: k === activeKey ? 700 : 400,
               background: k === activeKey ? 'rgba(103, 232, 249, 0.25)' : 'rgba(120, 200, 220, 0.04)',
               border: `1px solid ${k === activeKey ? 'rgba(103, 232, 249, 0.5)' : 'rgba(120, 200, 220, 0.08)'}`,
@@ -576,7 +536,7 @@ export const TonnetzPanel: React.FC = () => {
           {(['major', 'minor'] as const).map((m) => (
             <button key={m} onClick={() => setActiveMode(m)} style={{
               padding: '3px 10px', fontSize: 11,
-              fontFamily: "'SF Mono', 'Fira Code', monospace",
+              fontFamily: 'var(--font-mono)',
               fontWeight: m === activeMode ? 700 : 400,
               background: m === activeMode
                 ? (m === 'minor' ? 'rgba(167, 139, 250, 0.25)' : 'rgba(103, 232, 249, 0.25)')
@@ -600,7 +560,7 @@ export const TonnetzPanel: React.FC = () => {
         {path.length > 0 && (
           <span style={{
             pointerEvents: 'auto', fontSize: 10,
-            fontFamily: "'SF Mono', monospace", color: '#475569',
+            fontFamily: 'var(--font-mono)', color: '#475569',
             padding: '3px 8px',
             background: 'rgba(10, 14, 26, 0.6)',
             borderRadius: 4, border: '1px solid rgba(120, 200, 220, 0.08)',
@@ -635,14 +595,14 @@ export const TonnetzPanel: React.FC = () => {
             border: '1px solid rgba(120, 200, 220, 0.1)',
             borderRadius: 6, backdropFilter: 'blur(8px)',
           }}>
-            <span style={{ fontSize: 10, fontFamily: "'SF Mono', monospace", color: '#64748b' }}>BPM</span>
+            <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: '#64748b' }}>BPM</span>
             <input
               type="range" min={40} max={240} value={bpm}
               onChange={(e) => setBpm(Number(e.target.value))}
               style={{ width: 60, height: 14, accentColor: '#67e8f9' }}
             />
             <span style={{
-              fontSize: 11, fontFamily: "'SF Mono', monospace",
+              fontSize: 11, fontFamily: 'var(--font-mono)',
               color: '#67e8f9', fontWeight: 700, minWidth: 28, textAlign: 'right',
             }}>{bpm}</span>
           </div>
@@ -665,7 +625,7 @@ export const TonnetzPanel: React.FC = () => {
               backdropFilter: 'blur(12px)', zIndex: 100,
             }}>
               <div style={{
-                fontSize: 10, fontFamily: "'SF Mono', monospace", color: '#64748b',
+                fontSize: 10, fontFamily: 'var(--font-mono)', color: '#64748b',
                 textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6, padding: '0 4px',
               }}>
                 Example Progressions
@@ -673,7 +633,7 @@ export const TonnetzPanel: React.FC = () => {
               {EXAMPLE_PROGRESSIONS.map((ex, i) => (
                 <button key={i} onClick={() => handleLoadExample(ex)} style={{
                   display: 'block', width: '100%', padding: '8px 10px',
-                  fontSize: 11, fontFamily: "'SF Mono', monospace",
+                  fontSize: 11, fontFamily: 'var(--font-mono)',
                   background: 'transparent',
                   border: 'none', borderRadius: 4,
                   color: '#e2e8f0', cursor: 'pointer', textAlign: 'left',
@@ -710,7 +670,7 @@ export const TonnetzPanel: React.FC = () => {
               backdropFilter: 'blur(16px)', zIndex: 100,
             }}>
               <div style={{
-                fontSize: 10, fontFamily: "'SF Mono', monospace", color: '#64748b',
+                fontSize: 10, fontFamily: 'var(--font-mono)', color: '#64748b',
                 textTransform: 'uppercase', letterSpacing: 2, marginBottom: 8, padding: '0 4px',
               }}>
                 Guided Lessons
@@ -719,7 +679,7 @@ export const TonnetzPanel: React.FC = () => {
                 <button key={lesson.id} onClick={() => startLesson(lesson)} style={{
                   display: 'flex', alignItems: 'flex-start', gap: 12,
                   width: '100%', padding: '10px 10px',
-                  fontSize: 11, fontFamily: "'SF Mono', monospace",
+                  fontSize: 11, fontFamily: 'var(--font-mono)',
                   background: 'transparent',
                   border: 'none', borderRadius: 6,
                   color: '#e2e8f0', cursor: 'pointer', textAlign: 'left',

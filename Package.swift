@@ -18,6 +18,11 @@ let package = Package(
                 .linkedFramework("Accelerate"),
                 .linkedFramework("AppKit"),
             ]
+        ),
+        .testTarget(
+            name: "MagicDAWTests",
+            dependencies: ["MagicDAW"],
+            path: "Tests/MagicDAWTests"
         )
     ]
 )

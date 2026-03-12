@@ -1,8 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import type { DAWState, ViewId, LearnSubView, Track, ProjectData, SwiftTrack, InstrumentPreset } from './types/daw';
+import type { DAWState, ViewId, Track, ProjectData, SwiftTrack, InstrumentPreset, TrackAutomationLane, AutomationLaneType, AutomationPoint } from './types/daw';
 import { mockDAWState, aurora, trackColorToHex } from './mockData';
 import { sendToSwift, onSwiftMessage, onMidiStateChange, BridgeMessages } from './bridge';
 import type { ActiveMidiNote, MidiDeviceList } from './bridge';
+import type { SampleRackSummary, SavedPluginGraphSummary } from './bridge';
 import { TransportBar } from './components/TransportBar';
 import { TrackList } from './components/TrackList';
 import { BottomPanel } from './components/BottomPanel';
@@ -14,27 +15,109 @@ import { PluginView } from './views/PluginView';
 import { ChordVisualizerPanel } from './components/ChordVisualizerPanel';
 import { CircleOfFifthsPanel } from './components/CircleOfFifthsPanel';
 import { IntervalTrainerPanel } from './components/IntervalTrainerPanel';
-import { LearnPanel } from './components/LearnPanel';
-import { ChordBuilderPanel } from './components/ChordBuilderPanel';
-import { EmotionsPanel } from './components/EmotionsPanel';
+import { TheoryPanel } from './components/TheoryPanel';
+import { SoundDesignView } from './views/SoundDesignView';
 import { ToastProvider, useToast } from './components/Toast';
 import { ContextMenuProvider } from './components/ContextMenu';
+
+type RecentInstrumentChoice =
+  | { kind: 'gm'; id: string; name: string; gmProgram: number; subtitle: string }
+  | { kind: 'rack'; id: string; name: string; path: string; subtitle: string }
+  | { kind: 'plugin'; id: string; name: string; path: string; subtitle: string }
+  | { kind: 'preset'; id: string; name: string; presetId: string; gmProgram: number; subtitle: string };
+
+const QUICK_GM_INSTRUMENTS = [
+  { name: 'Acoustic Grand Piano', gmProgram: 0 },
+  { name: 'Electric Piano 1', gmProgram: 4 },
+  { name: 'Nylon Guitar', gmProgram: 24 },
+  { name: 'Acoustic Bass', gmProgram: 32 },
+  { name: 'String Ensemble 1', gmProgram: 48 },
+  { name: 'Flute', gmProgram: 73 },
+  { name: 'Warm Pad', gmProgram: 89 },
+  { name: 'Halo Pad', gmProgram: 94 },
+] as const;
+
+function mapSwiftMidiEvents(events: unknown[] | undefined, clipId: string): Track['clips'][number]['notes'] {
+  if (!Array.isArray(events)) return undefined;
+  const mapped = events.flatMap((event, index) => {
+    if (!event || typeof event !== 'object') return [];
+    const data = event as Record<string, unknown>;
+    const pitchRaw = data.pitch ?? data.note;
+    const startRaw = data.start ?? data.tick;
+    const durationRaw = data.duration;
+    const velocityRaw = data.velocity;
+    const channelRaw = data.channel;
+
+    const pitch = typeof pitchRaw === 'number' ? pitchRaw : Number(pitchRaw);
+    const start = typeof startRaw === 'number' ? startRaw : Number(startRaw);
+    const duration = typeof durationRaw === 'number' ? durationRaw : Number(durationRaw);
+    const velocity = typeof velocityRaw === 'number' ? velocityRaw : Number(velocityRaw ?? 100);
+    const channel = typeof channelRaw === 'number' ? channelRaw : Number(channelRaw ?? 0);
+
+    if (!Number.isFinite(pitch) || !Number.isFinite(start) || !Number.isFinite(duration)) return [];
+    return [{
+      id: `${clipId}-note-${index}`,
+      pitch,
+      start,
+      duration,
+      velocity: Number.isFinite(velocity) ? velocity : 100,
+      channel: Number.isFinite(channel) ? channel : 0,
+    }];
+  });
+  return mapped.length > 0 ? mapped : undefined;
+}
+
+function mapSwiftTrackVolume(value: number): number {
+  if (value > 0 && value <= 1) return value;
+  if (value === 0) return 1;
+  if (value <= -96) return 0;
+  return Math.max(0, Math.min(1.5, Math.pow(10, value / 20)));
+}
+
+function mergeTrackAutomation(previousTracks: Track[], nextTracks: Track[]): Track[] {
+  const previousById = new Map(previousTracks.map((track) => [track.id, track]));
+  return nextTracks.map((track) => ({
+    ...track,
+    automation: previousById.get(track.id)?.automation ?? track.automation,
+  }));
+}
 
 const VIEW_TABS: { id: ViewId; label: string; key: string }[] = [
   { id: 'arrange', label: 'Arrange', key: '1' },
   { id: 'edit', label: 'Edit', key: '2' },
   { id: 'mix', label: 'Mix', key: '3' },
-  { id: 'instruments', label: 'Instruments', key: '4' },
-  { id: 'plugins', label: 'Plugins', key: '5' },
-  { id: 'chord-builder', label: 'Chord Builder', key: '6' },
-  { id: 'learn', label: 'Learn', key: '7' },
-  { id: 'emotions', label: 'Emotions of Music', key: '8' },
+  { id: 'sound-design', label: 'Sound', key: '4' },
+  { id: 'theory', label: 'Theory', key: '5' },
 ];
 
 const VIEW_IDS: ViewId[] = VIEW_TABS.map((t) => t.id);
+const DAW_SHELL_VIEWS: ViewId[] = ['arrange', 'edit', 'mix', 'sound-design'];
+const initialDAWState: DAWState = {
+  ...mockDAWState,
+  transport: {
+    ...mockDAWState.transport,
+    bpm: 120,
+    position: { bar: 1, beat: 1, timeMs: 0 },
+    loopEnabled: false,
+    loopStart: 0,
+    loopEnd: 4,
+  },
+  tracks: [],
+  selectedTrackId: null,
+  keySignature: {
+    key: '',
+    scale: '',
+    confidence: 0,
+  },
+  masterLevelL: 0,
+  masterLevelR: 0,
+  projectName: 'Untitled',
+  projectSaved: false,
+  projectDirty: false,
+};
 
 const AppInner: React.FC = () => {
-  const [dawState, setDAWState] = useState<DAWState>(mockDAWState);
+  const [dawState, setDAWState] = useState<DAWState>(initialDAWState);
   const [activeView, setActiveView] = useState<ViewId>('arrange');
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
   const [trackLevels, setTrackLevels] = useState<Record<string, { left: number; right: number }>>({});
@@ -42,8 +125,55 @@ const AppInner: React.FC = () => {
   const [midiDevices, setMidiDevices] = useState<MidiDeviceList>({ sources: [], destinations: [] });
   const [editingClipId, setEditingClipId] = useState<string | null>(null);
   const [instrumentPickerTrackId, setInstrumentPickerTrackId] = useState<string | null>(null);
+  const [instrumentPickerAnchor, setInstrumentPickerAnchor] = useState<{ x: number; y: number } | null>(null);
   const [instrumentPresets, setInstrumentPresets] = useState<InstrumentPreset[]>([]);
+  const [sampleRacks, setSampleRacks] = useState<SampleRackSummary[]>([]);
+  const [savedPluginGraphs, setSavedPluginGraphs] = useState<SavedPluginGraphSummary[]>([]);
+  const [instrumentPickerQuery, setInstrumentPickerQuery] = useState('');
+  const [instrumentPickerExpanded, setInstrumentPickerExpanded] = useState(false);
+  const [recentInstrumentChoices, setRecentInstrumentChoices] = useState<RecentInstrumentChoice[]>([]);
   const { showToast } = useToast();
+  const isDawShellView = DAW_SHELL_VIEWS.includes(activeView);
+  const normalizedInstrumentPickerQuery = instrumentPickerQuery.trim().toLowerCase();
+  const filteredQuickInstruments = QUICK_GM_INSTRUMENTS.filter((item) =>
+    normalizedInstrumentPickerQuery.length === 0 || item.name.toLowerCase().includes(normalizedInstrumentPickerQuery)
+  );
+  const filteredSampleRacks = sampleRacks.filter((rack) =>
+    normalizedInstrumentPickerQuery.length === 0 || rack.name.toLowerCase().includes(normalizedInstrumentPickerQuery)
+  );
+  const filteredInstrumentPresets = instrumentPresets.filter((preset) =>
+    normalizedInstrumentPickerQuery.length === 0
+    || preset.name.toLowerCase().includes(normalizedInstrumentPickerQuery)
+    || preset.description.toLowerCase().includes(normalizedInstrumentPickerQuery)
+  );
+  const filteredPluginGraphs = savedPluginGraphs
+    .filter((graph) => graph.category === 'instrument')
+    .filter((graph) =>
+      normalizedInstrumentPickerQuery.length === 0
+      || graph.name.toLowerCase().includes(normalizedInstrumentPickerQuery)
+      || graph.description.toLowerCase().includes(normalizedInstrumentPickerQuery)
+    );
+  const filteredRecentInstrumentChoices = recentInstrumentChoices.filter((choice) =>
+    normalizedInstrumentPickerQuery.length === 0
+    || choice.name.toLowerCase().includes(normalizedInstrumentPickerQuery)
+    || choice.subtitle.toLowerCase().includes(normalizedInstrumentPickerQuery)
+  );
+  const showExpandedInstrumentPicker = instrumentPickerExpanded || normalizedInstrumentPickerQuery.length > 0;
+  const featuredSampleRacks = showExpandedInstrumentPicker ? filteredSampleRacks : filteredSampleRacks.slice(0, 4);
+  const featuredPluginGraphs = showExpandedInstrumentPicker ? filteredPluginGraphs : filteredPluginGraphs.slice(0, 4);
+  const featuredQuickInstruments = showExpandedInstrumentPicker ? filteredQuickInstruments : filteredQuickInstruments.slice(0, 6);
+  const shouldShowPresetSection = showExpandedInstrumentPicker && filteredInstrumentPresets.length > 0;
+  const hasMoreInstrumentChoices =
+    filteredSampleRacks.length > featuredSampleRacks.length
+    || filteredPluginGraphs.length > featuredPluginGraphs.length
+    || filteredQuickInstruments.length > featuredQuickInstruments.length
+    || filteredInstrumentPresets.length > 0;
+  const pushRecentInstrumentChoice = useCallback((choice: RecentInstrumentChoice) => {
+    setRecentInstrumentChoices((prev) => [
+      choice,
+      ...prev.filter((item) => item.id !== choice.id),
+    ].slice(0, 8));
+  }, []);
 
   // Subscribe to live MIDI state (note on/off from hardware controllers)
   useEffect(() => {
@@ -117,9 +247,12 @@ const AppInner: React.FC = () => {
   // Listen for project data from Swift (loaded/created projects)
   useEffect(() => {
     const unsub = onSwiftMessage(BridgeMessages.PROJECT_DATA, (payload: unknown) => {
-      const data = payload as { project: ProjectData };
+      const data = payload as { project: ProjectData; hasFileURL?: boolean; path?: string | null };
       const proj = data.project;
       if (!proj) return;
+      setEditingClipId(null);
+      setInstrumentPickerTrackId(null);
+      setInstrumentPickerAnchor(null);
 
       // Convert Swift tracks to UI tracks
       const uiTracks: Track[] = (proj.tracks || []).map((st: SwiftTrack) => ({
@@ -127,25 +260,27 @@ const AppInner: React.FC = () => {
         name: st.name,
         type: st.type === 'master' ? 'bus' as const : st.type,
         color: trackColorToHex(st.color),
-        volume: st.volume,
+        volume: mapSwiftTrackVolume(st.volume),
         pan: st.pan,
         muted: st.isMuted,
         soloed: st.isSoloed,
         armed: st.isArmed,
+        instrumentPresetName: st.instrument?.name,
+        automation: st.automation,
         clips: (st.clips || []).map((c) => ({
           id: c.id,
           name: c.name,
           startBar: c.startBar,
           lengthBars: c.lengthBars,
           color: c.color ? trackColorToHex(c.color) : trackColorToHex(st.color),
-          notes: c.midiEvents as { id: string; pitch: number; start: number; duration: number; velocity: number; channel: number }[] | undefined,
+          notes: mapSwiftMidiEvents(c.midiEvents, c.id),
         })),
       }));
 
       setDAWState((prev) => ({
         ...prev,
         projectName: proj.name,
-        projectSaved: true,
+        projectSaved: Boolean(data.hasFileURL),
         projectDirty: false,
         transport: {
           ...prev.transport,
@@ -155,11 +290,11 @@ const AppInner: React.FC = () => {
             proj.timeSignature.denominator,
           ],
         },
-        tracks: uiTracks.length > 0 ? uiTracks : prev.tracks,
+        tracks: mergeTrackAutomation(prev.tracks, uiTracks),
         keySignature: proj.key
           ? { key: proj.key, scale: proj.keyScale ?? '', confidence: 1.0 }
-          : prev.keySignature,
-        selectedTrackId: uiTracks.length > 0 ? uiTracks[0].id : prev.selectedTrackId,
+          : { key: '', scale: '', confidence: 0 },
+        selectedTrackId: uiTracks[0]?.id ?? null,
       }));
     });
     return unsub;
@@ -176,24 +311,26 @@ const AppInner: React.FC = () => {
         name: st.name,
         type: st.type === 'master' ? 'bus' as const : st.type,
         color: trackColorToHex(st.color),
-        volume: st.volume,
+        volume: mapSwiftTrackVolume(st.volume),
         pan: st.pan,
         muted: st.isMuted,
         soloed: st.isSoloed,
         armed: st.isArmed,
+        instrumentPresetName: st.instrument?.name,
+        automation: st.automation,
         clips: (st.clips || []).map((c) => ({
           id: c.id,
           name: c.name,
           startBar: c.startBar,
           lengthBars: c.lengthBars,
           color: c.color ? trackColorToHex(c.color) : trackColorToHex(st.color),
-          notes: c.midiEvents as { id: string; pitch: number; start: number; duration: number; velocity: number; channel: number }[] | undefined,
+          notes: mapSwiftMidiEvents(c.midiEvents, c.id),
         })),
       }));
 
       setDAWState((prev) => ({
         ...prev,
-        tracks: uiTracks,
+        tracks: mergeTrackAutomation(prev.tracks, uiTracks),
         projectDirty: true,
       }));
     });
@@ -215,6 +352,18 @@ const AppInner: React.FC = () => {
       } else {
         console.error('[Project] Save failed:', data.error);
         showToast('Save failed: ' + (data.error ?? 'Unknown error'), 'error');
+      }
+    });
+    return unsub;
+  }, [showToast]);
+
+  useEffect(() => {
+    const unsub = onSwiftMessage(BridgeMessages.PROJECT_LOADED, (payload: unknown) => {
+      const data = payload as { success?: boolean; name?: string; error?: string };
+      if (data.success === false) {
+        showToast('Load failed: ' + (data.error ?? 'Unknown error'), 'error');
+      } else if (data.success) {
+        showToast(`Loaded ${data.name ?? 'project'}`, 'success');
       }
     });
     return unsub;
@@ -334,9 +483,27 @@ const AppInner: React.FC = () => {
     return unsub;
   }, []);
 
+  useEffect(() => {
+    const unsub = onSwiftMessage(BridgeMessages.INSTRUMENT_SAMPLE_RACK_LIST, (payload: unknown) => {
+      const data = payload as { racks?: SampleRackSummary[] };
+      setSampleRacks(data.racks ?? []);
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    const unsub = onSwiftMessage(BridgeMessages.PLUGIN_SAVED_LIST, (payload: unknown) => {
+      const data = payload as { graphs?: SavedPluginGraphSummary[] };
+      setSavedPluginGraphs(data.graphs ?? []);
+    });
+    return unsub;
+  }, []);
+
   // Request instrument preset list on mount
   useEffect(() => {
     sendToSwift(BridgeMessages.INSTRUMENT_LIST_PRESETS);
+    sendToSwift(BridgeMessages.INSTRUMENT_LIST_SAMPLE_RACKS);
+    sendToSwift(BridgeMessages.PLUGIN_LIST_SAVED);
   }, []);
 
   // ── Unsaved changes indicator in window title ──────────────────────────────
@@ -439,6 +606,30 @@ const AppInner: React.FC = () => {
     }
   }, [showToast]);
 
+  const handleNewProject = useCallback(() => {
+    if (dawStateRef.current.projectDirty && !window.confirm('Discard unsaved changes and create a new project?')) {
+      return;
+    }
+    setActiveView('arrange');
+    sendToSwift(BridgeMessages.NEW_PROJECT);
+  }, []);
+
+  const handleOpenProject = useCallback(() => {
+    if (dawStateRef.current.projectDirty && !window.confirm('Discard unsaved changes and open another project?')) {
+      return;
+    }
+    setActiveView('arrange');
+    sendToSwift(BridgeMessages.LOAD_PROJECT);
+  }, []);
+
+  const handleSaveProject = useCallback(() => {
+    sendToSwift(BridgeMessages.SAVE_PROJECT);
+  }, []);
+
+  const handleSaveProjectAs = useCallback(() => {
+    sendToSwift(BridgeMessages.SAVE_PROJECT_AS);
+  }, []);
+
   const handleRewind = useCallback(() => {
     setDAWState((prev) => ({
       ...prev,
@@ -494,6 +685,7 @@ const AppInner: React.FC = () => {
   // Track handlers
   const handleSelectTrack = useCallback((id: string) => {
     setDAWState((prev) => ({ ...prev, selectedTrackId: id }));
+    sendToSwift(BridgeMessages.SELECT_TRACK, { trackId: id });
   }, []);
 
   const handleToggleMute = useCallback((id: string) => {
@@ -542,6 +734,46 @@ const AppInner: React.FC = () => {
       ),
     }));
     sendToSwift(BridgeMessages.SET_TRACK_PAN, { trackId: id, pan });
+  }, []);
+
+  const handleTrackAutomationChange = useCallback((
+    id: string,
+    type: AutomationLaneType,
+    points: AutomationPoint[],
+  ) => {
+    const sortedPoints = [...points]
+      .map((point) => ({
+        bar: Math.max(1, Math.round(point.bar)),
+        value: Math.max(0, Math.min(1, point.value)),
+      }))
+      .sort((a, b) => a.bar - b.bar);
+
+    setDAWState((prev) => ({
+      ...prev,
+      tracks: prev.tracks.map((track) => {
+        if (track.id !== id) return track;
+        const existing = track.automation ?? [];
+        const otherLanes = existing.filter((lane) => lane.type !== type);
+        const nextLane: TrackAutomationLane = {
+          id: `${id}-${type}`,
+          type,
+          enabled: true,
+          points: sortedPoints,
+        };
+        return {
+          ...track,
+          automation: sortedPoints.length > 0
+            ? [...otherLanes, nextLane]
+            : otherLanes,
+        };
+      }),
+    }));
+    sendToSwift(BridgeMessages.SET_TRACK_AUTOMATION, {
+      trackId: id,
+      type,
+      points: sortedPoints,
+      enabled: true,
+    });
   }, []);
 
   const handleToggleArm = useCallback((id: string) => {
@@ -644,11 +876,20 @@ const AppInner: React.FC = () => {
             : t,
         ),
       }));
+      pushRecentInstrumentChoice({
+        kind: 'preset',
+        id: `preset-${preset.id}`,
+        name: preset.name,
+        presetId: preset.id,
+        gmProgram: preset.gmProgram,
+        subtitle: preset.description || 'Saved preset',
+      });
     } else {
       // Reset to default GM piano (program 0)
       sendToSwift(BridgeMessages.INSTRUMENT_ASSIGN_TO_TRACK, {
         trackId,
         gmProgram: 0,
+        name: 'Acoustic Grand Piano',
       });
       setDAWState((prev) => ({
         ...prev,
@@ -658,9 +899,90 @@ const AppInner: React.FC = () => {
             : t,
         ),
       }));
+      pushRecentInstrumentChoice({
+        kind: 'gm',
+        id: 'gm-0',
+        name: 'Acoustic Grand Piano',
+        gmProgram: 0,
+        subtitle: 'General MIDI',
+      });
     }
     setInstrumentPickerTrackId(null);
-  }, []);
+    setInstrumentPickerAnchor(null);
+  }, [pushRecentInstrumentChoice]);
+
+  const handleAssignGMInstrument = useCallback((trackId: string, gmProgram: number, name: string) => {
+    sendToSwift(BridgeMessages.INSTRUMENT_ASSIGN_TO_TRACK, {
+      trackId,
+      gmProgram,
+      name,
+    });
+    setDAWState((prev) => ({
+      ...prev,
+      tracks: prev.tracks.map((t) =>
+        t.id === trackId
+          ? { ...t, instrumentPresetId: undefined, instrumentPresetName: name }
+          : t,
+      ),
+    }));
+    pushRecentInstrumentChoice({
+      kind: 'gm',
+      id: `gm-${gmProgram}`,
+      name,
+      gmProgram,
+      subtitle: 'General MIDI',
+    });
+    setInstrumentPickerTrackId(null);
+    setInstrumentPickerAnchor(null);
+  }, [pushRecentInstrumentChoice]);
+
+  const handleAssignSampleRack = useCallback((trackId: string, rack: SampleRackSummary) => {
+    sendToSwift(BridgeMessages.INSTRUMENT_ASSIGN_TO_TRACK, {
+      trackId,
+      sampleRackPath: rack.path,
+    });
+    setDAWState((prev) => ({
+      ...prev,
+      tracks: prev.tracks.map((t) =>
+        t.id === trackId
+          ? { ...t, instrumentPresetId: undefined, instrumentPresetName: rack.name }
+          : t,
+      ),
+    }));
+    pushRecentInstrumentChoice({
+      kind: 'rack',
+      id: `rack-${rack.path}`,
+      name: rack.name,
+      path: rack.path,
+      subtitle: `${rack.sampleCount} samples • ${rack.zoneCount} zones`,
+    });
+    setInstrumentPickerTrackId(null);
+    setInstrumentPickerAnchor(null);
+  }, [pushRecentInstrumentChoice]);
+
+  const handleAssignPluginGraph = useCallback((trackId: string, graph: SavedPluginGraphSummary) => {
+    sendToSwift(BridgeMessages.INSTRUMENT_ASSIGN_TO_TRACK, {
+      trackId,
+      pluginGraphPath: graph.path,
+    });
+    setDAWState((prev) => ({
+      ...prev,
+      tracks: prev.tracks.map((t) =>
+        t.id === trackId
+          ? { ...t, instrumentPresetId: undefined, instrumentPresetName: graph.name }
+          : t,
+      ),
+    }));
+    pushRecentInstrumentChoice({
+      kind: 'plugin',
+      id: `plugin-${graph.path}`,
+      name: graph.name,
+      path: graph.path,
+      subtitle: graph.description || 'Saved graph synth',
+    });
+    setInstrumentPickerTrackId(null);
+    setInstrumentPickerAnchor(null);
+  }, [pushRecentInstrumentChoice]);
 
   // ── Global Keyboard Shortcuts ──────────────────────────────────────────────
   useEffect(() => {
@@ -838,6 +1160,16 @@ const AppInner: React.FC = () => {
     [dawState.tracks, dawState.selectedTrackId],
   );
 
+  useEffect(() => {
+    if (dawState.selectedTrackId) {
+      sendToSwift(BridgeMessages.SELECT_TRACK, { trackId: dawState.selectedTrackId });
+    }
+  }, [dawState.selectedTrackId]);
+  const pickerTrack = useMemo(
+    () => dawState.tracks.find((t) => t.id === instrumentPickerTrackId) ?? null,
+    [dawState.tracks, instrumentPickerTrackId],
+  );
+
   // Render the active view
   const renderView = () => {
     switch (activeView) {
@@ -849,19 +1181,27 @@ const AppInner: React.FC = () => {
             playing={dawState.transport.playing}
             recording={dawState.transport.recording}
             transportPosition={dawState.transport.position}
+            selectedTrackId={dawState.selectedTrackId}
             onSwitchView={(view, clipId) => {
               setActiveView(view);
               if (clipId) setEditingClipId(clipId);
             }}
+            onSelectTrack={handleSelectTrack}
             onToggleMute={handleToggleMute}
             onToggleSolo={handleToggleSolo}
             onToggleArm={handleToggleArm}
             onAddTrack={handleAddTrack}
             onDeleteTrack={handleDeleteTrack}
             onRenameTrack={handleRenameTrack}
-            onChangeInstrument={(trackId) => {
+            onAutomationChange={handleTrackAutomationChange}
+            onChangeInstrument={(trackId, anchor) => {
+              setDAWState((prev) => ({ ...prev, selectedTrackId: trackId }));
               setInstrumentPickerTrackId(trackId);
+              setInstrumentPickerAnchor(anchor ?? null);
+              setInstrumentPickerQuery('');
+              setInstrumentPickerExpanded(false);
               sendToSwift(BridgeMessages.INSTRUMENT_LIST_PRESETS);
+              sendToSwift(BridgeMessages.INSTRUMENT_LIST_SAMPLE_RACKS);
             }}
           />
         );
@@ -879,21 +1219,15 @@ const AppInner: React.FC = () => {
             onEffectChange={handleTrackEffectChange}
           />
         );
-      case 'instruments':
-        return <InstrumentView />;
-      case 'plugins':
-        return <PluginView />;
-      case 'chord-builder':
-        return <ChordBuilderPanel />;
-      case 'learn':
-        return <LearnPanel />;
-      case 'emotions':
-        return <EmotionsPanel />;
+      case 'sound-design':
+        return <SoundDesignView selectedTrackId={dawState.selectedTrackId} />;
+      case 'theory':
+        return <TheoryPanel />;
     }
   };
 
   return (
-    <div className="flex flex-col h-full w-full relative" style={{ background: 'var(--bg)' }}>
+    <div className={`flex flex-col h-full w-full relative ${isDawShellView ? 'daw-shell' : ''}`} style={{ background: 'var(--bg)' }}>
       {/* Aurora animated background */}
       <div className="aurora-bg">
         <div className="aurora-orb" />
@@ -934,6 +1268,10 @@ const AppInner: React.FC = () => {
           onCountInToggle={handleCountInToggle}
           projectDirty={dawState.projectDirty}
           projectName={dawState.projectName}
+          onNewProject={handleNewProject}
+          onOpenProject={handleOpenProject}
+          onSaveProject={handleSaveProject}
+          onSaveProjectAs={handleSaveProjectAs}
         />
 
         {/* View tabs */}
@@ -942,7 +1280,7 @@ const AppInner: React.FC = () => {
           style={{
             height: 30,
             borderBottom: '1px solid var(--border)',
-            background: 'rgba(8, 14, 24, 0.5)',
+            background: isDawShellView ? 'rgba(7, 7, 8, 0.78)' : 'rgba(8, 14, 24, 0.5)',
           }}
         >
           {VIEW_TABS.map((tab) => (
@@ -963,7 +1301,7 @@ const AppInner: React.FC = () => {
         {/* Main area: TrackList sidebar + View content */}
         <div className="flex flex-1 min-h-0">
           {/* Track list sidebar (visible in arrange/edit/mix views) */}
-          {activeView !== 'instruments' && activeView !== 'plugins' && activeView !== 'chord-builder' && activeView !== 'learn' && activeView !== 'emotions' && (
+          {activeView !== 'sound-design' && activeView !== 'theory' && (
             <TrackList
               tracks={dawState.tracks}
               selectedTrackId={dawState.selectedTrackId}
@@ -990,79 +1328,288 @@ const AppInner: React.FC = () => {
         {instrumentPickerTrackId && (
           <div
             style={{ position: 'fixed', inset: 0, zIndex: 100 }}
-            onClick={() => setInstrumentPickerTrackId(null)}
+            onClick={() => {
+              setInstrumentPickerTrackId(null);
+              setInstrumentPickerAnchor(null);
+              setInstrumentPickerQuery('');
+              setInstrumentPickerExpanded(false);
+            }}
           >
             <div
               onClick={(e) => e.stopPropagation()}
               style={{
                 position: 'absolute',
-                left: 130,
-                top: '30%',
-                width: 220,
-                maxHeight: 300,
+                left: instrumentPickerAnchor ? Math.min(Math.max(24, instrumentPickerAnchor.x + 12), window.innerWidth - 376) : 130,
+                top: instrumentPickerAnchor ? Math.min(Math.max(56, instrumentPickerAnchor.y - 18), window.innerHeight - 476) : Math.round(window.innerHeight * 0.22),
+                width: 352,
+                maxHeight: 452,
                 overflowY: 'auto',
-                background: 'rgba(10,14,26,0.95)',
-                border: '1px solid rgba(103,232,249,0.15)',
+                background: isDawShellView ? 'rgba(10,10,11,0.96)' : 'rgba(10,14,26,0.95)',
+                border: isDawShellView ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(103,232,249,0.15)',
                 borderRadius: 8,
-                padding: 8,
+                padding: 10,
                 zIndex: 101,
                 backdropFilter: 'blur(12px)',
               }}
             >
               <div style={{
                 fontSize: 8,
-                color: 'rgba(255,255,255,0.35)',
+                color: 'var(--text-muted)',
                 textTransform: 'uppercase',
                 letterSpacing: '0.1em',
-                marginBottom: 6,
+                marginBottom: 4,
               }}>
-                Assign Instrument
+                Track Instrument
               </div>
-              <div
-                onClick={() => handleAssignInstrument(instrumentPickerTrackId, null)}
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', lineHeight: 1.1 }}>
+                    {pickerTrack?.name ?? 'Selected Track'}
+                  </div>
+                  <div style={{ fontSize: 8, color: 'var(--text-muted)', marginTop: 3 }}>
+                    Current: {pickerTrack?.instrumentPresetName ?? 'Acoustic Grand Piano'}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                  <button
+                    className="glass-button"
+                    style={{ padding: '6px 8px', fontSize: 8, color: 'var(--text-dim)' }}
+                    onClick={() => {
+                      setInstrumentPickerTrackId(null);
+                      setInstrumentPickerAnchor(null);
+                      setInstrumentPickerQuery('');
+                      setInstrumentPickerExpanded(false);
+                      setActiveView('sound-design');
+                    }}
+                  >
+                    Open Library
+                  </button>
+                  <button
+                    className="glass-button"
+                    style={{ padding: '6px 8px', fontSize: 8, color: 'var(--text-dim)' }}
+                    onClick={() => {
+                      setInstrumentPickerTrackId(null);
+                      setInstrumentPickerAnchor(null);
+                      setInstrumentPickerQuery('');
+                      setInstrumentPickerExpanded(false);
+                    }}
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+              <input
+                value={instrumentPickerQuery}
+                onChange={(e) => setInstrumentPickerQuery(e.target.value)}
+                placeholder="Search pianos, racks, presets..."
+                autoFocus
                 style={{
-                  padding: '4px 8px',
+                  width: '100%',
+                  marginBottom: 10,
+                  padding: '7px 9px',
+                  fontSize: 10,
+                  borderRadius: 6,
+                  border: '1px solid rgba(255,255,255,0.09)',
+                  background: 'rgba(255,255,255,0.04)',
+                  color: 'var(--text)',
+                  outline: 'none',
+                }}
+              />
+              <div
+                onClick={() => handleAssignGMInstrument(instrumentPickerTrackId, 0, 'Acoustic Grand Piano')}
+                style={{
+                  padding: '6px 8px',
                   cursor: 'pointer',
                   fontSize: 9,
-                  color: 'rgba(255,255,255,0.4)',
+                  color: 'var(--text-dim)',
                   borderRadius: 4,
+                  border: '1px solid rgba(255,255,255,0.06)',
+                  background: 'rgba(255,255,255,0.03)',
+                  marginBottom: 10,
                 }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(103,232,249,0.08)')}
+                onMouseEnter={(e) => (e.currentTarget.style.background = isDawShellView ? 'rgba(255,255,255,0.06)' : 'rgba(103,232,249,0.08)')}
                 onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
               >
-                None (default piano)
+                Reset to default piano
               </div>
-              {instrumentPresets.map((preset) => {
-                const isActive = dawState.tracks.find((t) => t.id === instrumentPickerTrackId)?.instrumentPresetId === preset.id;
-                return (
-                  <div
-                    key={preset.id}
-                    onClick={() => handleAssignInstrument(instrumentPickerTrackId, preset)}
-                    style={{
-                      padding: '4px 8px',
-                      cursor: 'pointer',
-                      fontSize: 9,
-                      color: '#e2e8f0',
-                      borderRadius: 4,
-                      background: isActive ? 'rgba(167,139,250,0.15)' : 'transparent',
-                    }}
-                    onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'rgba(103,232,249,0.08)'; }}
-                    onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
-                  >
-                    {preset.name}
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {featuredSampleRacks.length > 0 && (
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+                      <div style={{ fontSize: 8, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                        Best Sounds
+                      </div>
+                      <div style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+                        Saved sample racks
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {featuredSampleRacks.map((rack) => (
+                        <button
+                          key={rack.path}
+                          className="glass-button"
+                          onClick={() => handleAssignSampleRack(instrumentPickerTrackId, rack)}
+                          style={{
+                            padding: '8px 9px',
+                            textAlign: 'left',
+                          }}
+                        >
+                          <div style={{ fontSize: 9, color: 'var(--text)' }}>{rack.name}</div>
+                          <div style={{ fontSize: 8, color: 'var(--text-muted)', marginTop: 2 }}>
+                            {rack.sampleCount} samples • {rack.zoneCount} zones
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                    {!showExpandedInstrumentPicker && filteredSampleRacks.length > featuredSampleRacks.length && (
+                      <div style={{ fontSize: 8, color: 'var(--text-muted)', marginTop: 5 }}>
+                        Saved racks are the fastest route to better sound.
+                      </div>
+                    )}
                   </div>
-                );
-              })}
-              {instrumentPresets.length === 0 && (
-                <div style={{
-                  fontSize: 8,
-                  color: 'rgba(255,255,255,0.35)',
-                  padding: 8,
-                  textAlign: 'center',
-                }}>
-                  No instruments yet — create one in the Instruments tab
+                )}
+
+                {featuredPluginGraphs.length > 0 && (
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+                      <div style={{ fontSize: 8, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                        Graph Synths
+                      </div>
+                      <div style={{ fontSize: 8, color: 'var(--text-muted)' }}>
+                        Saved from Plugins
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {featuredPluginGraphs.map((graph) => (
+                        <button
+                          key={graph.path}
+                          className="glass-button"
+                          onClick={() => handleAssignPluginGraph(instrumentPickerTrackId, graph)}
+                          style={{
+                            padding: '8px 9px',
+                            textAlign: 'left',
+                          }}
+                        >
+                          <div style={{ fontSize: 9, color: 'var(--text)' }}>{graph.name}</div>
+                          <div style={{ fontSize: 8, color: 'var(--text-muted)', marginTop: 2 }}>
+                            {graph.description || 'Saved graph synth'}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {filteredRecentInstrumentChoices.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 8, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>
+                      Recent
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {filteredRecentInstrumentChoices.map((choice) => (
+                        <button
+                          key={choice.id}
+                          className="glass-button"
+                          onClick={() => {
+                            if (choice.kind === 'gm') handleAssignGMInstrument(instrumentPickerTrackId, choice.gmProgram, choice.name);
+                            if (choice.kind === 'rack') handleAssignSampleRack(instrumentPickerTrackId, { path: choice.path, name: choice.name, sampleCount: 0, zoneCount: 0 });
+                            if (choice.kind === 'plugin') handleAssignPluginGraph(instrumentPickerTrackId, {
+                              path: choice.path,
+                              name: choice.name,
+                              category: 'instrument',
+                              description: choice.subtitle,
+                              version: '1.0',
+                              modifiedAt: new Date().toISOString(),
+                            });
+                            if (choice.kind === 'preset') {
+                              const preset = instrumentPresets.find((item) => item.id === choice.presetId);
+                              if (preset) handleAssignInstrument(instrumentPickerTrackId, preset);
+                            }
+                          }}
+                          style={{ padding: '7px 8px', textAlign: 'left' }}
+                        >
+                          <div style={{ fontSize: 9, color: 'var(--text)' }}>{choice.name}</div>
+                          <div style={{ fontSize: 8, color: 'var(--text-muted)', marginTop: 2 }}>{choice.subtitle}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <div style={{ fontSize: 8, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>
+                    Quick Picks
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 6 }}>
+                    {featuredQuickInstruments.map((item) => (
+                      <button
+                        key={item.gmProgram}
+                        className="glass-button"
+                        onClick={() => handleAssignGMInstrument(instrumentPickerTrackId, item.gmProgram, item.name)}
+                        style={{
+                          padding: '7px 8px',
+                          textAlign: 'left',
+                          fontSize: 9,
+                          color: 'var(--text)',
+                        }}
+                      >
+                        {item.name}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              )}
+
+                {!showExpandedInstrumentPicker && hasMoreInstrumentChoices && (
+                  <button
+                    className="glass-button"
+                    onClick={() => setInstrumentPickerExpanded(true)}
+                    style={{
+                      padding: '8px 9px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      fontSize: 9,
+                      color: 'var(--text)',
+                    }}
+                  >
+                    <span>More Sounds</span>
+                    <span style={{ color: 'var(--text-muted)', fontSize: 8 }}>
+                      racks • presets • full list
+                    </span>
+                  </button>
+                )}
+
+                {shouldShowPresetSection && (
+                  <div>
+                    <div style={{ fontSize: 8, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>
+                      AI + Saved Presets
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {filteredInstrumentPresets.map((preset) => {
+                        const isActive = dawState.tracks.find((t) => t.id === instrumentPickerTrackId)?.instrumentPresetId === preset.id;
+                        return (
+                          <button
+                            key={preset.id}
+                            className="glass-button"
+                            onClick={() => handleAssignInstrument(instrumentPickerTrackId, preset)}
+                            style={{
+                              padding: '7px 8px',
+                              textAlign: 'left',
+                              background: isActive ? 'rgba(255,255,255,0.08)' : undefined,
+                            }}
+                          >
+                            <div style={{ fontSize: 9, color: 'var(--text)' }}>{preset.name}</div>
+                            <div style={{ fontSize: 8, color: 'var(--text-muted)', marginTop: 2 }}>
+                              {preset.description}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}

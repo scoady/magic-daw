@@ -24,10 +24,13 @@ bundle: build
 	rm -rf "$(APP_BUNDLE)"
 	mkdir -p "$(APP_BUNDLE)/Contents/MacOS"
 	mkdir -p "$(APP_BUNDLE)/Contents/Resources/ui"
+	mkdir -p "$(APP_BUNDLE)/Contents/Resources/DemoInstruments"
 	# Copy binary
 	cp $(BUILD_DIR)/MagicDAW "$(APP_BUNDLE)/Contents/MacOS/MagicDAW"
 	# Copy web UI
 	cp -R MagicDAW-UI/dist/* "$(APP_BUNDLE)/Contents/Resources/ui/"
+	# Copy bundled demo instruments
+	cp -R DemoInstruments/* "$(APP_BUNDLE)/Contents/Resources/DemoInstruments/"
 	# Copy Info.plist
 	cp Info.plist "$(APP_BUNDLE)/Contents/Info.plist"
 	# Copy icon if it exists

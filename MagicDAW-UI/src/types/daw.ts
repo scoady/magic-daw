@@ -51,6 +51,21 @@ export interface Track {
   sends?: SendLevel[];
   instrumentPresetId?: string;
   instrumentPresetName?: string;
+  automation?: TrackAutomationLane[];
+}
+
+export type AutomationLaneType = 'volume' | 'pan';
+
+export interface AutomationPoint {
+  bar: number;
+  value: number;
+}
+
+export interface TrackAutomationLane {
+  id: string;
+  type: AutomationLaneType;
+  points: AutomationPoint[];
+  enabled?: boolean;
 }
 
 // ── Effects Chain Types ─────────────────────────────────────────────────────
@@ -229,8 +244,9 @@ export interface DAWState {
   inputLevelR: number;
 }
 
-export type ViewId = 'arrange' | 'edit' | 'mix' | 'instruments' | 'plugins' | 'chord-builder' | 'learn' | 'emotions';
-export type LearnSubView = 'circle' | 'intervals' | 'tonnetz' | 'piano-hero';
+export type ViewId = 'arrange' | 'edit' | 'mix' | 'sound-design' | 'theory';
+export type TheorySubView = 'circle' | 'chord-builder' | 'drills' | 'piano-hero' | 'tonnetz' | 'emotions' | 'harmonic-lab';
+export type SoundDesignSubView = 'browser' | 'plugin-builder';
 
 // ── Project data from Swift (matches DAWProject Codable output) ──────────
 
@@ -262,7 +278,17 @@ export interface SwiftTrack {
   height: number;
   effects: unknown[];
   sends: unknown[];
-  instrument?: unknown;
+  automation?: Array<{
+    id: string;
+    type: AutomationLaneType;
+    points: AutomationPoint[];
+    enabled: boolean;
+  }>;
+  instrument?: {
+    type: string;
+    name: string;
+    path?: string | null;
+  };
   outputBusId?: string;
 }
 

@@ -247,7 +247,7 @@ struct WebViewContainer: NSViewRepresentable {
                 // Start MIDI after the UI is loaded so JS handlers are registered
                 viewModel.bridge.startMIDI()
 
-                // Auto-create a default project if none exists (so track/clip operations work)
+                // Auto-create a blank project if none exists so the Arrange view starts from an empty slate.
                 if viewModel.bridge.currentProject == nil {
                     viewModel.bridge.newProject()
                 }

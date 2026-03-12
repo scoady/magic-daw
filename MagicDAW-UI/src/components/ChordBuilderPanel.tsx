@@ -3,48 +3,8 @@ import { Player } from '@remotion/player';
 import { CircleOfFifths1, chordToMidiNotes, getSurpriseChord, getFamousProgressions, resolveProgression, findHarmonicPath } from '../compositions/CircleOfFifths1';
 import type { CircleOfFifthsProps } from '../compositions/CircleOfFifths1';
 import { onSwiftMessage, onMidiStateChange, BridgeMessages, previewNote } from '../bridge';
-
-// ── Bridge payload types ──────────────────────────────────────────────────
-
-interface ChordDetectedPayload {
-  chord: string | null;
-  root?: string;
-  quality?: string;
-  notes?: number[];
-}
-
-// ── Music theory helpers ──────────────────────────────────────────────────
-
-const CHROMATIC = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const ENHARMONIC: Record<string, string> = {
-  'C#': 'Db', 'D#': 'Eb', 'G#': 'Ab', 'A#': 'Bb', 'Gb': 'F#',
-  'Cb': 'B', 'Fb': 'E', 'B#': 'C', 'E#': 'F',
-};
-const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11];
-const MINOR_SCALE = [0, 2, 3, 5, 7, 8, 10];
-const MAJOR_QUALITIES = ['', 'm', 'm', '', '', 'm', 'dim'] as const;
-const MINOR_QUALITIES = ['m', 'dim', '', 'm', 'm', '', ''] as const;
-const FLAT_KEYS = new Set(['F', 'Bb', 'Eb', 'Ab', 'Db']);
-const ALL_KEYS = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F'];
-
-function normalizeRoot(n: string): string { return ENHARMONIC[n] ?? n; }
-function rootToChroma(root: string): number { return CHROMATIC.indexOf(normalizeRoot(root)); }
-
-function inferDiatonicChord(midiNote: number, key: string, mode: 'major' | 'minor'): string {
-  const rootChroma = rootToChroma(key);
-  const noteChroma = midiNote % 12;
-  const useFlats = FLAT_KEYS.has(key);
-  const chordRoot = useFlats
-    ? ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'][noteChroma]
-    : CHROMATIC[noteChroma];
-  if (rootChroma < 0) return chordRoot;
-  const interval = ((noteChroma - rootChroma) % 12 + 12) % 12;
-  const scaleIntervals = mode === 'major' ? MAJOR_SCALE : MINOR_SCALE;
-  const qualities = mode === 'major' ? MAJOR_QUALITIES : MINOR_QUALITIES;
-  const degreeIdx = scaleIntervals.indexOf(interval);
-  if (degreeIdx < 0) return chordRoot;
-  return chordRoot + qualities[degreeIdx];
-}
+import { ALL_KEYS, inferDiatonicChord } from '../lib/musicTheory';
+import type { ChordDetectedPayload } from '../lib/musicTheory';
 
 // ── Component ──────────────────────────────────────────────────────────────
 
@@ -329,12 +289,12 @@ export const ChordBuilderPanel: React.FC = () => {
   const btnStyle = (active: boolean, color = '#67e8f9'): React.CSSProperties => ({
     padding: '5px 12px',
     fontSize: 11,
-    fontFamily: "'SF Mono', 'Fira Code', monospace",
+    fontFamily: 'var(--font-mono)',
     fontWeight: active ? 700 : 500,
     background: active ? `${color}20` : 'rgba(120, 200, 220, 0.04)',
     border: `1px solid ${active ? `${color}66` : 'rgba(120, 200, 220, 0.1)'}`,
     borderRadius: 6,
-    color: active ? color : '#64748b',
+    color: active ? color : 'var(--text-muted)',
     cursor: 'pointer',
     transition: 'all 0.15s ease',
     backdropFilter: 'blur(8px)',
@@ -385,12 +345,12 @@ export const ChordBuilderPanel: React.FC = () => {
           {ALL_KEYS.map((k) => (
             <button key={k} onClick={() => setActiveKey(k)} style={{
               padding: '3px 7px', fontSize: 11,
-              fontFamily: "'SF Mono', 'Fira Code', monospace",
+              fontFamily: 'var(--font-mono)',
               fontWeight: k === activeKey ? 700 : 400,
               background: k === activeKey ? 'rgba(103, 232, 249, 0.25)' : 'rgba(120, 200, 220, 0.04)',
               border: `1px solid ${k === activeKey ? 'rgba(103, 232, 249, 0.5)' : 'rgba(120, 200, 220, 0.08)'}`,
               borderRadius: 4,
-              color: k === activeKey ? '#67e8f9' : '#64748b',
+              color: k === activeKey ? '#67e8f9' : 'var(--text-muted)',
               cursor: 'pointer', transition: 'all 0.15s ease',
               backdropFilter: 'blur(8px)', minWidth: 28, textAlign: 'center',
             }}>
@@ -404,7 +364,7 @@ export const ChordBuilderPanel: React.FC = () => {
           {(['major', 'minor'] as const).map((m) => (
             <button key={m} onClick={() => setActiveMode(m)} style={{
               padding: '3px 10px', fontSize: 11,
-              fontFamily: "'SF Mono', 'Fira Code', monospace",
+              fontFamily: 'var(--font-mono)',
               fontWeight: m === activeMode ? 700 : 400,
               background: m === activeMode
                 ? (m === 'minor' ? 'rgba(167, 139, 250, 0.25)' : 'rgba(103, 232, 249, 0.25)')
@@ -413,7 +373,7 @@ export const ChordBuilderPanel: React.FC = () => {
                 ? (m === 'minor' ? 'rgba(167, 139, 250, 0.5)' : 'rgba(103, 232, 249, 0.5)')
                 : 'rgba(120, 200, 220, 0.08)'}`,
               borderRadius: 4,
-              color: m === activeMode ? (m === 'minor' ? '#a78bfa' : '#67e8f9') : '#64748b',
+              color: m === activeMode ? (m === 'minor' ? '#a78bfa' : '#67e8f9') : 'var(--text-muted)',
               cursor: 'pointer', transition: 'all 0.15s ease',
               backdropFilter: 'blur(8px)', textTransform: 'capitalize',
             }}>
@@ -428,7 +388,7 @@ export const ChordBuilderPanel: React.FC = () => {
         {currentChords.length > 0 && (
           <span style={{
             pointerEvents: 'auto', fontSize: 10,
-            fontFamily: "'SF Mono', monospace", color: '#475569',
+            fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
             padding: '3px 8px',
             background: 'rgba(10, 14, 26, 0.6)',
             borderRadius: 4, border: '1px solid rgba(120, 200, 220, 0.08)',
@@ -463,14 +423,14 @@ export const ChordBuilderPanel: React.FC = () => {
             border: '1px solid rgba(120, 200, 220, 0.1)',
             borderRadius: 6, backdropFilter: 'blur(8px)',
           }}>
-            <span style={{ fontSize: 10, fontFamily: "'SF Mono', monospace", color: '#64748b' }}>BPM</span>
+            <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>BPM</span>
             <input
               type="range" min={40} max={240} value={bpm}
               onChange={(e) => setBpm(Number(e.target.value))}
               style={{ width: 60, height: 14, accentColor: '#67e8f9' }}
             />
             <span style={{
-              fontSize: 11, fontFamily: "'SF Mono', monospace",
+              fontSize: 11, fontFamily: 'var(--font-mono)',
               color: '#67e8f9', fontWeight: 700, minWidth: 28, textAlign: 'right',
             }}>{bpm}</span>
           </div>
@@ -498,15 +458,15 @@ export const ChordBuilderPanel: React.FC = () => {
                 borderRadius: 8, padding: 12, minWidth: 280,
                 backdropFilter: 'blur(12px)', zIndex: 100,
               }}>
-                <div style={{ fontSize: 10, fontFamily: "'SF Mono', monospace", color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
+                <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>
                   Harmonic Path Builder
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 9, color: '#64748b', marginBottom: 3, fontFamily: "'SF Mono', monospace" }}>FROM</div>
+                    <div style={{ fontSize: 9, color: 'var(--text-muted)', marginBottom: 3, fontFamily: 'var(--font-mono)' }}>FROM</div>
                     <select value={buildPathFrom} onChange={(e) => setBuildPathFrom(e.target.value)} style={{
                       width: '100%', padding: '4px 6px', fontSize: 12,
-                      fontFamily: "'SF Mono', monospace", fontWeight: 700,
+                      fontFamily: 'var(--font-mono)', fontWeight: 700,
                       background: 'rgba(45, 212, 191, 0.08)',
                       border: '1px solid rgba(45, 212, 191, 0.2)',
                       borderRadius: 4, color: '#2dd4bf', cursor: 'pointer',
@@ -514,12 +474,12 @@ export const ChordBuilderPanel: React.FC = () => {
                       {ALL_CHORDS.map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
                   </div>
-                  <div style={{ color: '#475569', fontSize: 14, paddingTop: 14 }}>→</div>
+                  <div style={{ color: 'var(--text-muted)', fontSize: 14, paddingTop: 14 }}>→</div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 9, color: '#64748b', marginBottom: 3, fontFamily: "'SF Mono', monospace" }}>TO</div>
+                    <div style={{ fontSize: 9, color: 'var(--text-muted)', marginBottom: 3, fontFamily: 'var(--font-mono)' }}>TO</div>
                     <select value={buildPathTo} onChange={(e) => setBuildPathTo(e.target.value)} style={{
                       width: '100%', padding: '4px 6px', fontSize: 12,
-                      fontFamily: "'SF Mono', monospace", fontWeight: 700,
+                      fontFamily: 'var(--font-mono)', fontWeight: 700,
                       background: 'rgba(167, 139, 250, 0.08)',
                       border: '1px solid rgba(167, 139, 250, 0.2)',
                       borderRadius: 4, color: '#a78bfa', cursor: 'pointer',
@@ -529,16 +489,16 @@ export const ChordBuilderPanel: React.FC = () => {
                   </div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
-                  <span style={{ fontSize: 9, color: '#64748b', fontFamily: "'SF Mono', monospace", minWidth: 36 }}>STEPS</span>
+                  <span style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', minWidth: 36 }}>STEPS</span>
                   <input type="range" min={3} max={12} value={buildPathSteps}
                     onChange={(e) => setBuildPathSteps(Number(e.target.value))}
                     style={{ flex: 1, height: 14, accentColor: '#2dd4bf' }}
                   />
-                  <span style={{ fontSize: 12, fontFamily: "'SF Mono', monospace", color: '#2dd4bf', fontWeight: 700 }}>{buildPathSteps}</span>
+                  <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: '#2dd4bf', fontWeight: 700 }}>{buildPathSteps}</span>
                 </div>
                 <button onClick={handleBuildPath} style={{
                   width: '100%', padding: '6px 12px', fontSize: 12,
-                  fontFamily: "'SF Mono', monospace", fontWeight: 700,
+                  fontFamily: 'var(--font-mono)', fontWeight: 700,
                   background: 'rgba(45, 212, 191, 0.15)',
                   border: '1px solid rgba(45, 212, 191, 0.3)',
                   borderRadius: 6, color: '#2dd4bf', cursor: 'pointer',
@@ -565,21 +525,21 @@ export const ChordBuilderPanel: React.FC = () => {
                 borderRadius: 8, padding: 8, minWidth: 220, maxHeight: 280, overflowY: 'auto',
                 backdropFilter: 'blur(12px)', zIndex: 100,
               }}>
-                <div style={{ fontSize: 10, fontFamily: "'SF Mono', monospace", color: '#64748b', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6, padding: '0 4px' }}>
+                <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6, padding: '0 4px' }}>
                   Famous Progressions
                 </div>
                 {getFamousProgressions().map((prog, i) => (
                   <button key={i} onClick={() => handleImportProgression(i)} style={{
                     display: 'block', width: '100%', padding: '5px 8px',
-                    fontSize: 11, fontFamily: "'SF Mono', monospace",
+                    fontSize: 11, fontFamily: 'var(--font-mono)',
                     background: 'transparent',
                     border: 'none', borderRadius: 4,
-                    color: '#e2e8f0', cursor: 'pointer', textAlign: 'left',
+                    color: 'var(--text)', cursor: 'pointer', textAlign: 'left',
                   }}>
                     <span style={{ color: '#f472b6', fontWeight: 700 }}>{prog.name}</span>
-                    {prog.artist && <span style={{ color: '#64748b' }}> — {prog.artist}</span>}
+                    {prog.artist && <span style={{ color: 'var(--text-muted)' }}> — {prog.artist}</span>}
                     <br />
-                    <span style={{ color: '#475569', fontSize: 9 }}>{prog.romans.join(' → ')}</span>
+                    <span style={{ color: 'var(--text-muted)', fontSize: 9 }}>{prog.romans.join(' → ')}</span>
                   </button>
                 ))}
               </div>

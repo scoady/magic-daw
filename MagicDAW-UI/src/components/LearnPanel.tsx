@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { LearnSubView } from '../types/daw';
+type LearnSubView = 'circle' | 'intervals' | 'tonnetz' | 'piano-hero';
 import { IntervalTrainerPanel } from './IntervalTrainerPanel';
 import { CircleOfFifthsPanel } from './CircleOfFifthsPanel';
 import { TonnetzPanel } from './TonnetzPanel';
@@ -37,8 +37,8 @@ export const LearnPanel: React.FC = () => {
                 background: isActive ? 'rgba(103,232,249,0.08)' : 'transparent',
                 border: isActive ? '1px solid rgba(103,232,249,0.2)' : '1px solid transparent',
                 borderRadius: 4,
-                color: isActive ? '#67e8f9' : '#94a3b8',
-                fontSize: 11, fontFamily: 'monospace', fontWeight: isActive ? 700 : 500,
+                color: isActive ? 'var(--cyan)' : 'var(--text-dim)',
+                fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: isActive ? 700 : 500,
                 cursor: 'pointer',
                 transition: 'all 0.15s ease',
               }}
@@ -49,8 +49,8 @@ export const LearnPanel: React.FC = () => {
           );
         })}
         <span style={{
-          marginLeft: 'auto', color: '#94a3b8', fontSize: 9,
-          fontFamily: 'monospace', opacity: 0.4,
+          marginLeft: 'auto', color: 'var(--text-dim)', fontSize: 9,
+          fontFamily: 'var(--font-mono)', opacity: 0.5,
         }}>
           {SUB_VIEWS.find(sv => sv.id === activeSubView)?.description}
         </span>

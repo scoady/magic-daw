@@ -16,21 +16,21 @@ export interface LiveMixerProps {
   effectsChains?: Record<string, EffectSlot[]>;
 }
 
-// ── Aurora color constants ──────────────────────────────────────────────────
+// ── Mixer palette ───────────────────────────────────────────────────────────
 
 const AURORA = {
-  bg: '#0a0f1a',
-  teal: '#2dd4bf',
-  green: '#34d399',
-  cyan: '#67e8f9',
-  purple: '#a78bfa',
-  pink: '#f472b6',
-  gold: '#fbbf24',
-  orange: '#fb923c',
-  textDim: '#94a3b8',
-  textMuted: '#64748b',
-  text: '#e2e8f0',
-  border: 'rgba(120,200,220,0.12)',
+  bg: '#070708',
+  teal: '#aeb4bc',
+  green: '#bcc4cc',
+  cyan: '#d8dbe1',
+  purple: '#b9bec6',
+  pink: '#c8ccd2',
+  gold: '#d6be8a',
+  orange: '#bfa28a',
+  textDim: '#a8aeb6',
+  textMuted: '#6e747c',
+  text: '#f1f3f5',
+  border: 'rgba(255,255,255,0.09)',
 };
 
 // ── EQ data (matches MixView) ───────────────────────────────────────────────
@@ -74,7 +74,7 @@ function generateEqFill(w: number, h: number, points: number[]): string {
 
 // ── Sub-components (memoized for perf) ──────────────────────────────────────
 
-/** VU meter bar with aurora gradient, spring physics, peak hold, glow */
+/** VU meter bar with restrained grayscale fill and peak hold */
 const VUBar: React.FC<{
   level: number;
   width: number;
@@ -96,63 +96,48 @@ const VUBar: React.FC<{
   const fillH = springLevel * height;
   const peakDecay = Math.max(level, level * (1 - (frame % 60) / 120));
   const peakY = height - peakDecay * height;
-  const glowIntensity = Math.min(1, level * 1.5);
-  const blazeFilter = level > 0.85
-    ? `drop-shadow(0 0 ${6 + level * 10}px ${AURORA.pink}) drop-shadow(0 0 ${3 + level * 5}px ${AURORA.gold})`
-    : `drop-shadow(0 0 ${2 + glowIntensity * 4}px ${AURORA.cyan})`;
   const ghostH = Math.min(height, fillH * 1.15);
   const gradientId = `vu-grad-${channelIndex}-${side}`;
 
   return (
-    <svg width={width} height={height} style={{ filter: blazeFilter }}>
+    <svg width={width} height={height}>
       <defs>
         <linearGradient id={gradientId} x1="0" y1="1" x2="0" y2="0">
-          <stop offset="0%" stopColor={AURORA.cyan} stopOpacity={0.9} />
-          <stop offset="45%" stopColor={AURORA.green} stopOpacity={0.85} />
-          <stop offset="70%" stopColor={AURORA.gold} stopOpacity={0.8} />
-          <stop offset="90%" stopColor={AURORA.pink} stopOpacity={0.9} />
-          <stop offset="100%" stopColor="#ff3080" stopOpacity={1} />
+          <stop offset="0%" stopColor="#6c7178" stopOpacity={0.9} />
+          <stop offset="55%" stopColor="#bec4cc" stopOpacity={0.88} />
+          <stop offset="100%" stopColor="#f4f6f8" stopOpacity={1} />
         </linearGradient>
       </defs>
-      <rect x={0} y={0} width={width} height={height} rx={2} fill="rgba(0,0,0,0.4)" />
+      <rect x={0} y={0} width={width} height={height} rx={2} fill="rgba(255,255,255,0.04)" />
       <rect x={0} y={height - ghostH} width={width} height={ghostH} rx={2}
-        fill={AURORA.cyan} opacity={0.06} />
+        fill={AURORA.text} opacity={0.025} />
       <rect x={0} y={height - fillH} width={width} height={fillH} rx={2}
         fill={`url(#${gradientId})`} />
       {peakDecay > 0.02 && (
         <rect x={0} y={peakY - 1} width={width} height={2}
-          fill={peakDecay > 0.85 ? AURORA.pink : AURORA.gold} opacity={0.95} />
+          fill={peakDecay > 0.85 ? AURORA.text : AURORA.gold} opacity={0.95} />
       )}
     </svg>
   );
 };
 
-/** Fader visualization — glowing line with aurora gradient fill */
+/** Fader visualization — restrained line/fill */
 const FaderVis: React.FC<{
   value: number;
   width: number;
   height: number;
   color: string;
   frame: number;
-}> = ({ value, width, height, color, frame }) => {
+}> = ({ value, width, height, color, frame: _frame }) => {
   const fillH = value * height;
   const thumbY = height - fillH;
-  const particleCount = 3;
-  const particles = Array.from({ length: particleCount }, (_, i) => {
-    const phase = (frame * 0.08 + i * 2.1) % 1;
-    const px = width / 2 + Math.sin(frame * 0.15 + i * 1.7) * (width * 0.3);
-    const py = thumbY - phase * 20;
-    const opacity = Math.max(0, 0.6 - phase);
-    return { px, py, opacity, r: 1 + (1 - phase) * 1.5 };
-  });
 
   return (
     <svg width={width} height={height}>
       <defs>
         <linearGradient id={`fader-fill-${color}`} x1="0" y1="1" x2="0" y2="0">
           <stop offset="0%" stopColor={color} stopOpacity={0.6} />
-          <stop offset="50%" stopColor={AURORA.cyan} stopOpacity={0.3} />
-          <stop offset="100%" stopColor={AURORA.purple} stopOpacity={0.1} />
+          <stop offset="100%" stopColor={AURORA.text} stopOpacity={0.12} />
         </linearGradient>
       </defs>
       <rect x={0} y={0} width={width} height={height} rx={3} fill="rgba(0,0,0,0.4)"
@@ -163,16 +148,12 @@ const FaderVis: React.FC<{
         stroke={color} strokeWidth={2} opacity={0.9} />
       <circle cx={width / 2} cy={thumbY} r={3.5}
         fill={color} opacity={1}
-        filter={`drop-shadow(0 0 6px ${color})`} />
-      {particles.map((p, i) => (
-        <circle key={i} cx={p.px} cy={p.py} r={p.r}
-          fill={color} opacity={p.opacity} />
-      ))}
+        filter="drop-shadow(0 0 2px rgba(255,255,255,0.08))" />
     </svg>
   );
 };
 
-/** Pan indicator — circular aurora arc */
+/** Pan indicator */
 const PanArc: React.FC<{
   pan: number;
   size: number;
@@ -194,12 +175,12 @@ const PanArc: React.FC<{
 
   return (
     <svg width={size} height={size}>
-      <circle cx={cx} cy={cy} r={r} fill="none" stroke="rgba(120,200,220,0.08)" strokeWidth={2} />
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth={2} />
       {sweep > 0.5 && (
         <path
           d={`M ${sx} ${sy} A ${r} ${r} 0 ${largeArc} 1 ${ex} ${ey}`}
           fill="none" stroke={color} strokeWidth={2.5} strokeLinecap="round"
-          opacity={0.8} filter={`drop-shadow(0 0 4px ${color})`}
+          opacity={0.8}
         />
       )}
       <circle cx={cx} cy={cy} r={1.5} fill={AURORA.textDim} opacity={0.5} />
@@ -235,7 +216,7 @@ const EqCurve: React.FC<{
         fill={color} opacity={0.1} />
       <path d={generateEqPath(width, height, animatedPoints)}
         fill="none" stroke={color} strokeWidth={1.2} strokeLinecap="round"
-        filter={`drop-shadow(0 0 3px ${hexToRgba(color, 0.5)})`} />
+        filter={`drop-shadow(0 0 1px ${hexToRgba(color, 0.2)})`} />
     </svg>
   );
 };
@@ -267,7 +248,7 @@ const InsertSlots = React.memo<{
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             background: effect
               ? (effect.bypassed ? 'rgba(100,116,139,0.15)' : `${hexToRgba(color, 0.15)}`)
-              : 'rgba(120,200,220,0.04)',
+              : 'rgba(255,255,255,0.03)',
             border: `1px solid ${effect
               ? (effect.bypassed ? 'rgba(100,116,139,0.3)' : hexToRgba(color, 0.3))
               : AURORA.border}`,
@@ -303,8 +284,8 @@ const SendIndicators = React.memo<{
       {sends.map((send, i) => (
         <div key={i} style={{
           width: 8, height: 8, borderRadius: '50%',
-          background: `rgba(103, 232, 249, ${Math.max(0.15, send.level)})`,
-          border: '1px solid rgba(103, 232, 249, 0.3)',
+          background: `rgba(255, 255, 255, ${Math.max(0.12, send.level * 0.75)})`,
+          border: '1px solid rgba(255, 255, 255, 0.18)',
         }} title={`Send ${i + 1}: ${(send.level * 100).toFixed(0)}%`} />
       ))}
     </div>
@@ -337,35 +318,34 @@ const ChannelStrip: React.FC<{
   const faderHeight = stripHeight * 0.25;
 
   const opacity = isMuted ? 0.25 : dimmed ? 0.2 : 1;
-  const selectedGlow = isSelected
-    ? `0 0 20px ${hexToRgba(track.color, 0.3)}, 0 0 40px ${hexToRgba(track.color, 0.15)}`
-    : 'none';
+  const selectedGlow = isSelected ? 'inset 0 1px 0 rgba(255,255,255,0.03)' : 'none';
   const soloPulse = isSoloed ? 0.6 + Math.sin(frame * 0.15) * 0.4 : 0;
+  const accentColor = isSelected ? AURORA.text : AURORA.textDim;
 
   return (
     <div
       style={{
         width: stripWidth, height: stripHeight, display: 'flex', flexDirection: 'column',
         alignItems: 'center', gap: 3, padding: 5,
-        background: isSelected ? 'rgba(120,200,220,0.08)' : 'rgba(120,200,220,0.04)',
-        border: `1px solid ${isSelected ? hexToRgba(track.color, 0.4) : AURORA.border}`,
+        background: isSelected ? 'rgba(255,255,255,0.065)' : 'rgba(255,255,255,0.03)',
+        border: `1px solid ${isSelected ? 'rgba(255,255,255,0.14)' : AURORA.border}`,
         borderRadius: 8, backdropFilter: 'blur(24px)', opacity,
         transition: 'opacity 0.3s ease', boxShadow: selectedGlow,
         position: 'relative', overflow: 'hidden', flexShrink: 0,
       }}
       data-track-id={track.id}
     >
-      {/* Aurora accent stripe */}
+      {/* Header accent */}
       <div style={{
         position: 'absolute', top: 0, left: 0, right: 0, height: 3,
-        background: `linear-gradient(90deg, transparent, ${track.color}, transparent)`,
-        opacity: isSelected ? 0.9 : 0.5,
+        background: `linear-gradient(90deg, transparent, ${hexToRgba(track.color, 0.55)}, transparent)`,
+        opacity: isSelected ? 0.5 : 0.2,
       }} />
 
       {isSoloed && (
         <div style={{
           position: 'absolute', inset: -1, borderRadius: 8,
-          border: `2px solid ${AURORA.gold}`, opacity: soloPulse, pointerEvents: 'none',
+          border: `1.5px solid ${AURORA.gold}`, opacity: soloPulse, pointerEvents: 'none',
         }} />
       )}
 
@@ -375,8 +355,8 @@ const ChannelStrip: React.FC<{
           justifyContent: 'center', pointerEvents: 'none', zIndex: 5,
         }}>
           <svg width={30} height={30} opacity={0.3}>
-            <line x1={5} y1={5} x2={25} y2={25} stroke={AURORA.pink} strokeWidth={2} />
-            <line x1={25} y1={5} x2={5} y2={25} stroke={AURORA.pink} strokeWidth={2} />
+            <line x1={5} y1={5} x2={25} y2={25} stroke={AURORA.textDim} strokeWidth={2} />
+            <line x1={25} y1={5} x2={5} y2={25} stroke={AURORA.textDim} strokeWidth={2} />
           </svg>
         </div>
       )}
@@ -385,7 +365,7 @@ const ChannelStrip: React.FC<{
       <div style={{ display: 'flex', alignItems: 'center', gap: 3, width: '100%', paddingTop: 2 }}>
         <div style={{
           width: 5, height: 5, borderRadius: '50%', background: track.color,
-          boxShadow: `0 0 5px ${hexToRgba(track.color, 0.6)}`,
+          boxShadow: 'none',
         }} />
         <span style={{
           fontSize: 8, fontWeight: 600, color: AURORA.text,
@@ -399,14 +379,14 @@ const ChannelStrip: React.FC<{
       <InsertSlots effects={effects} trackId={track.id} stripWidth={stripWidth} color={track.color} />
 
       {/* EQ curve */}
-      <EqCurve points={eqPoints} width={eqW} height={eqH} color={track.color} frame={frame} />
+      <EqCurve points={eqPoints} width={eqW} height={eqH} color={accentColor} frame={frame} />
 
       {/* Pan */}
-      <PanArc pan={track.pan} size={22} color={track.color} />
+      <PanArc pan={track.pan} size={22} color={accentColor} />
 
       {/* Fader + VU */}
       <div style={{ display: 'flex', gap: 3, alignItems: 'flex-end', flex: 1, minHeight: 0 }}>
-        <FaderVis value={track.volume} width={16} height={faderHeight} color={track.color} frame={frame} />
+        <FaderVis value={track.volume} width={16} height={faderHeight} color={accentColor} frame={frame} />
         <VUBar level={isMuted ? 0 : levelL} width={5} height={vuHeight} frame={frame} fps={fps}
           channelIndex={index} side="L" />
         <VUBar level={isMuted ? 0 : levelR} width={5} height={vuHeight} frame={frame} fps={fps}
@@ -426,14 +406,14 @@ const ChannelStrip: React.FC<{
         <div data-action="mute" data-track-id={track.id} style={{
           flex: 1, height: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
           borderRadius: 3, fontSize: 7, fontWeight: 700, fontFamily: "'Space Mono', monospace",
-          background: isMuted ? 'rgba(239,68,68,0.25)' : 'rgba(120,200,220,0.06)',
+          background: isMuted ? 'rgba(239,68,68,0.18)' : 'rgba(255,255,255,0.05)',
           border: `1px solid ${isMuted ? 'rgba(239,68,68,0.5)' : AURORA.border}`,
           color: isMuted ? '#ef4444' : AURORA.textMuted, cursor: 'pointer',
         }}>M</div>
         <div data-action="solo" data-track-id={track.id} style={{
           flex: 1, height: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
           borderRadius: 3, fontSize: 7, fontWeight: 700, fontFamily: "'Space Mono', monospace",
-          background: isSoloed ? 'rgba(251,191,36,0.25)' : 'rgba(120,200,220,0.06)',
+          background: isSoloed ? 'rgba(214,190,138,0.22)' : 'rgba(255,255,255,0.05)',
           border: `1px solid ${isSoloed ? 'rgba(251,191,36,0.5)' : AURORA.border}`,
           color: isSoloed ? AURORA.gold : AURORA.textMuted, cursor: 'pointer',
         }}>S</div>
@@ -463,23 +443,22 @@ const MasterChannel: React.FC<{
     <div style={{
       width: stripWidth, height: stripHeight, display: 'flex', flexDirection: 'column',
       alignItems: 'center', gap: 6, padding: 8,
-      background: 'rgba(120,200,220,0.08)', border: '1px solid rgba(120,200,220,0.2)',
+      background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.14)',
       borderRadius: 8, backdropFilter: 'blur(24px)',
       position: 'relative', overflow: 'hidden', flexShrink: 0,
     }}>
       <div style={{
         position: 'absolute', inset: 0,
-        background: `radial-gradient(ellipse at 50% 30%, ${hexToRgba(AURORA.cyan, washOpacity)}, transparent 70%)`,
+        background: `radial-gradient(ellipse at 50% 30%, ${hexToRgba(AURORA.text, washOpacity * 0.24)}, transparent 70%)`,
         pointerEvents: 'none',
       }} />
       <span style={{
-        fontSize: 11, fontWeight: 700, fontFamily: "'Libre Caslon Display', serif",
-        letterSpacing: '0.15em', color: AURORA.cyan,
-        textShadow: `0 0 20px ${hexToRgba(AURORA.cyan, 0.5)}, 0 0 40px ${hexToRgba(AURORA.cyan, 0.2)}`,
+        fontSize: 10, fontWeight: 700, fontFamily: "'Space Mono', monospace",
+        letterSpacing: '0.14em', color: AURORA.text,
         zIndex: 1,
       }}>MASTER</span>
       <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end', flex: 1, minHeight: 0, zIndex: 1 }}>
-        <FaderVis value={0.82} width={26} height={faderHeight} color={AURORA.cyan} frame={frame} />
+        <FaderVis value={0.82} width={26} height={faderHeight} color={AURORA.text} frame={frame} />
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
           <VUBar level={levelL} width={8} height={vuHeight} frame={frame} fps={fps} channelIndex={100} side="L" />
           <span style={{ fontSize: 6, color: AURORA.textMuted }}>L</span>
@@ -496,15 +475,14 @@ const MasterChannel: React.FC<{
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={{ fontSize: 7, color: AURORA.textMuted }}>LUFS</span>
           <span style={{
-            fontSize: 11, fontWeight: 700, color: AURORA.cyan,
+            fontSize: 11, fontWeight: 700, color: AURORA.text,
             fontFamily: "'Space Mono', monospace",
-            textShadow: `0 0 8px ${hexToRgba(AURORA.cyan, 0.4)}`,
           }}>{lufs.toFixed(1)}</span>
         </div>
         <div style={{ marginTop: 3, height: 4, background: 'rgba(0,0,0,0.3)', borderRadius: 2 }}>
           <div style={{
             height: '100%', width: `${Math.max(0, Math.min(100, lufsNorm * 100))}%`,
-            background: AURORA.teal, borderRadius: 2, opacity: 0.7,
+            background: AURORA.textDim, borderRadius: 2, opacity: 0.7,
           }} />
         </div>
       </div>
@@ -534,11 +512,9 @@ const SpectrumBar = React.memo<{
     <svg width={width} height={height}>
       <defs>
         <linearGradient id="spectrum-aurora" x1="0" y1="0" x2="1" y2="0">
-          <stop offset="0%" stopColor={AURORA.cyan} />
-          <stop offset="25%" stopColor={AURORA.teal} />
-          <stop offset="50%" stopColor={AURORA.green} />
-          <stop offset="75%" stopColor={AURORA.purple} />
-          <stop offset="100%" stopColor={AURORA.pink} />
+          <stop offset="0%" stopColor="#666b73" />
+          <stop offset="60%" stopColor="#b9bfc7" />
+          <stop offset="100%" stopColor="#f0f3f6" />
         </linearGradient>
       </defs>
 
@@ -594,18 +570,18 @@ const ConstellationGrid = React.memo<{
       style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}>
       {Array.from({ length: cols }, (_, i) => (
         <line key={`v${i}`} x1={i * gridSpacing} y1={0} x2={i * gridSpacing} y2={height}
-          stroke={AURORA.cyan} strokeWidth={0.5} opacity={baseOpacity} />
+          stroke={AURORA.text} strokeWidth={0.5} opacity={baseOpacity} />
       ))}
       {Array.from({ length: rows }, (_, i) => (
         <line key={`h${i}`} x1={0} y1={i * gridSpacing} x2={width} y2={i * gridSpacing}
-          stroke={AURORA.cyan} strokeWidth={0.5} opacity={baseOpacity} />
+          stroke={AURORA.text} strokeWidth={0.5} opacity={baseOpacity} />
       ))}
       {Array.from({ length: 5 }, (_, i) => {
         const x = 100 + i * 150 + Math.sin(frame * 0.02 + i * 1.3) * 10;
         const rayOpacity = 0.02 + loudness * 0.04;
         return (
           <rect key={`ray${i}`} x={x - 2} y={0} width={4} height={height}
-            fill={AURORA.cyan} opacity={rayOpacity} rx={2} />
+            fill={AURORA.text} opacity={rayOpacity * 0.7} rx={2} />
         );
       })}
     </svg>
@@ -664,8 +640,7 @@ export const LiveMixer: React.FC<LiveMixerProps> = ({
 
       <div style={{
         position: 'absolute', inset: 0,
-        background: `radial-gradient(ellipse at 30% 20%, ${hexToRgba(AURORA.teal, washOpacity)}, transparent 60%),
-                     radial-gradient(ellipse at 70% 80%, ${hexToRgba(AURORA.purple, washOpacity * 0.7)}, transparent 60%)`,
+        background: `radial-gradient(ellipse at 30% 20%, ${hexToRgba(AURORA.text, washOpacity * 0.16)}, transparent 60%)`,
         pointerEvents: 'none',
       }} />
 
@@ -710,7 +685,7 @@ export const LiveMixer: React.FC<LiveMixerProps> = ({
         position: 'absolute', bottom: 0, left: 0, right: 0,
         height: layout.spectrumHeight,
         borderTop: `1px solid ${AURORA.border}`,
-        background: 'rgba(0,0,0,0.3)',
+        background: 'rgba(255,255,255,0.02)',
       }}>
         <SpectrumBar
           frame={frame} fps={fps} width={compWidth} height={layout.spectrumHeight}
@@ -724,9 +699,9 @@ export const LiveMixer: React.FC<LiveMixerProps> = ({
         style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}>
         <defs>
           <linearGradient id="send-beam" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor={AURORA.cyan} stopOpacity={0} />
-            <stop offset="50%" stopColor={AURORA.cyan} stopOpacity={0.3} />
-            <stop offset="100%" stopColor={AURORA.cyan} stopOpacity={0} />
+            <stop offset="0%" stopColor={AURORA.text} stopOpacity={0} />
+            <stop offset="50%" stopColor={AURORA.text} stopOpacity={0.18} />
+            <stop offset="100%" stopColor={AURORA.text} stopOpacity={0} />
           </linearGradient>
         </defs>
         {tracks.map((track, i) => {
@@ -749,7 +724,7 @@ export const LiveMixer: React.FC<LiveMixerProps> = ({
               <line
                 key={`send-${src.id}-${track.id}`}
                 x1={srcX} y1={beamY} x2={busX} y2={beamY + 10}
-                stroke={AURORA.cyan} strokeWidth={hasSend ? 1.5 : 0.5}
+                stroke={AURORA.text} strokeWidth={hasSend ? 1.25 : 0.5}
                 opacity={beamOpacity}
               />
             );

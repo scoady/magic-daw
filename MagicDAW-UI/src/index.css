@@ -407,3 +407,107 @@ html, body, #root {
 .knob-container:active {
   cursor: grabbing;
 }
+
+/* ── DAW Shell Theme ───────────────────────────────────────────────────── */
+
+.daw-shell {
+  --bg: #0a0a0b;
+  --bg-deep: #050506;
+  --surface: rgba(255, 255, 255, 0.035);
+  --surface-hover: rgba(255, 255, 255, 0.065);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-bright: rgba(255, 255, 255, 0.18);
+  --text: #f2f3f5;
+  --text-dim: #b0b5bc;
+  --text-muted: #727780;
+  --accent: #d8dbe1;
+  --accent-soft: rgba(216, 219, 225, 0.1);
+  --accent-border: rgba(216, 219, 225, 0.24);
+  --success: #8dd4b4;
+  --warning: #d6be8a;
+  --danger: #ef6b6b;
+}
+
+.daw-shell .aurora-bg {
+  background:
+    radial-gradient(circle at 18% 14%, rgba(255, 255, 255, 0.04), transparent 28%),
+    radial-gradient(circle at 82% 10%, rgba(255, 255, 255, 0.03), transparent 30%),
+    linear-gradient(180deg, rgba(255,255,255,0.015), transparent 18%),
+    var(--bg);
+}
+
+.daw-shell .aurora-orb {
+  display: none;
+}
+
+.daw-shell .noise-overlay {
+  opacity: 0.018;
+}
+
+.daw-shell .scanlines {
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 3px,
+    rgba(255, 255, 255, 0.006) 3px,
+    rgba(255, 255, 255, 0.006) 4px
+  );
+}
+
+.daw-shell .glass-panel {
+  backdrop-filter: blur(16px);
+  background: var(--surface);
+  border-color: var(--border);
+  border-radius: 7px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.daw-shell .glass-button {
+  backdrop-filter: blur(10px);
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: var(--text-dim);
+  box-shadow: none;
+}
+
+.daw-shell .glass-button:hover {
+  background: rgba(255, 255, 255, 0.055);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--text);
+}
+
+.daw-shell .glass-button.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+  box-shadow: none;
+}
+
+.daw-shell .transport-bar {
+  background: rgba(6, 6, 7, 0.92);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.daw-shell .track-item.selected {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.daw-shell .view-tab {
+  color: var(--text-muted);
+}
+
+.daw-shell .view-tab:hover {
+  color: var(--text-dim);
+}
+
+.daw-shell .view-tab.active {
+  color: var(--text);
+  border-bottom-color: rgba(255, 255, 255, 0.72);
+  text-shadow: none;
+}
+
+.daw-shell .bottom-panel {
+  background: rgba(6, 6, 7, 0.92);
+  border-top-color: rgba(255, 255, 255, 0.08);
+}

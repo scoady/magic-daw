@@ -229,11 +229,11 @@ export const MixView: React.FC<MixViewProps> = ({
     return (
       <div style={{
         position: 'absolute', bottom: 65, left: 8, right: 8,
-        background: 'rgba(10,15,26,0.95)', border: '1px solid rgba(120,200,220,0.2)',
+        background: 'rgba(10,10,11,0.96)', border: '1px solid rgba(255,255,255,0.1)',
         borderRadius: 8, padding: 10, zIndex: 20, backdropFilter: 'blur(20px)',
         maxHeight: 200, overflowY: 'auto',
       }}>
-        <div style={{ fontSize: 10, color: '#67e8f9', marginBottom: 6, fontWeight: 700 }}>
+        <div style={{ fontSize: 10, color: 'var(--text)', marginBottom: 6, fontWeight: 700 }}>
           {track.name} — Effects
         </div>
         {chain.map((effect, idx) => {
@@ -241,7 +241,7 @@ export const MixView: React.FC<MixViewProps> = ({
           return (
             <div key={effect.id} style={{ marginBottom: 8 }}>
               <div style={{
-                fontSize: 9, color: effect.bypassed ? '#64748b' : '#e2e8f0',
+                fontSize: 9, color: effect.bypassed ? 'var(--text-muted)' : 'var(--text)',
                 fontWeight: 600, marginBottom: 3,
                 textDecoration: effect.bypassed ? 'line-through' : 'none',
               }}>
@@ -249,16 +249,16 @@ export const MixView: React.FC<MixViewProps> = ({
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {params.map(p => (
-                  <label key={p.name} style={{ display: 'flex', flexDirection: 'column', gap: 1, fontSize: 7, color: '#94a3b8' }}>
+                  <label key={p.name} style={{ display: 'flex', flexDirection: 'column', gap: 1, fontSize: 9, color: 'var(--text-dim)' }}>
                     {p.label}
                     <input
                       type="range"
                       min={p.min} max={p.max} step={p.step}
                       value={effect.params[p.name] ?? (p.min + p.max) / 2}
                       onChange={(e) => setEffectParam(selectedEffectTrack, idx, p.name, parseFloat(e.target.value))}
-                      style={{ width: 60, height: 10, accentColor: '#67e8f9' }}
+                      style={{ width: 60, height: 10, accentColor: '#d8dbe1' }}
                     />
-                    <span style={{ fontSize: 6, color: '#64748b' }}>
+                    <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>
                       {(effect.params[p.name] ?? 0).toFixed(1)}{p.unit ? ` ${p.unit}` : ''}
                     </span>
                   </label>
@@ -279,7 +279,7 @@ export const MixView: React.FC<MixViewProps> = ({
         height: '100%',
         position: 'relative',
         overflow: 'hidden',
-        background: '#0a0f1a',
+        background: '#070708',
       }}
     >
       {/* Remotion Player — purely visual layer */}
@@ -319,7 +319,7 @@ export const MixView: React.FC<MixViewProps> = ({
       {showEffectDropdown && (
         <div style={{
           position: 'absolute', top: 40, left: '50%', transform: 'translateX(-50%)',
-          background: 'rgba(10,15,26,0.95)', border: '1px solid rgba(120,200,220,0.3)',
+          background: 'rgba(10,10,11,0.96)', border: '1px solid rgba(255,255,255,0.1)',
           borderRadius: 6, padding: 4, zIndex: 30, backdropFilter: 'blur(20px)',
         }}>
           {EFFECT_TYPES.map(type => (
@@ -329,10 +329,10 @@ export const MixView: React.FC<MixViewProps> = ({
               data-track-id={showEffectDropdown}
               data-effect-type={type}
               style={{
-                padding: '4px 12px', fontSize: 10, color: '#e2e8f0', cursor: 'pointer',
+                padding: '4px 12px', fontSize: 10, color: 'var(--text)', cursor: 'pointer',
                 borderRadius: 3,
               }}
-              onMouseEnter={(e) => { (e.target as HTMLElement).style.background = 'rgba(120,200,220,0.15)'; }}
+              onMouseEnter={(e) => { (e.target as HTMLElement).style.background = 'rgba(255,255,255,0.06)'; }}
               onMouseLeave={(e) => { (e.target as HTMLElement).style.background = 'transparent'; }}
             >
               {EFFECT_DISPLAY_NAMES[type]}

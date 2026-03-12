@@ -1,0 +1,64 @@
+{
+  "envelope": {
+    "attack": 0.01,
+    "decay": 0.18,
+    "release": 0.28,
+    "sustain": 0.72
+  },
+  "filter": {
+    "cutoff": 9800,
+    "envAmount": 0,
+    "keyTracking": 0.22,
+    "resonance": 0.12,
+    "type": "lowpass"
+  },
+  "name": "Sampler QA Demo",
+  "pitchBendRange": 2,
+  "polyphony": 12,
+  "portamento": null,
+  "roundRobin": false,
+  "type": "sampler",
+  "velocityLayers": 2,
+  "version": 1,
+  "zones": [
+    {
+      "highNote": 62,
+      "highVelocity": 80,
+      "id": "2A85B977-10B0-47D1-8863-9C22DB7C00F1",
+      "loopEnd": 32000,
+      "loopStart": 18000,
+      "lowNote": 58,
+      "lowVelocity": 0,
+      "rootNote": 60,
+      "sampleFile": "samples/qa_attack_soft.wav",
+      "trigger": "attack",
+      "tuning": 0
+    },
+    {
+      "highNote": 62,
+      "highVelocity": 127,
+      "id": "A8D756C0-B54C-4C79-A856-1BB5A11E2B98",
+      "loopEnd": 32000,
+      "loopStart": 18000,
+      "lowNote": 58,
+      "lowVelocity": 81,
+      "rootNote": 60,
+      "sampleFile": "samples/qa_attack_hard.wav",
+      "trigger": "attack",
+      "tuning": 0
+    },
+    {
+      "highNote": 62,
+      "highVelocity": 127,
+      "id": "A3EAC0D7-341E-4C6E-9F6B-4F4754629F24",
+      "loopEnd": null,
+      "loopStart": null,
+      "lowNote": 58,
+      "lowVelocity": 0,
+      "rootNote": 60,
+      "sampleFile": "samples/qa_release.wav",
+      "trigger": "release",
+      "tuning": 0
+    }
+  ]
+}

@@ -132,12 +132,17 @@ export const BridgeMessages = {
   SET_TRACK_MUTE: 'set_track_mute',
   SET_TRACK_SOLO: 'set_track_solo',
   SET_TRACK_EFFECT: 'set_track_effect',
+  SET_TRACK_AUTOMATION: 'set_track_automation',
   MIDI_NOTE_ON: 'midi_note_on',
   MIDI_NOTE_OFF: 'midi_note_off',
   AI_REQUEST: 'ai_request',
+  AI_RAW_REQUEST: 'ai.request',
+  AI_LIST_MODELS: 'ai.listModels',
+  AI_CHECK_STATUS: 'ai.checkStatus',
   EXPORT_AU: 'export_au',
   EXPORT_AUDIO: 'export_audio',
   SAVE_PROJECT: 'project.save',
+  SAVE_PROJECT_AS: 'project.saveAs',
   LOAD_PROJECT: 'project.load',
   NEW_PROJECT: 'project.new',
   UPDATE_PROJECT_STATE: 'project.updateState',
@@ -158,6 +163,7 @@ export const BridgeMessages = {
   SPLIT_CLIP: 'split_clip',
   SET_CLIP_LOOP: 'set_clip_loop',
   EDIT_CLIP: 'edit_clip',
+  HARMONIC_LAB_COMMIT: 'harmonic_lab_commit',
 
   // Transport Position (JS -> Swift)
   SET_POSITION: 'set_position',
@@ -168,6 +174,7 @@ export const BridgeMessages = {
   SET_LOOP_REGION: 'set_loop_region',
   SET_COUNT_IN: 'set_count_in',
   ARM_TRACK: 'arm_track',
+  SELECT_TRACK: 'select_track',
   SET_QUANTIZE: 'set_quantize',
   SET_MIDI_OUTPUT: 'set_midi_output',
 
@@ -181,10 +188,25 @@ export const BridgeMessages = {
   INSTRUMENT_LOAD_SAMPLE: 'instrument.loadSample',
   INSTRUMENT_UPDATE_ADSR: 'instrument.updateADSR',
   INSTRUMENT_UPDATE_FILTER: 'instrument.updateFilter',
+  INSTRUMENT_UPDATE_OUTPUT: 'instrument.updateOutput',
   INSTRUMENT_IMPORT_SAMPLE: 'instrument.importSample',
+  INSTRUMENT_IMPORT_SAMPLE_FOLDER: 'instrument.importSampleFolder',
+  INSTRUMENT_IMPORT_SFZ: 'instrument.importSFZ',
   INSTRUMENT_PREVIEW_NOTE: 'instrument.previewNote',
   INSTRUMENT_DESIGN_SOUND: 'instrument.designSound',
   INSTRUMENT_MAP_ZONES: 'instrument.mapZones',
+  INSTRUMENT_SAVE_RACK: 'instrument.saveRack',
+  INSTRUMENT_ASSIGN_PREVIEW_RACK: 'instrument.assignPreviewRack',
+  INSTRUMENT_LIST_SAMPLE_RACKS: 'instrument.listSampleRacks',
+  INSTRUMENT_LOAD_SAMPLE_RACK: 'instrument.loadSampleRack',
+  INSTRUMENT_LOAD_BUILTIN_DEMO: 'instrument.loadBuiltinDemo',
+  INSTRUMENT_SEARCH_LOCAL: 'instrument.searchLocal',
+  INSTRUMENT_REFINE_SEARCH: 'instrument.refineSearch',
+  INSTRUMENT_LOAD_DISCOVERED: 'instrument.loadDiscovered',
+  INSTRUMENT_PICK_SEARCH_ROOT: 'instrument.pickSearchRoot',
+  INSTRUMENT_LIST_SEARCH_ROOTS: 'instrument.listSearchRoots',
+  INSTRUMENT_REMOVE_SEARCH_ROOT: 'instrument.removeSearchRoot',
+  INSTRUMENT_REINDEX_SEARCH: 'instrument.reindexSearch',
 
   // Instrument Factory (JS -> Swift)
   INSTRUMENT_CREATE_PRESET: 'instrument.createPreset',
@@ -200,8 +222,15 @@ export const BridgeMessages = {
   DISCONNECT_NODES: 'disconnect_nodes',
   SET_NODE_PARAM: 'set_node_param',
   MOVE_NODE: 'move_node',
+  PLUGIN_SYNC_GRAPH: 'plugin_sync_graph',
+  PLUGIN_LOAD_TEMPLATE: 'plugin_load_template',
   PLUGIN_PREVIEW_START: 'plugin_preview_start',
   PLUGIN_PREVIEW_STOP: 'plugin_preview_stop',
+  PLUGIN_PREVIEW_NOTE: 'plugin.previewNote',
+  PLUGIN_SAVE_GRAPH: 'plugin.saveGraph',
+  PLUGIN_LIST_SAVED: 'plugin.listSaved',
+  PLUGIN_LOAD_SAVED: 'plugin.loadSaved',
+  PLUGIN_ASSIGN_TO_TRACK: 'plugin.assignToTrack',
   EXPORT_AUV3: 'export_auv3',
   AI_GENERATE_PATCH: 'ai_generate_patch',
 
@@ -234,12 +263,16 @@ export const BridgeMessages = {
   CHORD_SUGGESTIONS: 'chord_suggestions',
   AI_CHAT_RESULT: 'ai_chat_result',
   OLLAMA_STATUS: 'ollama_status',
+  AI_MODELS: 'ai_models',
+  HARMONIC_LAB_COMMIT_RESULT: 'harmonic_lab_commit_result',
   PLUGIN_GRAPH_UPDATE: 'plugin_graph_update',
   PLUGIN_VALIDATION: 'plugin_validation',
   PLUGIN_PREVIEW_LEVELS: 'plugin_preview_levels',
   PLUGIN_EXPORT_PROGRESS: 'plugin_export_progress',
   PLUGIN_EXPORT_RESULT: 'plugin_export_result',
   PLUGIN_AI_RESULT: 'plugin_ai_result',
+  PLUGIN_SAVED_LIST: 'plugin_saved_list',
+  PLUGIN_SAVED: 'plugin_saved',
   SONG_MATCHES: 'song_matches',
 
   // Swift -> JS (Effects Chain)
@@ -278,6 +311,11 @@ export const BridgeMessages = {
   INSTRUMENT_ERROR: 'instrument_error',
   INSTRUMENT_AI_PATCH: 'instrument_ai_patch',
   INSTRUMENT_AI_STATUS: 'instrument_ai_status',
+  INSTRUMENT_SAMPLE_RACK_LIST: 'instrument_sample_rack_list',
+  INSTRUMENT_SAMPLE_RACK_LOADED: 'instrument_sample_rack_loaded',
+  INSTRUMENT_SEARCH_RESULTS: 'instrument_search_results',
+  INSTRUMENT_SEARCH_REFINED: 'instrument_search_refined',
+  INSTRUMENT_SEARCH_ROOTS: 'instrument_search_roots',
 
   // Swift -> JS (Instrument Factory)
   INSTRUMENT_PRESET_CREATED: 'instrument_preset_created',
@@ -302,6 +340,9 @@ export interface InstrumentZone {
   rootNote: number;
   lowNote: number;
   highNote: number;
+  sampleFile?: string;
+  lowVelocity?: number;
+  highVelocity?: number;
 }
 
 export interface InstrumentLoadedPayload {
@@ -320,6 +361,61 @@ export interface InstrumentWaveformPayload {
 
 export interface InstrumentZonesPayload {
   zones: InstrumentZone[];
+}
+
+export interface SampleRackSummary {
+  name: string;
+  path: string;
+  zoneCount: number;
+  sampleCount: number;
+  source?: 'built-in' | 'library';
+}
+
+export interface SavedPluginGraphSummary {
+  name: string;
+  path: string;
+  category: 'instrument' | 'effect';
+  description: string;
+  version: string;
+  modifiedAt: string;
+}
+
+export interface SampleRackLoadedPayload {
+  name: string;
+  path: string;
+  source?: 'built-in' | 'library';
+  outputGain: number;
+  outputPan: number;
+  samples: Array<{
+    name: string;
+    rootNote: number;
+    lowNote: number;
+    highNote: number;
+    waveform: number[];
+  }>;
+  zones: InstrumentZone[];
+}
+
+export interface SampleSearchResult {
+  name: string;
+  path: string;
+  kind: 'sample' | 'sfz' | 'rack';
+  source: string;
+  extensionName: string;
+  family: string;
+  contentType: string;
+  readiness: string;
+  packageName: string;
+  packageScore: number;
+  nearbySampleCount: number;
+  sizeBytes: number;
+  matchScore: number;
+}
+
+export interface SampleSearchRoot {
+  path: string;
+  name: string;
+  source: string;
 }
 
 // ── Instrument Helper Functions ───────────────────────────────────────────
@@ -357,9 +453,49 @@ export function updateFilter(params: {
   sendToSwift(BridgeMessages.INSTRUMENT_UPDATE_FILTER, params);
 }
 
+/** Update sampler output shaping. */
+export function updateInstrumentOutput(params: {
+  gain?: number;
+  pan?: number;
+}): void {
+  sendToSwift(BridgeMessages.INSTRUMENT_UPDATE_OUTPUT, params);
+}
+
 /** Open a native file dialog to import an audio sample. */
 export function importSample(): void {
   sendToSwift(BridgeMessages.INSTRUMENT_IMPORT_SAMPLE, {});
+}
+
+export function importSampleFolder(): void {
+  sendToSwift(BridgeMessages.INSTRUMENT_IMPORT_SAMPLE_FOLDER, {});
+}
+
+export function importSFZ(): void {
+  sendToSwift(BridgeMessages.INSTRUMENT_IMPORT_SFZ, {});
+}
+
+export function searchLocalSamples(query: string): void {
+  sendToSwift(BridgeMessages.INSTRUMENT_SEARCH_LOCAL, { query });
+}
+
+export function refineSampleSearch(query: string, model = 'qwen2.5:14b'): void {
+  sendToSwift(BridgeMessages.INSTRUMENT_REFINE_SEARCH, { query, model });
+}
+
+export function pickSampleSearchRoot(): void {
+  sendToSwift(BridgeMessages.INSTRUMENT_PICK_SEARCH_ROOT, {});
+}
+
+export function listSampleSearchRoots(): void {
+  sendToSwift(BridgeMessages.INSTRUMENT_LIST_SEARCH_ROOTS, {});
+}
+
+export function removeSampleSearchRoot(path: string): void {
+  sendToSwift(BridgeMessages.INSTRUMENT_REMOVE_SEARCH_ROOT, { path });
+}
+
+export function reindexSampleSearch(): void {
+  sendToSwift(BridgeMessages.INSTRUMENT_REINDEX_SEARCH, {});
 }
 
 /** Preview a note on the sampler (auto note-off after 0.5s). */
